@@ -6,6 +6,7 @@ import {
   rollupDailyToMonthly,
   type DailyTemp,
 } from '../src/lib/weather/openMeteo';
+import { monthlyTempByYm } from '../src/lib/weather/monthlyTemp';
 
 describe('geocodeQuery (hand-calculated)', () => {
   it('prefers a US ZIP when present', () => {
@@ -105,6 +106,49 @@ describe('rollupDailyToMonthly (hand-calculated)', () => {
 
   it('returns [] for no input', () => {
     expect(rollupDailyToMonthly([])).toEqual([]);
+  });
+});
+
+describe('monthlyTempByYm precedence (hand-calculated)', () => {
+  // Daily means: Jan 30/34 -> avg 32 ; Feb 50/60 -> avg 55.
+  const daily: DailyTemp[] = [
+    { date: '2026-01-01', tMean: 30, tMin: null, tMax: null },
+    { date: '2026-01-31', tMean: 34, tMin: null, tMax: null },
+    { date: '2026-02-10', tMean: 50, tMin: null, tMax: null },
+    { date: '2026-02-20', tMean: 60, tMin: null, tMax: null },
+  ];
+
+  it('prefers open-meteo monthly over NG and over the daily rollup', () => {
+    const m = monthlyTempByYm(
+      [
+        { ym: 202601, avgTemperature: 99, source: 'open-meteo' }, // wins for Jan
+        { ym: 202601, avgTemperature: 11, source: 'ng' },
+      ],
+      daily
+    );
+    expect(m.get(202601)).toBe(99); // open-meteo monthly, not the 32 rollup or NG 11
+  });
+
+  it('falls back to the account daily rollup when no monthly row exists (region null/mismatch)', () => {
+    // No monthly rows at all (the region read returned []), only account daily.
+    const m = monthlyTempByYm([], daily);
+    expect(m.get(202601)).toBeCloseTo(32, 10); // (30+34)/2
+    expect(m.get(202602)).toBeCloseTo(55, 10); // (50+60)/2
+  });
+
+  it('uses NG monthly only for months the rollup does not cover', () => {
+    // Daily covers Jan+Feb; NG also has a March the daily set lacks.
+    const m = monthlyTempByYm(
+      [{ ym: 202603, avgTemperature: 40, source: 'ng' }],
+      daily
+    );
+    expect(m.get(202601)).toBeCloseTo(32, 10); // daily rollup
+    expect(m.get(202603)).toBe(40); // NG fallback fills the gap
+  });
+
+  it('open-meteo monthly is not overwritten by a later daily rollup for the same month', () => {
+    const m = monthlyTempByYm([{ ym: 202601, avgTemperature: 77, source: 'open-meteo' }], daily);
+    expect(m.get(202601)).toBe(77);
   });
 });
 

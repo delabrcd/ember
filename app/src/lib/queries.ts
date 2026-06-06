@@ -5,6 +5,7 @@ import { prisma } from '@/lib/db';
 import type { MonthRow } from '@/lib/chartSpec';
 import { deriveMonthlySeries, type DegreeDayInput } from '@/lib/series';
 import { sumDegreeDays } from '@/lib/weather/degreeDays';
+import { monthlyTempByYm } from '@/lib/weather/monthlyTemp';
 import { getSetting } from '@/lib/settings';
 import { estimateNextBill } from '@/lib/prediction';
 
@@ -33,13 +34,21 @@ export async function getMonthlySeries(accountId: number): Promise<MonthRow[]> {
     getSetting('degreeDayBaseF'),
   ]);
 
-  // One temp per month: prefer the full-history Open-Meteo rollup over NG's
-  // ~24-month fallback so the Usage-vs-weather chart spans the whole history.
-  const tempByYm = new Map<number, number>();
-  for (const w of weather) {
-    const ym = ymOf(w.monthYear);
-    if (w.source === 'open-meteo' || !tempByYm.has(ym)) tempByYm.set(ym, w.avgTemperature);
-  }
+  // One temp per month, resolved by monthlyTempByYm (pure): prefer the
+  // full-history Open-Meteo monthly rollup, then the account's own daily temps
+  // rolled up (covers a null/mismatched `region`, where the region-keyed monthly
+  // read returns nothing), then NG's ~24-month fallback. This guarantees weather
+  // surfaces from the account's own data even when `region` is null.
+  const dailyTemps = daily.map((d) => ({
+    date: ymd(d.date),
+    tMean: d.tMean,
+    tMin: d.tMin,
+    tMax: d.tMax,
+  }));
+  const tempByYm = monthlyTempByYm(
+    weather.map((w) => ({ ym: ymOf(w.monthYear), avgTemperature: w.avgTemperature, source: w.source })),
+    dailyTemps
+  );
 
   // Degree-days per bill PERIOD. Read the configurable balance point (default 65°F)
   // and, for each bill, sum HDD/CDD over [periodFrom, periodTo] — falling back to
@@ -47,7 +56,7 @@ export async function getMonthlySeries(accountId: number): Promise<MonthRow[]> {
   // temps. Keyed to ymOf(statementDate) so it lines up with the rest of the series.
   const baseF = Number.parseFloat(baseSetting ?? '');
   const base = Number.isFinite(baseF) ? baseF : 65;
-  const dailyRows = daily.map((d) => ({ date: ymd(d.date), tMean: d.tMean }));
+  const dailyRows = dailyTemps; // { date, tMean } — sumDegreeDays only reads those
   const degreeDays: DegreeDayInput[] = bills.map((b) => {
     const from = b.periodFrom ?? monthStart(b.statementDate);
     const to = b.periodTo ?? monthEnd(b.statementDate);
