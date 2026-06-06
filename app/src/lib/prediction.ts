@@ -27,15 +27,126 @@ export function predictNextBill(statementDates: Date[]): { predicted: Date | nul
   return { predicted, medianDays };
 }
 
-// Cadence: weekly heartbeat far out; daily once inside the watch window
-// (predicted - 3 days) and until a new bill arrives.
-export function computeNextCheck(now: Date, predicted: Date | null): Date {
-  if (!predicted) return new Date(now.getTime() + 7 * DAY);
-  const watchStart = new Date(predicted.getTime() - 3 * DAY);
-  if (now < watchStart) {
-    const weekly = new Date(now.getTime() + 7 * DAY);
-    return weekly < watchStart ? weekly : watchStart;
+// ---------------------------------------------------------------------------
+// Wiggle window + back-off cadence (issue #27)
+//
+// Bills are ~monthly, so polling daily for most of the month wastes requests
+// against National Grid. We instead stay idle until we're near the predicted
+// next-bill date, ramp to daily inside a window sized from the *historical*
+// statement-gap spread, then idle again after the next bill lands (which moves
+// the prediction forward and re-derives a fresh, far-out window).
+//
+// Constants (documented):
+//   MIN_WIGGLE_DAYS = 3   floor on the window half-width, so even a perfectly
+//                          regular biller still gets a +/-3-day daily window to
+//                          catch an early/late statement.
+//   WINDOW_K        = 2   how many "spreads" (MAD of the gaps) to fan the window
+//                          out by. k=2 keeps the daily window generous enough to
+//                          cover normal variability without polling all month.
+//   SPARSE_GAP_DAYS = 7   when we're *before* the window we don't poll daily;
+//                          we schedule a single sparse safety re-check this far
+//                          out (capped at windowStart) so a wildly mis-predicted
+//                          date still gets re-evaluated within a week instead of
+//                          silently sleeping until a stale windowStart.
+// ---------------------------------------------------------------------------
+
+export const MIN_WIGGLE_DAYS = 3;
+export const WINDOW_K = 2;
+export const SPARSE_GAP_DAYS = 7;
+
+// Spread of the historical statement gaps, as the Median Absolute Deviation
+// (MAD) about the median gap. MAD is robust to the occasional off-cadence bill
+// (a single 45-day gap won't blow the window open the way a stdev would) and
+// pairs naturally with the median interval we predict from. Returns 0 when
+// there aren't enough gaps to measure spread (fewer than two gaps).
+export function intervalSpreadDays(sortedAsc: Date[]): number {
+  if (sortedAsc.length < 3) return 0; // need >=2 gaps to have any spread
+  const gaps: number[] = [];
+  for (let i = 1; i < sortedAsc.length; i++) {
+    gaps.push((sortedAsc[i].getTime() - sortedAsc[i - 1].getTime()) / DAY);
   }
+  const median = (xs: number[]): number => {
+    const s = [...xs].sort((a, b) => a - b);
+    const mid = Math.floor(s.length / 2);
+    return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+  };
+  const m = median(gaps);
+  const absdev = gaps.map((g) => Math.abs(g - m));
+  return median(absdev);
+}
+
+export interface PredictionWindow {
+  predicted: Date | null;
+  windowStart: Date | null;
+  windowEnd: Date | null;
+}
+
+// Predicted next-bill date plus the daily-polling window around it. The window
+// half-width is max(MIN_WIGGLE_DAYS, WINDOW_K * spread), so a regular biller
+// gets the MIN_WIGGLE floor and an irregular one gets a window that scales with
+// its own historical variability. Returns all-null when there's no history.
+export function predictionWindow(statementDates: Date[]): PredictionWindow {
+  const { predicted } = predictNextBill(statementDates);
+  if (!predicted) return { predicted: null, windowStart: null, windowEnd: null };
+  const sorted = [...statementDates].sort((a, b) => a.getTime() - b.getTime());
+  const spread = intervalSpreadDays(sorted);
+  const halfDays = Math.max(MIN_WIGGLE_DAYS, WINDOW_K * spread);
+  return {
+    predicted,
+    windowStart: new Date(predicted.getTime() - halfDays * DAY),
+    windowEnd: new Date(predicted.getTime() + halfDays * DAY),
+  };
+}
+
+export interface NextCheckOpts {
+  // The full statement history, so the cadence can derive the daily-polling
+  // window from historical variability (the default, strong back-off). When
+  // omitted we fall back to the legacy predicted-3-days watch window so callers
+  // that only know the predicted date keep working.
+  statementDates?: Date[];
+  // Opt back into the old weekly-heartbeat-everywhere behavior (kept for
+  // compatibility / tests). Default false: we use the issue-#27 back-off.
+  legacy?: boolean;
+}
+
+// Decide when to next poll the portal. DEFAULT cadence (strong back-off):
+//   - before windowStart  -> idle: schedule a single SPARSE safety re-check
+//                            (now + SPARSE_GAP_DAYS), capped at windowStart so
+//                            we never sleep past the window opening.
+//   - inside [windowStart, windowEnd] AND beyond windowEnd (until a new bill
+//     arrives and moves the window) -> daily (now + 1 day).
+// Pure function of (now, window). With no prediction (first run / no history)
+// we fall back to a sensible "check soon" of SPARSE_GAP_DAYS out.
+//
+// `predicted` is kept as the first arg for backward compatibility; pass the
+// statement history via opts to get the windowed back-off. Without it (or with
+// legacy:true) we reproduce the original predicted-3-day / weekly behavior.
+export function computeNextCheck(now: Date, predicted: Date | null, opts?: NextCheckOpts): Date {
+  // Legacy mode (or a caller that only has the predicted date): weekly far out,
+  // daily inside predicted-3d. Preserved for compatibility and existing tests.
+  if (opts?.legacy || !opts?.statementDates) {
+    if (!predicted) return new Date(now.getTime() + (opts?.legacy ? 7 : SPARSE_GAP_DAYS) * DAY);
+    const watchStart = new Date(predicted.getTime() - MIN_WIGGLE_DAYS * DAY);
+    if (now < watchStart) {
+      if (!opts?.legacy) {
+        const sparse = new Date(now.getTime() + SPARSE_GAP_DAYS * DAY);
+        return sparse < watchStart ? sparse : watchStart;
+      }
+      const weekly = new Date(now.getTime() + 7 * DAY);
+      return weekly < watchStart ? weekly : watchStart;
+    }
+    return new Date(now.getTime() + 1 * DAY);
+  }
+
+  // Default back-off: derive the window from history.
+  const { windowStart } = predictionWindow(opts.statementDates);
+  if (!windowStart) return new Date(now.getTime() + SPARSE_GAP_DAYS * DAY);
+  if (now < windowStart) {
+    // Idle: one sparse safety re-check, never past the window opening.
+    const sparse = new Date(now.getTime() + SPARSE_GAP_DAYS * DAY);
+    return sparse < windowStart ? sparse : windowStart;
+  }
+  // Inside the window or past it with no new bill yet: poll daily.
   return new Date(now.getTime() + 1 * DAY);
 }
 

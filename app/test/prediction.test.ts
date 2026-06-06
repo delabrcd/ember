@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { computeNextCheck, estimateNextBill, medianIntervalDays, predictNextBill } from '../src/lib/prediction';
+import {
+  computeNextCheck,
+  estimateNextBill,
+  intervalSpreadDays,
+  medianIntervalDays,
+  predictNextBill,
+  predictionWindow,
+  SPARSE_GAP_DAYS,
+} from '../src/lib/prediction';
 import type { MonthRow } from '../src/lib/chartSpec';
 
 const D = (s: string) => new Date(s + 'T00:00:00Z');
@@ -75,6 +83,81 @@ describe('computeNextCheck (hand-calculated)', () => {
   it('weekly when there is no prediction', () => {
     const now = D('2026-06-08');
     expect(computeNextCheck(now, null).getTime()).toBe(now.getTime() + 7 * DAY);
+  });
+});
+
+describe('intervalSpreadDays (hand-calculated)', () => {
+  it('is 0 for a perfectly regular biller', () => {
+    // gaps all 30 -> MAD 0
+    expect(intervalSpreadDays([D('2026-01-01'), D('2026-01-31'), D('2026-03-02'), D('2026-04-01')])).toBe(0);
+  });
+  it('is the MAD (median abs deviation) of the gaps', () => {
+    // dates: +28,+30,+32,+30 -> gaps [28,30,32,30]
+    //   median gap = sorted[28,30,30,32] -> (30+30)/2 = 30
+    //   abs devs = [2,0,2,0] -> sorted [0,0,2,2] -> median (0+2)/2 = 1
+    const dates = [D('2026-01-01'), D('2026-01-29'), D('2026-02-28'), D('2026-04-01'), D('2026-05-01')];
+    expect(intervalSpreadDays(dates)).toBe(1);
+  });
+  it('is 0 with fewer than two gaps (cannot measure spread)', () => {
+    expect(intervalSpreadDays([D('2026-01-01'), D('2026-01-31')])).toBe(0);
+  });
+});
+
+describe('predictionWindow (hand-calculated)', () => {
+  it('floors the half-width at MIN_WIGGLE (3d) for a regular biller', () => {
+    // gaps all 30 -> medianInterval 30, spread 0 -> half = max(3, 2*0) = 3
+    // last 04-01 -> predicted 05-01; window [04-28, 05-04]
+    const w = predictionWindow([D('2026-01-01'), D('2026-01-31'), D('2026-03-02'), D('2026-04-01')]);
+    expect(iso(w.predicted!)).toBe('2026-05-01');
+    expect(iso(w.windowStart!)).toBe('2026-04-28');
+    expect(iso(w.windowEnd!)).toBe('2026-05-04');
+  });
+  it('scales the half-width with historical spread (k=2)', () => {
+    // gaps [28,30,32,30] -> medianInterval 30, spread (MAD) 1 -> half = max(3, 2*1) = 3
+    // (spread 1 still under the floor; bump spread to widen)
+    // Use gaps with MAD 3: [24,30,36,30] -> median 30, devs [6,0,6,0] median 3 -> half max(3,6)=6
+    //   dates: 01-01,+24=01-25,+30=02-24,+36=04-01,+30=05-01 -> predicted 05-01+30=05-31
+    //   window [05-25, 06-06]
+    const dates = [D('2026-01-01'), D('2026-01-25'), D('2026-02-24'), D('2026-04-01'), D('2026-05-01')];
+    const w = predictionWindow(dates);
+    expect(iso(w.predicted!)).toBe('2026-05-31');
+    expect(iso(w.windowStart!)).toBe('2026-05-25');
+    expect(iso(w.windowEnd!)).toBe('2026-06-06');
+  });
+  it('returns all-null with no history', () => {
+    const w = predictionWindow([]);
+    expect(w.predicted).toBeNull();
+    expect(w.windowStart).toBeNull();
+    expect(w.windowEnd).toBeNull();
+  });
+});
+
+describe('computeNextCheck back-off (issue #27, hand-calculated)', () => {
+  // Regular biller: gaps all 30 -> predicted 05-01, spread 0 -> window [04-28, 05-04].
+  const history = [D('2026-01-01'), D('2026-01-31'), D('2026-03-02'), D('2026-04-01')];
+  const predicted = D('2026-05-01');
+
+  it('far before the window: single sparse re-check SPARSE_GAP_DAYS (7d) out', () => {
+    // now 04-01, windowStart 04-28; now+7d = 04-08 < windowStart -> 04-08
+    expect(iso(computeNextCheck(D('2026-04-01'), predicted, { statementDates: history }))).toBe('2026-04-08');
+  });
+  it('just before the window: snaps to windowStart (does not overshoot it)', () => {
+    // now 04-25, windowStart 04-28; now+7d = 05-02 > windowStart -> windowStart 04-28
+    expect(iso(computeNextCheck(D('2026-04-25'), predicted, { statementDates: history }))).toBe('2026-04-28');
+  });
+  it('inside the window: daily', () => {
+    // now 04-29 >= windowStart 04-28 -> now + 1 day
+    const now = D('2026-04-29');
+    expect(computeNextCheck(now, predicted, { statementDates: history }).getTime()).toBe(now.getTime() + DAY);
+  });
+  it('past the window with no new bill yet: still daily', () => {
+    // now 05-10 > windowEnd 05-04, but no newer bill landed (history unchanged) -> daily
+    const now = D('2026-05-10');
+    expect(computeNextCheck(now, predicted, { statementDates: history }).getTime()).toBe(now.getTime() + DAY);
+  });
+  it('first run / no history: checks soon (SPARSE_GAP_DAYS out)', () => {
+    const now = D('2026-05-01');
+    expect(computeNextCheck(now, null, { statementDates: [] }).getTime()).toBe(now.getTime() + SPARSE_GAP_DAYS * DAY);
   });
 });
 
