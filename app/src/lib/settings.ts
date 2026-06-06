@@ -17,3 +17,12 @@ export async function isSchedulerEnabled(): Promise<boolean> {
   if (v === 'false') return false;
   return process.env.SCHEDULER_ENABLED !== 'false';
 }
+
+// Read-only summary of the new-bill notification config (issue #7) for the
+// Settings UI. Notifications are env-configured and off by default.
+export async function getNotifyStatus(): Promise<{ channel: string; configured: boolean; lastNotifiedStatementDate: string | null }> {
+  const { resolveChannel, LAST_NOTIFIED_KEY } = await import('@/lib/notify');
+  const channel = resolveChannel();
+  const lastNotifiedStatementDate = await getSetting(LAST_NOTIFIED_KEY);
+  return { channel, configured: channel !== 'off', lastNotifiedStatementDate };
+}

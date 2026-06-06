@@ -4,6 +4,7 @@
 import { prisma } from '@/lib/db';
 import { computeNextCheck, predictNextBill } from '@/lib/prediction';
 import { syncHistoricalWeather } from '@/lib/weather/sync';
+import { notifyNewBills } from '@/lib/notify';
 import { collect } from './collect';
 import { persist } from './persist';
 import type { ProgressFn } from './types';
@@ -64,6 +65,7 @@ export async function runScrape(
       let totalPdfs = 0;
       let accountCount = 0;
       let firstAccountId: number | undefined;
+      const scrapedAccountIds = new Set<number>();
 
       for (const pass of passes) {
         // collect() logs in (resolveCredsForLogin when a loginId is given, else
@@ -85,7 +87,24 @@ export async function runScrape(
           totalNew += summary.billsAdded;
           totalPdfs += result.pdfsDownloaded;
           accountCount += 1;
+          scrapedAccountIds.add(summary.accountId);
           if (firstAccountId === undefined) firstAccountId = summary.accountId;
+        }
+      }
+
+      // New-bill notifications (issue #7). SCHEDULED-only by default: manual
+      // refreshes stay silent. Dedupe + first-run seeding are handled inside
+      // notifyNewBills via the AppSetting watermark. Fully contained — a
+      // notification problem must never fail or slow a successful scrape.
+      if (trigger === 'SCHEDULED' && scrapedAccountIds.size > 0) {
+        try {
+          const bills = await prisma.bill.findMany({
+            where: { accountId: { in: [...scrapedAccountIds] } },
+            select: { statementDate: true, periodFrom: true, periodTo: true, currentCharges: true },
+          });
+          await notifyNewBills(bills, (m) => log(m));
+        } catch (nerr: any) {
+          log(`notify skipped: ${String(nerr?.message || nerr).slice(0, 200)}`);
         }
       }
 

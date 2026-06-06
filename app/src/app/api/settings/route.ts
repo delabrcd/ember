@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getDefaultAccount, getOverview } from '@/lib/queries';
-import { isSchedulerEnabled, setSetting } from '@/lib/settings';
+import { getNotifyStatus, isSchedulerEnabled, setSetting } from '@/lib/settings';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -10,6 +10,7 @@ export async function GET() {
   const overview = acct ? await getOverview(acct.id) : null;
   return NextResponse.json({
     schedulerEnabled: await isSchedulerEnabled(),
+    notify: await getNotifyStatus(),
     schedule: overview?.schedule ?? null,
     account: overview?.account ?? null,
     billCount: overview?.billCount ?? 0,

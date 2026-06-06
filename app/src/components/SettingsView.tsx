@@ -11,6 +11,7 @@ import { NgLoginsSection } from './NgLoginsSection';
 
 interface ServerSettings {
   schedulerEnabled: boolean;
+  notify?: { channel: string; configured: boolean; lastNotifiedStatementDate: string | null };
   schedule: { predictedNextBillDate: string | null; nextCheckAt: string | null; lastCheckedAt: string | null } | null;
   account: { accountNumber: string; serviceAddress?: string | null; region?: string | null; companyCode?: string | null; fuelTypes?: string[] } | null;
   billCount: number;
@@ -176,6 +177,25 @@ export function SettingsView() {
         <div className="flex items-center gap-3 pt-1">
           <RefreshButton onDone={loadServer} />
           <span className="text-xs text-slate-500">Manually pull the latest bills now.</span>
+        </div>
+
+        <div className="border-t border-slate-800 pt-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <div className="text-sm font-medium text-slate-200">New-bill notifications</div>
+              <div className="text-xs text-slate-500">
+                Sent once per new bill on scheduled checks. Configured via environment — off by default.
+              </div>
+            </div>
+            <span className={`pill ${server?.notify?.configured ? 'border-amber-500/60 text-amber-300' : 'opacity-60'}`}>
+              {server?.notify?.configured ? `via ${server.notify.channel}` : 'off'}
+            </span>
+          </div>
+          {server?.notify?.lastNotifiedStatementDate && (
+            <div className="mt-2 text-xs text-slate-500">
+              Last notified through statement <span className="text-slate-300">{dateLabel(server.notify.lastNotifiedStatementDate)}</span>
+            </div>
+          )}
         </div>
       </section>
 
