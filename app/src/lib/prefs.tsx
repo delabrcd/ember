@@ -15,10 +15,6 @@ export interface ChartConfig {
 export interface Prefs {
   rangeMonths: number; // 0 = all
   currencyDecimals: number;
-  // When true, the main "Energy usage" chart shows WEATHER-NORMALIZED usage
-  // (kWh per degree-day, therms per HDD) instead of raw kWh/therms. Persisted so
-  // the operator's choice sticks; the header carries the obvious on/off toggle.
-  normalizeWeather: boolean;
   order: string[];
   charts: Record<string, ChartConfig>;
 }
@@ -36,7 +32,6 @@ const baseChart = (over: Partial<ChartConfig> = {}): ChartConfig => ({
 export const DEFAULT_PREFS: Prefs = {
   rangeMonths: 0,
   currencyDecimals: 2,
-  normalizeWeather: false,
   order: CHART_SPECS.map((s) => s.id),
   charts: {
     usage: baseChart({ stacked: false }),
@@ -72,7 +67,6 @@ export function mergePrefs(saved: Partial<Prefs> | null): Prefs {
   return {
     rangeMonths: saved.rangeMonths ?? DEFAULT_PREFS.rangeMonths,
     currencyDecimals: saved.currencyDecimals ?? DEFAULT_PREFS.currencyDecimals,
-    normalizeWeather: saved.normalizeWeather ?? DEFAULT_PREFS.normalizeWeather,
     order: mergeOrder(saved.order, DEFAULT_PREFS.order),
     charts,
   };

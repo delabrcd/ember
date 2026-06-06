@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
-import { SPEC_BY_ID, usageSpec, type MonthRow } from '@/lib/chartSpec';
+import { SPEC_BY_ID, type MonthRow } from '@/lib/chartSpec';
 import { trailing12AllIn } from '@/lib/series';
 import { usePrefs } from '@/lib/prefs';
 import { ConfigurableChart } from './ConfigurableChart';
@@ -28,7 +28,7 @@ interface Bill {
 }
 
 export function Dashboard() {
-  const { prefs, patch } = usePrefs();
+  const { prefs } = usePrefs();
   const [ov, setOv] = useState<Overview | null>(null);
   const [rows, setRows] = useState<MonthRow[]>([]);
   const [bills, setBills] = useState<Bill[]>([]);
@@ -57,10 +57,6 @@ export function Dashboard() {
   const ranged = prefs.rangeMonths > 0 ? rows.slice(-prefs.rangeMonths) : rows;
   const dp = prefs.currencyDecimals;
   const visibleCharts = prefs.order.filter((id) => prefs.charts[id]?.visible && SPEC_BY_ID[id]);
-  // Is weather-normalized usage available at all? (Needs degree-days, i.e. synced
-  // weather.) Drives whether the toggle is actionable + the "no weather yet" hint.
-  const hasNormalized = rows.some((r) => r.kwhPerDegreeDay != null || r.thermsPerHdd != null);
-  const normalize = prefs.normalizeWeather && hasNormalized;
 
   return (
     <div className="space-y-6">
@@ -76,33 +72,6 @@ export function Dashboard() {
           )}
         </div>
         <div className="flex items-center gap-2">
-          {!loading && !empty && (
-            <button
-              type="button"
-              onClick={() => patch({ normalizeWeather: !prefs.normalizeWeather })}
-              disabled={!hasNormalized}
-              title={
-                hasNormalized
-                  ? 'Toggle weather-normalization of the usage chart (kWh & therms per degree-day)'
-                  : 'Weather data not synced yet — run "Check for new bills" to enable weather correction'
-              }
-              aria-pressed={normalize}
-              className={`btn items-center gap-2 border transition ${
-                normalize
-                  ? 'border-emerald-400/60 bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25'
-                  : 'border-slate-700/70 bg-slate-800/40 text-slate-300 hover:bg-slate-700'
-              } ${!hasNormalized ? 'cursor-not-allowed opacity-50' : ''}`}
-            >
-              <span
-                className={`inline-flex h-4 w-7 shrink-0 items-center rounded-full px-0.5 transition ${
-                  normalize ? 'bg-emerald-400' : 'bg-slate-600'
-                }`}
-              >
-                <span className={`h-3 w-3 rounded-full bg-white transition-transform ${normalize ? 'translate-x-3' : ''}`} />
-              </span>
-              Weather correction: <strong>{normalize ? 'ON' : 'OFF'}</strong>
-            </button>
-          )}
           <Link href="/settings" className="btn border border-slate-700/70 bg-slate-800/40 text-slate-200 hover:bg-slate-700">
             <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <circle cx="12" cy="12" r="3" />
@@ -160,22 +129,6 @@ export function Dashboard() {
             </div>
           </div>
 
-          {normalize && (
-            <div className="flex items-center gap-2 rounded-xl border border-emerald-400/40 bg-emerald-500/10 px-4 py-2 text-sm text-emerald-200">
-              <span className="inline-block h-2 w-2 rounded-full bg-emerald-400" />
-              <span>
-                <strong>Weather correction is ON.</strong> The Energy usage chart shows usage <em>per degree-day</em>
-                {' '}(kWh ÷ HDD+CDD, therms ÷ HDD) so seasonal temperature swings are factored out — flat bars mean your
-                consumption is weather-driven, not a behavior change.
-              </span>
-            </div>
-          )}
-          {prefs.normalizeWeather && !hasNormalized && (
-            <div className="rounded-xl border border-amber-400/40 bg-amber-500/10 px-4 py-2 text-sm text-amber-200">
-              Weather correction is enabled but there&apos;s no synced weather data yet. Click{' '}
-              <span className="font-medium">Check for new bills</span> to pull Open-Meteo history, then it&apos;ll apply automatically.
-            </div>
-          )}
           {ov?.nextBillEstimate && (
             <div className="card">
               <div className="card-title">
@@ -195,7 +148,7 @@ export function Dashboard() {
           ) : (
             <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
               {visibleCharts.map((id) => (
-                <ConfigurableChart key={id} spec={id === 'usage' ? usageSpec(normalize) : SPEC_BY_ID[id]} rows={ranged} />
+                <ConfigurableChart key={id} spec={SPEC_BY_ID[id]} rows={ranged} />
               ))}
             </div>
           )}

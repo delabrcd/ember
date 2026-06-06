@@ -142,32 +142,6 @@ export const CHART_SPECS: ChartSpec[] = [
 
 export const SPEC_BY_ID: Record<string, ChartSpec> = Object.fromEntries(CHART_SPECS.map((s) => [s.id, s]));
 
-// Weather-normalized variant of the headline "Energy usage" chart. Same chart id
-// ("usage") so it slots into the existing layout/config, but it plots usage
-// divided by degree-days — i.e. weather-corrected intensity — with explicit
-// units. The header toggle (prefs.normalizeWeather) swaps the usage chart to this
-// so the correction is unmistakable. Falls back to raw usage for any month that
-// has no degree-days (filter requires a normalized value).
-const USAGE_NORMALIZED_SPEC: ChartSpec = {
-  id: 'usage',
-  title: 'Energy usage — weather-normalized',
-  subtitle: 'Per degree-day: kWh ÷ (HDD+CDD), therms ÷ HDD. Flat months = weather-driven, not behavior.',
-  series: [
-    { key: 'kwhPerDegreeDay', label: 'kWh / degree-day', color: ELEC, role: 'bar', axis: 'left' },
-    { key: 'thermsPerHdd', label: 'therms / HDD', color: GAS, role: 'bar', axis: 'right' },
-  ],
-  leftFmt: num3,
-  rightFmt: num3,
-  filter: (r) => r.kwhPerDegreeDay != null || r.thermsPerHdd != null,
-};
-
-// The effective "usage" chart spec given the weather-normalization toggle. When
-// normalize is on, the headline chart shows weather-corrected intensity; off, raw
-// usage. Pure — chosen in the Dashboard from prefs.normalizeWeather.
-export function usageSpec(normalize: boolean): ChartSpec {
-  return normalize ? USAGE_NORMALIZED_SPEC : SPEC_BY_ID.usage;
-}
-
 export function chartCaps(spec: ChartSpec) {
   const bars = spec.series.filter((s) => s.role === 'bar').length;
   const hasRight = spec.series.some((s) => s.axis === 'right');
