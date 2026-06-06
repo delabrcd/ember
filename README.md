@@ -49,15 +49,16 @@ The image is published to **`ghcr.io/delabrcd/ngrid-dashboard`** by CI:
 Pin a release for reproducibility by setting `image: ghcr.io/delabrcd/ngrid-dashboard:0.1.0`
 in your compose file.
 
-**Cutting a release** is just a git tag — the version is derived from it automatically (no
-manual `package.json` bump; CI stamps `package.json` and the in-app version from the tag):
+**Cutting a release = publishing a GitHub Release.** The release creates the tag and drives
+the build; the version is derived from the release tag (no manual `package.json` bump):
 
 ```bash
-git tag v0.1.1 && git push origin v0.1.1
+gh release create v0.1.1 --generate-notes
 ```
 
-CI then publishes `0.1.1`/`0.1`/`0`/`latest`. The app footer shows the running version
-(`vX.Y.Z` for releases, `0.0.0-edge.<sha>` for `main`/`edge` builds). The first run logs
+(or GitHub UI → Releases → *Draft a new release* → choose a new tag `vX.Y.Z` → *Publish*).
+CI then publishes `0.1.1`/`0.1`/`0` and moves `:latest`. The app footer shows the running
+version (`vX.Y.Z` for releases, `0.0.0-edge.<sha>` for `main`/`edge` builds). The first run logs
 in, downloads your whole history and every PDF (a couple of minutes), then the charts
 fill in. After that it keeps itself up to date automatically.
 

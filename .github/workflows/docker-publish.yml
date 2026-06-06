@@ -3,7 +3,8 @@ name: Build and publish image
 on:
   push:
     branches: [main]
-    tags: ['v*.*.*']
+  release:
+    types: [published]   # publishing a GitHub Release creates the tag and drives the build
   workflow_dispatch:
 
 jobs:
@@ -20,10 +21,10 @@ jobs:
       - name: Resolve app version
         id: ver
         run: |
-          if [ "${{ github.ref_type }}" = "tag" ]; then
-            v="${GITHUB_REF_NAME#v}"            # release tag vX.Y.Z -> X.Y.Z
+          if [ "${{ github.event_name }}" = "release" ]; then
+            v="${{ github.event.release.tag_name }}"; v="${v#v}"   # release vX.Y.Z -> X.Y.Z
           else
-            v="0.0.0-edge.${GITHUB_SHA::7}"     # main / dev build (valid semver prerelease)
+            v="0.0.0-edge.${GITHUB_SHA::7}"                         # main / edge build
           fi
           echo "version=$v" >> "$GITHUB_OUTPUT"
           echo "APP_VERSION=$v"
@@ -40,15 +41,14 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository_owner }}/ngrid-dashboard
-          # Releases (git tag vX.Y.Z) publish X.Y.Z, X.Y, X and move :latest.
-          # Pushes to main publish :edge only. Every build also gets a :sha-xxxxxxx tag.
+          # Publishing a GitHub Release (tag vX.Y.Z) publishes X.Y.Z, X.Y, X and moves
+          # :latest. Pushes to main publish :edge only. Every build gets a :sha-xxxxxxx tag.
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-            # :latest tracks the newest stable RELEASE only — never a main/edge build.
-            # Applied only on a non-prerelease vX.Y.Z tag (excludes vX.Y.Z-rc1 etc.).
-            type=raw,value=latest,enable=${{ github.ref_type == 'tag' && !contains(github.ref_name, '-') }}
+            # :latest tracks the newest non-prerelease RELEASE only — never a main/edge build.
+            type=raw,value=latest,enable=${{ github.event_name == 'release' && !github.event.release.prerelease }}
             type=edge,branch=main
             type=sha,format=short
           # Disable the implicit auto-latest; we control :latest explicitly above.
