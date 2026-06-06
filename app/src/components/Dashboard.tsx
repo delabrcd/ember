@@ -103,7 +103,12 @@ export function Dashboard() {
     <div className="space-y-6">
       <header className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight text-slate-50">National Grid Dashboard</h1>
+          <div className="flex items-center gap-2">
+            <h1 className="text-2xl font-bold tracking-tight text-slate-50">National Grid Dashboard</h1>
+            <span className="rounded-full border border-slate-700/70 bg-slate-800/50 px-2 py-0.5 font-mono text-xs text-slate-400">
+              v{process.env.NEXT_PUBLIC_APP_VERSION || 'dev'}
+            </span>
+          </div>
           {showSwitcher ? (
             <div className="mt-2">
               <AccountSwitcher
