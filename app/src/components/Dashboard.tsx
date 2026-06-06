@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import { SPEC_BY_ID, type MonthRow } from '@/lib/chartSpec';
 import { trailing12AllIn } from '@/lib/series';
-import { usePrefs } from '@/lib/prefs';
+import { clampPage, paginate, usePrefs } from '@/lib/prefs';
 import {
   filterByYm,
   filterBillsByYm,
@@ -24,7 +24,27 @@ import { AccountSwitcher } from './AccountSwitcher';
 import { RefreshButton } from './RefreshButton';
 import { RangeControl } from './RangeControl';
 import { NgLoginsSection } from './NgLoginsSection';
-import { dateLabel, num, rate, relativeFromNow, usd } from '@/lib/format';
+import { dateLabel, estimateTooltip, num, rate, relativeFromNow, usd } from '@/lib/format';
+
+// Up to four charts per page in the paginated "fit" cockpit (issue #38), laid out
+// 2×2 so each chart is comfortably tall on a laptop.
+const CHARTS_PER_PAGE = 4;
+
+// True once the viewport is ≥1280px (Tailwind's `xl`). Drives the JS half of the
+// "fit" pagination: below xl (and on the server / first paint) we render the
+// classic scrolling stack, so there's no hydration flash and no pagination on
+// mobile. Updates on resize via matchMedia.
+function useIsXl(): boolean {
+  const [isXl, setIsXl] = useState(false);
+  useEffect(() => {
+    const mq = window.matchMedia('(min-width: 1280px)');
+    const sync = () => setIsXl(mq.matches);
+    sync();
+    mq.addEventListener('change', sync);
+    return () => mq.removeEventListener('change', sync);
+  }, []);
+  return isXl;
+}
 
 interface Overview {
   empty?: boolean;
@@ -146,6 +166,27 @@ export function Dashboard() {
 
   const visibleCharts = prefs.order.filter((id) => prefs.charts[id]?.visible && SPEC_BY_ID[id]);
   const fit = prefs.density === 'fit';
+
+  // Chart pagination (issue #38): in "fit" density at ≥xl we page through the
+  // visible charts (in the user's chosen order) up to four at a time in a 2×2 grid
+  // that fills the chart region — so charts are tall enough on a laptop and the
+  // page never scrolls. Mobile (<768), the 768–1280 band, and "comfortable"
+  // density all keep the classic scrolling stack (paginate=false below).
+  const isXl = useIsXl();
+  const paginateCharts = fit && isXl;
+  const [page, setPage] = useState(0);
+  const chartPages = paginate(visibleCharts, CHARTS_PER_PAGE);
+  const pageCount = chartPages.length;
+  // Clamp at render so the active page is always valid even if the visible set
+  // shrank since `page` was last set (e.g. the operator hid charts in Settings).
+  const activePage = clampPage(page, pageCount);
+  // Keep state in sync with the clamp so the dots/label reflect reality and a
+  // stale index doesn't linger. Cheap; only fires when it actually differs.
+  useEffect(() => {
+    if (page !== activePage) setPage(activePage);
+  }, [page, activePage]);
+  const pagedCharts = paginateCharts ? (chartPages[activePage] ?? []) : visibleCharts;
+  const showPager = paginateCharts && pageCount > 1;
 
   // First-run setup: a fresh install with no data and nothing to scrape with.
   // Show a guided welcome + the add-login flow front-and-center instead of the
@@ -290,39 +331,59 @@ export function Dashboard() {
         <>
           {/* Compact stat strip: latest / lifetime / elec / gas / est-next, side by
               side on desktop, wrapping to a 2-col grid on narrow screens. */}
-          {/* In fit density the stat strip is compacted at ≥xl (smaller padding +
-              stat type) so the three chart rows below fit in 100dvh with no page
-              scroll; the FILL_BODY_CLASSES height constant is tuned to this chrome. */}
-          <div className={`grid shrink-0 grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5 ${fit ? 'xl:[&_.card]:!p-2.5 xl:[&_.stat]:!text-xl' : ''}`}>
+          {/* In fit density the stat strip is DENSER at ≥xl (issue #38: smaller
+              padding + a smaller stat number + tighter label/sub spacing) to
+              reclaim vertical space for the now-taller two-row chart grid below;
+              the FILL_BODY_CLASSES height constant is tuned to this chrome.
+              Comfortable density stays roomier. */}
+          <div
+            className={`grid shrink-0 grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5 ${
+              fit
+                ? 'xl:[&_.card]:!p-2 xl:[&_.stat]:!text-lg xl:[&_.stat]:!leading-tight xl:[&_.card-title]:!text-[11px] xl:[&_.sub]:!mt-0'
+                : ''
+            }`}
+          >
             <div className="card !p-3">
               <div className="card-title text-xs">Latest bill</div>
               <div className="stat text-2xl">{usd(ov?.latestBill?.totalDueAmount, dp)}</div>
-              <div className="mt-0.5 text-[11px] text-slate-500">{dateLabel(ov?.latestBill?.statementDate)}</div>
+              <div className="sub mt-0.5 text-[11px] text-slate-500">{dateLabel(ov?.latestBill?.statementDate)}</div>
             </div>
             <div className="card !p-3">
               <div className="card-title text-xs">Lifetime spend</div>
               <div className="stat text-2xl">{usd(ov?.lifetimeSpend, 0)}</div>
-              <div className="mt-0.5 text-[11px] text-slate-500">across {num(ov?.billCount)} bills</div>
+              <div className="sub mt-0.5 text-[11px] text-slate-500">across {num(ov?.billCount)} bills</div>
             </div>
             <div className="card !p-3">
               <div className="card-title text-xs">Electric rate</div>
               <div className="stat text-2xl">{rate(elecAllIn)}<span className="text-sm text-slate-500">/kWh</span></div>
-              <div className="mt-0.5 text-[11px] text-slate-500">12-mo all-in · supply {rate(lastRow?.elecRateSupply)}</div>
+              <div className="sub mt-0.5 text-[11px] text-slate-500">12-mo all-in · supply {rate(lastRow?.elecRateSupply)}</div>
             </div>
             <div className="card !p-3">
               <div className="card-title text-xs">Gas rate</div>
               <div className="stat text-2xl">{rate(gasAllIn, 2)}<span className="text-sm text-slate-500">/therm</span></div>
-              <div className="mt-0.5 text-[11px] text-slate-500">12-mo all-in · supply {rate(lastRow?.gasRateSupply, 2)}</div>
+              <div className="sub mt-0.5 text-[11px] text-slate-500">12-mo all-in · supply {rate(lastRow?.gasRateSupply, 2)}</div>
             </div>
             {ov?.nextBillEstimate ? (
-              <div className="card !p-3">
+              // Compact estimate card (issue #38): just "Est. next bill", "~$X" and
+              // the short range. The verbose basis + disclaimer live behind the ⓘ
+              // tooltip so the word "estimate(d)" appears ONCE and the card no
+              // longer pushes the stat strip taller.
+              <div className="card relative !p-3">
                 <div className="card-title flex items-center gap-1 text-xs">
                   Est. next bill
-                  <span className="rounded bg-slate-800/70 px-1 py-0.5 text-[9px] uppercase tracking-wide text-slate-400">est</span>
+                  <span
+                    tabIndex={0}
+                    role="img"
+                    aria-label={estimateTooltip(ov.nextBillEstimate.basis)}
+                    title={estimateTooltip(ov.nextBillEstimate.basis)}
+                    className="inline-flex h-4 w-4 cursor-help items-center justify-center rounded-full border border-slate-600/70 text-[10px] font-semibold text-slate-400 transition hover:border-slate-400 hover:text-slate-200 focus:outline-none focus:ring-1 focus:ring-amber-500/60"
+                  >
+                    i
+                  </span>
                 </div>
                 <div className="stat text-2xl">~{usd(ov.nextBillEstimate.point, dp)}</div>
-                <div className="mt-0.5 text-[11px] text-slate-500">
-                  {usd(ov.nextBillEstimate.low, dp)}–{usd(ov.nextBillEstimate.high, dp)} · {ov.nextBillEstimate.basis}
+                <div className="sub mt-0.5 text-[11px] text-slate-500">
+                  {usd(ov.nextBillEstimate.low, dp)}–{usd(ov.nextBillEstimate.high, dp)}
                 </div>
               </div>
             ) : (
@@ -337,10 +398,60 @@ export function Dashboard() {
               (and in comfortable density) it's a normal stacking grid that scrolls
               with the page and each chart keeps its fixed 288px height. */}
           <div className="grid min-h-0 grid-cols-1 gap-3 xl:grid-cols-[1fr_minmax(300px,360px)]">
-            {/* Charts */}
+            {/* Charts. In the paginated fit view (≥xl, fit density) we render only
+                the active page's ≤4 charts in a 2-col (→ 2×2) grid that fills the
+                chart region — each chart carries its own definite height from
+                FILL_BODY_CLASSES so the two rows add up to the viewport with no
+                page scroll — and a prev/next + dots pager sits below. Everywhere
+                else it's the classic scrolling stack of every visible chart. */}
             {visibleCharts.length === 0 ? (
               <div className="card text-sm text-slate-400">
                 All charts are hidden. Enable them in <Link href="/settings" className="text-amber-400">Settings</Link>.
+              </div>
+            ) : paginateCharts ? (
+              <div className="flex min-h-0 flex-col gap-2">
+                <div className="grid min-h-0 flex-1 grid-cols-2 gap-2">
+                  {pagedCharts.map((id) => (
+                    <div key={id}>
+                      <ConfigurableChart spec={SPEC_BY_ID[id]} rows={ranged} fill height={288} />
+                    </div>
+                  ))}
+                </div>
+                {showPager && (
+                  <div className="flex shrink-0 items-center justify-center gap-3 pt-0.5">
+                    <button
+                      type="button"
+                      aria-label="Previous charts"
+                      onClick={() => setPage((p) => clampPage(p - 1, pageCount))}
+                      className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-slate-700/70 bg-slate-800/40 text-slate-300 transition hover:bg-slate-700 hover:text-white"
+                    >
+                      <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="m15 18-6-6 6-6" />
+                      </svg>
+                    </button>
+                    <div className="flex items-center gap-1.5" aria-hidden>
+                      {chartPages.map((_, i) => (
+                        <span
+                          key={i}
+                          className={`h-1.5 w-1.5 rounded-full transition ${i === activePage ? 'bg-amber-400' : 'bg-slate-600'}`}
+                        />
+                      ))}
+                    </div>
+                    <span className="min-w-[3rem] text-center text-xs tabular-nums text-slate-400">
+                      {activePage + 1} / {pageCount}
+                    </span>
+                    <button
+                      type="button"
+                      aria-label="Next charts"
+                      onClick={() => setPage((p) => clampPage(p + 1, pageCount))}
+                      className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-slate-700/70 bg-slate-800/40 text-slate-300 transition hover:bg-slate-700 hover:text-white"
+                    >
+                      <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="m9 18 6-6-6-6" />
+                      </svg>
+                    </button>
+                  </div>
+                )}
               </div>
             ) : (
               <div className={`grid min-h-0 grid-cols-1 gap-3 md:grid-cols-2 ${fit ? 'xl:gap-2' : ''}`}>

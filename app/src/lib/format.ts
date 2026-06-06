@@ -36,3 +36,12 @@ export function relativeFromNow(iso: string | null | undefined): string {
 
 export const dateLabel = (iso: string | null | undefined): string =>
   !iso ? '—' : new Date(iso).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+
+// The verbose next-bill-estimate detail moved behind an ⓘ tooltip (issue #38) so
+// the card itself stays compact and the word "estimate(d)" is stated ONCE. The
+// basis (already a human-readable projection note) is folded into a single
+// disclaimer sentence. PURE — unit-tested. Exported for the cockpit and tests.
+export const estimateTooltip = (basis: string | null | undefined): string => {
+  const b = (basis ?? '').trim();
+  return b ? `Estimated from ${b}. Not a real charge.` : 'Estimated. Not a real charge.';
+};

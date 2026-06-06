@@ -161,29 +161,32 @@ const CloseIcon = (
 // Recharts measured 0 and drew an empty chart (the regression we're fixing).
 // Instead a wrapper carries a concrete height:
 //   • <1280 (single col / 2-col, page scrolls): fixed `h-[16rem]` → 256px plots.
-//   • ≥1280 "fit"  (no page scroll): a 100dvh-derived height. The main view is six
-//     charts in a 2-col grid (3 rows), so each body is ≈ (100dvh − chrome)/3. The
-//     constant is tuned against Dashboard's compact fit chrome so at 1280×720
-//     three chart rows + the header/control/stat strip fit with NO page scroll
-//     (plot heights grow with the viewport — see the constant below for figures).
+//   • ≥1280 "fit"  (no page scroll): a 100dvh-derived height. The main view now
+//     PAGINATES the visible charts up to four at a time in a 2×2 grid (issue #38),
+//     so the chart region has just TWO rows and each body is ≈ (100dvh − chrome)/2
+//     — roughly double the old three-row height, so each chart is comfortably tall
+//     on a laptop (~720–800px viewport) instead of squashed.
 // `height` is the fixed height for the classic, non-fill layout (comfortable
 // density and <xl both go through that path with a definite px height already).
 //
 // The classes apply to a wrapper the chart body fills at 100%, so charts stay
 // declarative — we only change the box they draw into.
 // The subtracted constant C = total non-plot chrome at ≥xl fit (page padding +
-// header + control strip + compact stat strip + all gaps + the 3 chart cards' own
-// padding/headers), so (100dvh − C) is the height left for the three chart PLOT
-// areas and each body = (100dvh − C)/3. With this form the page's total height is
-// exactly 100dvh − C + chrome, so NO page scroll requires C ≥ real chrome. The
-// measured compact-fit chrome is ≈20.6rem; we use 21rem (21.5rem at 2xl for the
-// slightly larger type) for a small safety margin so it never clips. Plot heights:
-// ≈128px at 720, ≈158px at 810, ≈218px at 900, ≈278px at 1080 — readable, growing
-// with the viewport, and never scrolling. (A taller ~150px floor at exactly 720px
-// is geometrically impossible with six charts in three rows plus the stat strip,
-// short of dropping the stat strip or a 2-row chart layout — out of scope here.)
+// header + control strip + the now-DENSER stat strip + the page-nav bar + all gaps
+// + the 2 chart cards' own padding/headers), so (100dvh − C) is the height left
+// for the two chart PLOT rows and each body = (100dvh − C)/2. With this form the
+// page's total height is exactly 100dvh − C + chrome, so NO page scroll requires
+// C ≥ real chrome. The denser stat cards reclaim ~1.5rem versus v0.18.0 but the
+// new page-nav bar (~2.5rem incl. its gap) costs about that back, so the measured
+// compact-fit chrome grows by the page-nav bar (~38px) and its gap and shrinks by
+// the denser stat strip (~24px), netting ≈+1.4rem over v0.18.0's 21rem; we use
+// 22.5rem (23rem at 2xl for the slightly larger type) so the two chart rows + the
+// pager never clip. Plot heights with two rows: ≈216px at 768, ≈232px at 800,
+// ≈280px at 896, ≈324px at 1080 — readable, growing with the viewport, and never
+// scrolling at laptop sizes (1366×768, 1280×800). Two rows can't overflow because
+// total = (100dvh − C) + chrome ≤ 100dvh.
 const FILL_BODY_CLASSES =
-  'h-[16rem] xl:h-[calc((100dvh-21rem)/3)] 2xl:h-[calc((100dvh-21.5rem)/3)]';
+  'h-[16rem] xl:h-[calc((100dvh-22.5rem)/2)] 2xl:h-[calc((100dvh-23rem)/2)]';
 
 export function ConfigurableChart({
   spec,
