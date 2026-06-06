@@ -32,7 +32,9 @@ ENV NEXT_TELEMETRY_DISABLED=1
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 # poppler-utils provides `pdftotext`, used to parse the bill PDFs for the
 # per-fuel supply/delivery breakdown (full history; the API only has ~24 months).
-RUN apt-get update && apt-get install -y --no-install-recommends poppler-utils && rm -rf /var/lib/apt/lists/*
+# postgresql-client provides `pg_dump`/`psql` for the entrypoint's pre-migrate
+# database backup (see docker-entrypoint.sh).
+RUN apt-get update && apt-get install -y --no-install-recommends poppler-utils postgresql-client && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/public ./public
