@@ -3,6 +3,13 @@
 import fs from 'fs';
 import path from 'path';
 import type { BrowserContext, Page } from 'playwright';
+import { prisma } from '@/lib/db';
+import { decryptSecret } from '@/lib/crypto';
+
+export interface Creds {
+  user: string;
+  pass: string;
+}
 
 const DATA_DIR = process.env.DATA_DIR || '/data';
 const SESSION_DIR = path.join(DATA_DIR, 'session');
@@ -12,11 +19,48 @@ export function dataDir(): string {
   return DATA_DIR;
 }
 
-export function getCreds(): { user: string; pass: string } {
+// Env credentials — the bootstrap/fallback source. Kept as-is so a fresh install
+// with no stored login (and no NgLogin table rows yet) scrapes exactly as before.
+export function getCreds(): Creds {
   const user = process.env.NGRID_USER;
   const pass = process.env.NGRID_PASS;
   if (!user || !pass) throw new Error('NGRID_USER / NGRID_PASS env vars are not set');
   return { user, pass };
+}
+
+// Decrypt a stored login row into plaintext creds. The password is only ever
+// decrypted here, just-in-time for a login; it is never returned to the client.
+function credsFromLogin(login: {
+  username: string;
+  ciphertext: string;
+  iv: string;
+  authTag: string;
+}): Creds {
+  const pass = decryptSecret({
+    ciphertext: login.ciphertext,
+    iv: login.iv,
+    authTag: login.authTag,
+  });
+  return { user: login.username, pass };
+}
+
+// Resolve credentials for a SPECIFIC stored login. Throws if it doesn't exist.
+export async function resolveCredsForLogin(loginId: number): Promise<Creds> {
+  const login = await prisma.ngLogin.findUnique({ where: { id: loginId } });
+  if (!login) throw new Error(`NgLogin ${loginId} not found`);
+  return credsFromLogin(login);
+}
+
+// Store-first credential resolution. If any stored login exists, use the most
+// recently verified one (falling back to the most recently created); otherwise
+// fall back to env creds. This lets the encrypted store take precedence when
+// present while keeping the env-only path working when it's empty.
+export async function resolveCreds(): Promise<Creds> {
+  const login = await prisma.ngLogin.findFirst({
+    orderBy: [{ lastVerifiedAt: { sort: 'desc', nulls: 'last' } }, { createdAt: 'desc' }],
+  });
+  if (login) return credsFromLogin(login);
+  return getCreds();
 }
 
 export function contextOptions(): Record<string, unknown> {
@@ -119,7 +163,8 @@ export async function ensureLoggedIn(
   log: (m: string) => void = () => {}
 ): Promise<string> {
   const ctx = page.context();
-  const { user, pass } = getCreds();
+  // Store-first: use a stored encrypted login when one exists, else env creds.
+  const { user, pass } = await resolveCreds();
   if (fs.existsSync(STATE_FILE)) {
     log('trying saved session');
     await page

@@ -20,13 +20,19 @@ LAN-only or behind a reverse proxy / SSO.
 2. **Keep number logic pure and tested.** Parsing → `app/src/lib/ngrid/parsePdf.ts`;
    aggregation/rates → `app/src/lib/series.ts`; prediction → `app/src/lib/prediction.ts`. Don't
    bury arithmetic in a component or an API route.
-3. **Never commit secrets or personal data.** Credentials come from env at runtime
-   (`NGRID_USER`/`NGRID_PASS`). `.env`, `data/`, the saved session, bill PDFs, and any account
-   number/address are gitignored — keep it that way.
+3. **Never commit secrets or personal data.** Credentials may be **stored AES-256-GCM-encrypted in
+   the DB** (`NgLogin` rows — see `app/src/lib/crypto.ts`); the key comes from the `NGRID_SECRET_KEY`
+   env var and is **never stored in the DB**. Env creds (`NGRID_USER`/`NGRID_PASS`) remain the
+   bootstrap/fallback source. Either way nothing secret hits git: `.env`, `data/`, the saved session,
+   bill PDFs, and any account number/address are gitignored — keep it that way, and never log or
+   return a decrypted password to the client.
 4. **Be a good guest.** The scraper hits a third party with a real account. Reuse the session,
    keep the rate-limiting/jitter, and never add aggressive polling or parallel logins.
-5. **Don't add a public login layer** or instructions to expose the app to the internet without
-   an auth gate.
+5. **Don't add a public app-auth layer** or instructions to expose the app to the internet without
+   an auth gate. An in-app **NG-login management UI** (to enter/verify the National Grid credentials
+   stored above) is allowed, but it inherits the existing access gate (LAN-only / reverse-proxy /
+   SSO) — it is **not** a public application-login layer and must never expose financial data
+   un-gated.
 6. **Don't hand-edit `app/package.json` `version`** — it's a `0.0.0` placeholder; the real version
    is derived from the git tag at build time.
 

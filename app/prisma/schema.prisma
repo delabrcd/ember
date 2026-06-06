@@ -7,12 +7,36 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// A stored National Grid login (the email/password used at the B2C portal).
+// One login fans out to several Account rows (multi-premise / linked accounts).
+// The password is encrypted at rest with AES-256-GCM (see lib/crypto.ts); the
+// key lives only in the NGRID_SECRET_KEY env var, never in the DB. Env creds
+// (NGRID_USER/NGRID_PASS) remain the bootstrap fallback when no row exists.
+model NgLogin {
+  id             Int       @id @default(autoincrement())
+  label          String
+  username       String
+  ciphertext     String // base64 AES-256-GCM ciphertext of the password
+  iv             String // base64 12-byte GCM nonce
+  authTag        String // base64 GCM auth tag
+  status         String? // e.g. last pre-flight result (OK / failed / MFA)
+  lastVerifiedAt DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  accounts Account[]
+}
+
 // A National Grid billing account. One login can expose several (multi-premise).
 // region / companyCode are read from the account API so other NG regions work
 // with no code changes.
 model Account {
   id             Int      @id @default(autoincrement())
   accountNumber  String   @unique
+  // The stored login this account was discovered through. Nullable: accounts
+  // bootstrapped from env creds (NGRID_USER/NGRID_PASS) have no NgLogin row.
+  loginId        Int?
+  login          NgLogin? @relation(fields: [loginId], references: [id], onDelete: SetNull)
   accountLink    String?
   region         String?
   companyCode    String?
@@ -37,17 +61,17 @@ model Account {
 
 // One statement. PDF is stored on disk; pdfPath points at it.
 model Bill {
-  id             Int      @id @default(autoincrement())
-  account        Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  id             Int       @id @default(autoincrement())
+  account        Account   @relation(fields: [accountId], references: [id], onDelete: Cascade)
   accountId      Int
-  statementDate  DateTime @db.Date
+  statementDate  DateTime  @db.Date
   periodFrom     DateTime? @db.Date
   periodTo       DateTime? @db.Date
-  totalDueAmount Float?    // statement "Amount Due" from the API (may include carryover)
-  currentCharges Float?    // this period's energy charges from the bill PDF (used for cost analysis)
+  totalDueAmount Float? // statement "Amount Due" from the API (may include carryover)
+  currentCharges Float? // this period's energy charges from the bill PDF (used for cost analysis)
   status         String?
   pdfPath        String?
-  createdAt      DateTime @default(now())
+  createdAt      DateTime  @default(now())
 
   @@unique([accountId, statementDate])
   @@index([accountId, statementDate])
@@ -55,15 +79,15 @@ model Bill {
 
 // Monthly usage quantity per fuel/usage type (TOTAL_KWH, THERMS).
 model Usage {
-  id              Int      @id @default(autoincrement())
-  account         Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  id              Int       @id @default(autoincrement())
+  account         Account   @relation(fields: [accountId], references: [id], onDelete: Cascade)
   accountId       Int
-  usageType       String   // TOTAL_KWH | THERMS
-  periodYearMonth Int      // e.g. 202605
+  usageType       String // TOTAL_KWH | THERMS
+  periodYearMonth Int // e.g. 202605
   dateFrom        DateTime? @db.Date
   dateTo          DateTime? @db.Date
   quantity        Float
-  unit            String   // kWh | therms
+  unit            String // kWh | therms
 
   @@unique([accountId, usageType, periodYearMonth])
 }
@@ -71,11 +95,11 @@ model Usage {
 // Monthly cost per fuel. kind=SUPPLY is the usage/supply charge; kind=BILL_AMOUNT
 // is the per-fuel slice of the total bill (delivery = BILL_AMOUNT - SUPPLY).
 model Cost {
-  id              Int      @id @default(autoincrement())
-  account         Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  id              Int       @id @default(autoincrement())
+  account         Account   @relation(fields: [accountId], references: [id], onDelete: Cascade)
   accountId       Int
-  fuelType        String   // ELECTRIC | GAS
-  kind            String   // SUPPLY | BILL_AMOUNT
+  fuelType        String // ELECTRIC | GAS
+  kind            String // SUPPLY | BILL_AMOUNT
   periodYearMonth Int
   dateFrom        DateTime? @db.Date
   dateTo          DateTime? @db.Date
