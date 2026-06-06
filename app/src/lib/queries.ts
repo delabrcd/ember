@@ -22,10 +22,18 @@ export async function getMonthlySeries(accountId: number): Promise<MonthRow[]> {
     prisma.bill.findMany({ where: { accountId } }),
   ]);
 
+  // One temp per month: prefer the full-history Open-Meteo rollup over NG's
+  // ~24-month fallback so the Usage-vs-weather chart spans the whole history.
+  const tempByYm = new Map<number, number>();
+  for (const w of weather) {
+    const ym = ymOf(w.monthYear);
+    if (w.source === 'open-meteo' || !tempByYm.has(ym)) tempByYm.set(ym, w.avgTemperature);
+  }
+
   return deriveMonthlySeries({
     usages: usages.map((u) => ({ periodYearMonth: u.periodYearMonth, usageType: u.usageType, quantity: u.quantity })),
     costs: costs.map((c) => ({ periodYearMonth: c.periodYearMonth, fuelType: c.fuelType, kind: c.kind, amount: c.amount })),
-    weather: weather.map((w) => ({ ym: ymOf(w.monthYear), avgTemperature: w.avgTemperature })),
+    weather: [...tempByYm].map(([ym, avgTemperature]) => ({ ym, avgTemperature })),
     // Use the bill PDF's current charges (this period's energy cost) for analysis,
     // falling back to the API amount due only if a PDF wasn't parsed.
     bills: bills.map((b) => ({ ym: ymOf(b.statementDate), totalDueAmount: b.currentCharges ?? b.totalDueAmount })),

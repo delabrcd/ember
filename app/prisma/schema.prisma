@@ -20,6 +20,10 @@ model Account {
   fuelTypes      String[] @default([])
   premiseNumber  String?
   customerNumber String?
+  // Geocoded once from serviceAddress (Open-Meteo) and cached for the historical
+  // weather sync; null until the first successful geocode.
+  latitude       Float?
+  longitude      Float?
   firstSeenAt    DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
@@ -28,6 +32,7 @@ model Account {
   costs         Cost[]
   scrapeRuns    ScrapeRun[]
   scheduleState ScheduleState?
+  weatherDaily  WeatherDaily[]
 }
 
 // One statement. PDF is stored on disk; pdfPath points at it.
@@ -80,14 +85,36 @@ model Cost {
 }
 
 // Monthly average temperature for a region (shared across accounts in that region).
+// source distinguishes National Grid's ~24-month feed ("ng", the fallback) from
+// Open-Meteo's full-history rollup ("open-meteo", the primary). Both can coexist
+// for the same region/month without colliding; the read layer prefers external.
 model Weather {
   id             Int      @id @default(autoincrement())
   region         String
   monthYear      DateTime @db.Date
   avgTemperature Float
   unit           String   @default("F")
+  source         String   @default("ng")
 
-  @@unique([region, monthYear])
+  @@unique([region, monthYear, source])
+}
+
+// Daily temperatures from Open-Meteo's archive, scoped to the account whose
+// location was geocoded. Issue #5 (degree-days) computes HDD/CDD per bill PERIOD
+// from these, so we persist the full daily resolution, not just the monthly mean.
+model WeatherDaily {
+  id        Int      @id @default(autoincrement())
+  account   Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  accountId Int
+  date      DateTime @db.Date
+  tMean     Float // degrees, in `unit`
+  tMin      Float?
+  tMax      Float?
+  unit      String   @default("F")
+  source    String   @default("open-meteo")
+
+  @@unique([accountId, date, source])
+  @@index([accountId, date])
 }
 
 enum ScrapeTrigger {
