@@ -14,18 +14,26 @@ PDF. It re-checks automatically as your next bill approaches, and has a manual
 
 ## Quick start (Docker)
 
-You need Docker + the Docker Compose plugin. Then:
+You need Docker + the Docker Compose plugin. **No clone or build required** — just grab
+two files (the compose file pulls the prebuilt image from GHCR):
 
 ```bash
-git clone https://github.com/delabrcd/ngrid-dashboard && cd ngrid-dashboard
-cp .env.example .env
+mkdir ngrid-dashboard && cd ngrid-dashboard
+curl -fsSLO https://raw.githubusercontent.com/delabrcd/ngrid-dashboard/main/docker-compose.yml
+curl -fsSL  https://raw.githubusercontent.com/delabrcd/ngrid-dashboard/main/.env.example -o .env
 # edit .env: set NGRID_USER / NGRID_PASS (your National Grid login) and a DB_PASSWORD
 nano .env
-docker compose up -d            # pulls the prebuilt image from GHCR
-# or build it yourself:  docker compose up -d --build
+docker compose up -d
 ```
 
-Open **http://localhost:3000** and click **Check for new bills**.
+(Or download `docker-compose.yml` + `.env.example` from the
+[latest release](https://github.com/delabrcd/ngrid-dashboard/releases/latest).)
+
+Open **http://localhost:3000** and click **Check for new bills**. Update later with
+`docker compose pull && docker compose up -d`.
+
+**Building from source instead** (developers): clone the repo, then
+`docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build`.
 
 ### Image tags
 

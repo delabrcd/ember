@@ -1,14 +1,13 @@
-# Standalone deployment — for running on your own machine with minimal setup.
-# 1. cp .env.example .env  &&  edit .env
-# 2. docker compose up -d
-# 3. open http://localhost:3000
+# Standalone deployment — all you need is this file + a .env. No clone, no build.
+# 1. curl -fsSLO https://raw.githubusercontent.com/delabrcd/ngrid-dashboard/main/docker-compose.yml
+# 2. curl -fsSL  https://raw.githubusercontent.com/delabrcd/ngrid-dashboard/main/.env.example -o .env  && edit it
+# 3. docker compose up -d   (pulls the prebuilt image from GHCR)
+# 4. open http://localhost:3000
+# Update later with: docker compose pull && docker compose up -d
+# (Developers: build locally with docker-compose.build.yml — see that file.)
 services:
   app:
-    # Pull the prebuilt image (default):  docker compose up -d
-    # Build locally instead:              docker compose up -d --build
     image: ghcr.io/delabrcd/ngrid-dashboard:latest
-    build:
-      context: ./app
     container_name: ngrid_dashboard
     restart: unless-stopped
     # All app config (incl. the National Grid password, which may contain $ and #)

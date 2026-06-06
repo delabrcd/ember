@@ -1,0 +1,7 @@
+# Developer override: build the image locally instead of pulling it from GHCR.
+# Requires the full repo (the app/ source). Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+services:
+  app:
+    build:
+      context: ./app
