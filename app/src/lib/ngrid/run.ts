@@ -7,6 +7,7 @@ import { syncHistoricalWeather } from '@/lib/weather/sync';
 import { notifyNewBills } from '@/lib/notify';
 import { collect } from './collect';
 import { persist } from './persist';
+import { classifyLoginError, shouldSkipScheduled, statusOnSuccess } from './loginStatus';
 import type { ProgressFn } from './types';
 
 const MIN_SCHEDULED_GAP_MS = 5 * 60 * 1000; // don't auto-scrape more often than this
@@ -55,23 +56,59 @@ export async function runScrape(
       // time, never parallel logins). When there are no NgLogin rows we make a
       // single env-credential pass — collect()'s auth layer resolves env creds —
       // which preserves the original single-login behavior exactly.
-      const logins = await prisma.ngLogin.findMany({ orderBy: { id: 'asc' } });
+      const allLogins = await prisma.ngLogin.findMany({ orderBy: { id: 'asc' } });
+      // Good-guest: scheduled scrapes skip logins already flagged needs_reauth so
+      // we don't hammer known-bad credentials. Manual re-auth (the UI) is the way
+      // back. MANUAL runs still attempt every login (the operator asked for it).
+      const logins =
+        trigger === 'SCHEDULED' ? allLogins.filter((l) => !shouldSkipScheduled(l.status)) : allLogins;
+      for (const l of allLogins) {
+        if (trigger === 'SCHEDULED' && shouldSkipScheduled(l.status)) {
+          log(`skipping login "${l.label}" (needs re-authentication)`);
+        }
+      }
       const passes: { loginId?: number }[] = logins.length
         ? logins.map((l) => ({ loginId: l.id }))
-        : [{}];
+        : allLogins.length
+          ? [] // logins exist but all are paused — nothing to do this run
+          : [{}]; // no stored logins at all → single env-credential pass
 
       let totalBills = 0;
       let totalNew = 0;
       let totalPdfs = 0;
       let accountCount = 0;
       let firstAccountId: number | undefined;
+      let skippedLogins = 0;
       const scrapedAccountIds = new Set<number>();
 
       for (const pass of passes) {
         // collect() logs in (resolveCredsForLogin when a loginId is given, else
         // env via resolveCreds), discovers every billing account on that login,
         // and returns one result per account.
-        const results = await collect((m) => log(m), { loginId: pass.loginId });
+        let results;
+        try {
+          results = await collect((m) => log(m), { loginId: pass.loginId });
+        } catch (loginErr: any) {
+          const msg = String(loginErr?.message || loginErr);
+          const cls = classifyLoginError(msg);
+          // A hard auth failure (wrong/disabled password, or an MFA step the
+          // unattended path can't complete) flips THIS login to needs_reauth and
+          // skips it gracefully — we never crash the whole scrape or touch its
+          // existing data. Env-cred passes have no NgLogin row to flag, and any
+          // non-auth error (network/portal hiccup) still propagates so the run is
+          // recorded as ERROR (status untouched — a flaky run isn't a bad login).
+          if (cls.isAuthFailure && pass.loginId !== undefined) {
+            await prisma.ngLogin.update({
+              where: { id: pass.loginId },
+              data: { status: 'needs_reauth', lastVerifiedAt: undefined },
+            });
+            log(`login ${pass.loginId} needs re-authentication: ${cls.reason} — skipping it`);
+            skippedLogins += 1;
+            continue;
+          }
+          throw loginErr;
+        }
+
         for (const result of results) {
           const summary = await persist(result);
           await updateSchedule(summary.accountId);
@@ -89,6 +126,15 @@ export async function runScrape(
           accountCount += 1;
           scrapedAccountIds.add(summary.accountId);
           if (firstAccountId === undefined) firstAccountId = summary.accountId;
+        }
+
+        // A login that scraped at least one account is healthy: clear any prior
+        // needs_reauth flag and stamp it verified. (Env passes have no id.)
+        if (pass.loginId !== undefined && results.length > 0) {
+          await prisma.ngLogin.update({
+            where: { id: pass.loginId },
+            data: { status: statusOnSuccess(), lastVerifiedAt: new Date() },
+          });
         }
       }
 
@@ -117,7 +163,9 @@ export async function runScrape(
           // single-account case is unchanged. (Per-account audit is a later step.)
           accountId: firstAccountId,
           billsAdded: totalNew,
-          message: `${accountCount} account(s): ${totalBills} bills (${totalNew} new), ${totalPdfs} PDFs fetched`,
+          message:
+            `${accountCount} account(s): ${totalBills} bills (${totalNew} new), ${totalPdfs} PDFs fetched` +
+            (skippedLogins ? `; ${skippedLogins} login(s) need re-authentication` : ''),
         },
       });
       return run.id;

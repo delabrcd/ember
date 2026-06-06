@@ -41,6 +41,9 @@ export function Dashboard() {
   const [bills, setBills] = useState<Bill[]>([]);
   const [accounts, setAccounts] = useState<AccountSummary[]>([]);
   const [loading, setLoading] = useState(true);
+  // Logins flagged needs_reauth: scraping for them is paused until the operator
+  // re-authenticates (in Settings). Existing data keeps showing regardless.
+  const [reauthLogins, setReauthLogins] = useState<{ id: number; label: string }[]>([]);
 
   // The selected account, validated against the live list (a stale persisted id
   // is ignored). null = the default account, which the routes already resolve.
@@ -54,6 +57,17 @@ export function Dashboard() {
       .then((r) => r.json())
       .then((a) => setAccounts(a.accounts || []))
       .catch(() => setAccounts([]));
+  }, []);
+
+  // Surface any login that needs re-authentication so the operator knows
+  // scraping is paused for it (the data below is still its last-known state).
+  useEffect(() => {
+    fetch('/api/ng-logins', { cache: 'no-store' })
+      .then((r) => r.json())
+      .then((j: { logins?: { id: number; label: string; status: string | null }[] }) =>
+        setReauthLogins((j.logins || []).filter((l) => l.status === 'needs_reauth').map((l) => ({ id: l.id, label: l.label })))
+      )
+      .catch(() => setReauthLogins([]));
   }, []);
 
   const load = useCallback(async () => {
@@ -119,6 +133,26 @@ export function Dashboard() {
           <RefreshButton onDone={load} />
         </div>
       </header>
+
+      {reauthLogins.length > 0 && (
+        <div className="rounded-lg border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <span className="font-medium">Not connected — re-authenticate</span>
+              <span className="ml-2 text-xs text-rose-200/80">
+                {reauthLogins.map((l) => `“${l.label}”`).join(', ')} need re-authentication. The data below is the
+                last scraped state; scheduled updates for {reauthLogins.length === 1 ? 'it' : 'them'} are paused.
+              </span>
+            </div>
+            <Link
+              href="/settings"
+              className="btn border border-rose-700/70 bg-rose-900/40 text-rose-200 hover:bg-rose-800/60"
+            >
+              Re-authenticate
+            </Link>
+          </div>
+        </div>
+      )}
 
       {ov?.schedule && (
         <div className="flex flex-wrap gap-2">

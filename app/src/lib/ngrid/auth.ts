@@ -19,6 +19,39 @@ export function dataDir(): string {
   return DATA_DIR;
 }
 
+// Where a billing account's downloaded bill PDFs live (one dir per account
+// number — see collect.ts, which writes `${dataDir()}/pdfs/<accountNumber>`).
+// Exported so the login-delete flow can remove exactly those dirs and nothing
+// else when the operator chooses to delete local data.
+export function pdfDirForAccount(accountNumber: string): string {
+  return path.join(DATA_DIR, 'pdfs', accountNumber);
+}
+
+// Delete the bill-PDF directories for the given account numbers. Scoped strictly
+// to each account's own `pdfs/<accountNumber>` folder (never the pdfs root or a
+// sibling account's dir). Best-effort per directory; returns how many were
+// removed. A blank/odd account number is skipped so we never resolve outside the
+// pdfs root.
+export function deletePdfsForAccounts(accountNumbers: string[]): number {
+  const root = path.join(DATA_DIR, 'pdfs');
+  let removed = 0;
+  for (const accountNumber of accountNumbers) {
+    if (!accountNumber) continue;
+    const dir = pdfDirForAccount(accountNumber);
+    // Defense-in-depth: only ever delete a direct child of the pdfs root.
+    if (path.dirname(dir) !== root || path.basename(dir) !== accountNumber) continue;
+    try {
+      if (fs.existsSync(dir)) {
+        fs.rmSync(dir, { recursive: true, force: true });
+        removed++;
+      }
+    } catch {
+      /* leave it; a stray PDF dir is non-fatal */
+    }
+  }
+  return removed;
+}
+
 // Where a login's saved session lives. The env/default scrape keeps the original
 // `session.json` (so existing installs reuse their session unchanged); each
 // stored NgLogin gets its OWN file so multi-login scrapes don't cross-reuse one
@@ -80,6 +113,17 @@ export function contextOptions(loginId?: number): Record<string, unknown> {
   const stateFile = stateFileFor(loginId);
   if (fs.existsSync(stateFile)) opts.storageState = stateFile;
   return opts;
+}
+
+// Remove a login's saved session file. Called when a stored login is deleted so
+// its auth cookies don't linger on disk. Best-effort: a missing file is fine.
+export function deleteSession(loginId: number): void {
+  const stateFile = stateFileFor(loginId);
+  try {
+    fs.rmSync(stateFile, { force: true });
+  } catch {
+    /* already gone / not writable — non-fatal */
+  }
 }
 
 export async function saveState(ctx: BrowserContext, loginId?: number): Promise<void> {

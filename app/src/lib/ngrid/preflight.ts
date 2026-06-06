@@ -22,7 +22,7 @@ import type { Browser, BrowserContext, Page } from 'playwright';
 import { chromium } from 'playwright';
 import { prisma } from '@/lib/db';
 import { encryptSecret } from '@/lib/crypto';
-import { contextOptions, loginInteractive, saveState } from './auth';
+import { contextOptions, loginInteractive, resolveCredsForLogin, saveState } from './auth';
 import type { Creds } from './auth';
 import { canTransition, isTerminal } from './preflightState';
 import type { PreflightStatus } from './preflightState';
@@ -150,12 +150,33 @@ export function submitOtp(id: string, code: string): { ok: boolean; error?: stri
   return { ok: true, view: { status: entry.status, message: entry.message } };
 }
 
+// A pre-flight job is either ADDING a brand-new login (creds supplied by the
+// operator, encrypted+stored on success) or RE-AUTHENTICATING an existing one
+// (creds decrypted from the stored row, no new row created — just a refreshed
+// session + status='verified'). Both share the identical interactive-login +
+// OTP machinery below; only the start/finish differ.
+type PreflightJob =
+  | { kind: 'add'; label: string; username: string; password: string }
+  | { kind: 'reauth'; loginId: number };
+
 // Start a pre-flight: launch a fresh headless browser, run the interactive
 // login, and on success encrypt+store the credential as a verified NgLogin.
 // Returns the generated id immediately; the login proceeds in the background and
 // the caller polls getPreflight(). `creds.pass` is encrypted only on success and
 // never returned or logged.
 export function startPreflight(input: { label: string; username: string; password: string }): { id: string } {
+  return startJob({ kind: 'add', ...input });
+}
+
+// Start a RE-AUTH pre-flight for an existing login: same interactive-login + OTP
+// UX as Add, but it decrypts the stored credential, refreshes the saved session,
+// and flips the row back to status='verified' on success (no new row, no
+// re-encryption — the creds are unchanged). Returns the pre-flight id to poll.
+export function startReauthPreflight(loginId: number): { id: string } {
+  return startJob({ kind: 'reauth', loginId });
+}
+
+function startJob(job: PreflightJob): { id: string } {
   ensureSweeper();
   const id = randomUUID();
 
@@ -175,7 +196,7 @@ export function startPreflight(input: { label: string; username: string; passwor
   // Park a partially-built entry so polls resolve; browser fields fill in below.
   registry.set(id, pending as PreflightEntry);
 
-  void runPreflight(id, input).catch(() => {
+  void runPreflight(id, job).catch(() => {
     // runPreflight already records ERROR on the entry; swallow so an unhandled
     // rejection never crashes the process.
   });
@@ -183,15 +204,23 @@ export function startPreflight(input: { label: string; username: string; passwor
   return { id };
 }
 
-async function runPreflight(id: string, input: { label: string; username: string; password: string }): Promise<void> {
+async function runPreflight(id: string, job: PreflightJob): Promise<void> {
   const placeholder = registry.get(id);
   if (!placeholder) return; // swept already
 
   let browser: Browser | undefined;
   try {
+    // Resolve the creds up front. For a re-auth we decrypt the stored row here;
+    // a missing row is a clean failure before we launch a browser.
+    const creds: Creds =
+      job.kind === 'add'
+        ? { user: job.username, pass: job.password }
+        : await resolveCredsForLogin(job.loginId);
+
     browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
-    // A brand-new login: no stored session to reuse (loginId omitted), so we get
-    // a clean context and must authenticate from scratch.
+    // Always authenticate from scratch in a clean context: an Add has no stored
+    // session, and a re-auth is recovering from a session/credential the portal
+    // already rejected, so reusing the old session would defeat the point.
     const context = await browser.newContext(contextOptions());
     const page = await context.newPage();
 
@@ -206,7 +235,6 @@ async function runPreflight(id: string, input: { label: string; username: string
     entry.page = page;
     touch(entry);
 
-    const creds: Creds = { user: input.username, pass: input.password };
     await loginInteractive(
       page,
       creds,
@@ -220,27 +248,37 @@ async function runPreflight(id: string, input: { label: string; username: string
       (m) => setStatus(entry, entry.status, m)
     );
 
-    // Success — encrypt and store the credential as a verified login. The
-    // password is encrypted here and the plaintext is dropped; it is never
-    // returned to the client.
-    const enc = encryptSecret(input.password);
-    const login = await prisma.ngLogin.create({
-      data: {
-        label: input.label,
-        username: input.username,
-        ciphertext: enc.ciphertext,
-        iv: enc.iv,
-        authTag: enc.authTag,
-        status: 'verified',
-        lastVerifiedAt: new Date(),
-      },
-    });
+    if (job.kind === 'add') {
+      // Success — encrypt and store the credential as a verified login. The
+      // password is encrypted here and the plaintext is dropped; it is never
+      // returned to the client.
+      const enc = encryptSecret(job.password);
+      const login = await prisma.ngLogin.create({
+        data: {
+          label: job.label,
+          username: job.username,
+          ciphertext: enc.ciphertext,
+          iv: enc.iv,
+          authTag: enc.authTag,
+          status: 'verified',
+          lastVerifiedAt: new Date(),
+        },
+      });
 
-    // Save the freshly-authenticated session under the new login's id so the
-    // next scheduled scrape reuses it instead of re-logging-in (good-guest).
-    await saveState(context, login.id).catch(() => {});
-
-    setStatus(entry, 'SUCCESS', 'Login verified and saved.');
+      // Save the freshly-authenticated session under the new login's id so the
+      // next scheduled scrape reuses it instead of re-logging-in (good-guest).
+      await saveState(context, login.id).catch(() => {});
+      setStatus(entry, 'SUCCESS', 'Login verified and saved.');
+    } else {
+      // Re-auth success — the creds are unchanged, so we only refresh the saved
+      // session and clear the needs_reauth flag. No re-encryption, no new row.
+      await saveState(context, job.loginId).catch(() => {});
+      await prisma.ngLogin.update({
+        where: { id: job.loginId },
+        data: { status: 'verified', lastVerifiedAt: new Date() },
+      });
+      setStatus(entry, 'SUCCESS', 'Re-authenticated. Scraping for this login is resumed.');
+    }
     await closeResources(entry);
   } catch (err: unknown) {
     const message = String((err as Error)?.message || err).slice(0, 300);
