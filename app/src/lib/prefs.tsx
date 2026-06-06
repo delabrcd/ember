@@ -38,6 +38,8 @@ export const DEFAULT_PREFS: Prefs = {
     cost: baseChart({ stacked: true }),
     rates: baseChart({ type: 'line' }),
     weather: baseChart({ stacked: false }),
+    degreeDays: baseChart({ stacked: false }),
+    normalized: baseChart({ type: 'line' }),
   },
 };
 

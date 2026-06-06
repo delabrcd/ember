@@ -7,12 +7,16 @@ export interface UsageInput { periodYearMonth: number; usageType: string; quanti
 export interface CostInput { periodYearMonth: number; fuelType: string; kind: string; amount: number }
 export interface WeatherInput { ym: number; avgTemperature: number }
 export interface BillInput { ym: number; totalDueAmount: number | null }
+// Degree-days already summed (per bill period) by the caller, keyed to the same
+// `ym` the rest of the pipeline uses (ymOf(statementDate)).
+export interface DegreeDayInput { ym: number; hdd: number; cdd: number }
 
 export interface SeriesInput {
   usages: UsageInput[];
   costs: CostInput[];
   weather: WeatherInput[];
   bills: BillInput[];
+  degreeDays?: DegreeDayInput[];
 }
 
 const labelFor = (ym: number) => `${Math.floor(ym / 100)}-${String(ym % 100).padStart(2, '0')}`;
@@ -31,6 +35,7 @@ export function deriveMonthlySeries(input: SeriesInput): MonthRow[] {
         elecBill: null, gasBill: null,
         elecRateSupply: null, gasRateSupply: null, elecRateAllIn: null, gasRateAllIn: null,
         avgTemp: null, billTotal: null,
+        hdd: null, cdd: null, kwhPerDegreeDay: null, thermsPerHdd: null,
       };
       months.set(ym, r);
     }
@@ -52,6 +57,11 @@ export function deriveMonthlySeries(input: SeriesInput): MonthRow[] {
   }
   for (const w of input.weather) get(w.ym).avgTemp = w.avgTemperature;
   for (const b of input.bills) if (b.totalDueAmount != null) get(b.ym).billTotal = b.totalDueAmount;
+  for (const d of input.degreeDays ?? []) {
+    const r = get(d.ym);
+    r.hdd = d.hdd;
+    r.cdd = d.cdd;
+  }
 
   for (const r of months.values()) {
     r.elecBill = sum(r.elecSupply, r.elecDelivery);
@@ -60,6 +70,16 @@ export function deriveMonthlySeries(input: SeriesInput): MonthRow[] {
     r.gasRateSupply = div(r.gasSupply, r.therms);
     r.elecRateAllIn = div(r.elecBill, r.kwh);
     r.gasRateAllIn = div(r.gasBill, r.therms);
+
+    // Weather-normalized usage intensity (issue #5). Electric heating+cooling
+    // tracks both HDD and CDD, so we divide kWh by total degree-days (HDD+CDD);
+    // gas is heating-only, so therms divide by HDD alone. Pure division, null
+    // when the denominator is 0 or either operand is missing.
+    //   kwhPerDegreeDay = kwh / (hdd + cdd)
+    //   thermsPerHdd    = therms / hdd
+    const totalDD = sum(r.hdd, r.cdd);
+    r.kwhPerDegreeDay = div(r.kwh, totalDD);
+    r.thermsPerHdd = div(r.therms, r.hdd);
   }
 
   return [...months.values()].sort((a, b) => a.ym - b.ym);
