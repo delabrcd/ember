@@ -4,7 +4,7 @@ import {
   resolveChannel,
   selectBillsToNotify,
   type NotifiableBill,
-} from '../src/lib/notify';
+} from '../src/lib/notifyFormat';
 
 const D = (s: string) => new Date(s + 'T00:00:00Z');
 
