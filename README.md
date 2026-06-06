@@ -127,6 +127,15 @@ The numbers are validated two ways, because an API value can be plausible but wr
   it's kept in a root-only volume, `0600`, out of your working directory — not a bind mount).
 - **Bill PDFs** → a host directory, `./data/pdfs/<account>/<date>.pdf` by default; point
   `PDF_DIR` at any path (e.g. a NAS) in `.env`.
+- **Pre-upgrade DB backups** → a host directory, `./data/backups` by default (`BACKUP_DIR`).
+  Before applying a schema-changing upgrade, the app `pg_dump`s the database here (one
+  gzipped dump per upgrade, newest `BACKUP_RETENTION` kept) so there's always a restore
+  point — and it refuses to apply the change if that backup can't be written. Restore one
+  with:
+  ```bash
+  gunzip -c ./data/backups/ngrid-pre-migrate-<stamp>.sql.gz \
+    | docker compose exec -T ngrid_postgres psql -U ngrid -d ngrid
+  ```
 
 To get PDFs out of the container if you change the mount: `docker compose cp ngrid_dashboard:/data/pdfs ./pdfs`.
 

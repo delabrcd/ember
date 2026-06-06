@@ -22,6 +22,9 @@ services:
       # The session holds live auth tokens — keep it in a Docker-managed volume
       # (root-only on the host, out of your working directory), not a bind mount.
       - session:/data/session
+      # Pre-migrate database backups (written before a schema-changing upgrade).
+      # Host dir so you can browse/copy them directly (override with BACKUP_DIR).
+      - ${BACKUP_DIR:-./data/backups}:/data/backups
     depends_on:
       ngrid_postgres:
         condition: service_healthy
