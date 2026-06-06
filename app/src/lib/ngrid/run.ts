@@ -50,27 +50,55 @@ export async function runScrape(
 
   const task = (async (): Promise<number> => {
     try {
-      const result = await collect((m) => {
-        log(m);
-      });
-      const summary = await persist(result);
-      await updateSchedule(summary.accountId);
-      // Pull full-history daily temps from Open-Meteo (NG's feed is ~24 mo only).
-      // Non-fatal: a weather hiccup must not fail an otherwise-good scrape.
-      try {
-        const w = await syncHistoricalWeather(summary.accountId);
-        log(`weather: ${w.dailyUpserted} daily, ${w.monthsUpserted} monthly${w.skipped ? ` (${w.skipped})` : ''}`);
-      } catch (werr: any) {
-        log(`weather sync skipped: ${String(werr?.message || werr).slice(0, 200)}`);
+      // Scrape each stored NgLogin sequentially (good-guest: one session at a
+      // time, never parallel logins). When there are no NgLogin rows we make a
+      // single env-credential pass — collect()'s auth layer resolves env creds —
+      // which preserves the original single-login behavior exactly.
+      const logins = await prisma.ngLogin.findMany({ orderBy: { id: 'asc' } });
+      const passes: { loginId?: number }[] = logins.length
+        ? logins.map((l) => ({ loginId: l.id }))
+        : [{}];
+
+      let totalBills = 0;
+      let totalNew = 0;
+      let totalPdfs = 0;
+      let accountCount = 0;
+      let firstAccountId: number | undefined;
+
+      for (const pass of passes) {
+        // collect() logs in (resolveCredsForLogin when a loginId is given, else
+        // env via resolveCreds), discovers every billing account on that login,
+        // and returns one result per account.
+        const results = await collect((m) => log(m), { loginId: pass.loginId });
+        for (const result of results) {
+          const summary = await persist(result);
+          await updateSchedule(summary.accountId);
+          // Pull full-history daily temps from Open-Meteo (NG's feed is ~24 mo
+          // only). Non-fatal: a weather hiccup must not fail a good scrape.
+          try {
+            const w = await syncHistoricalWeather(summary.accountId);
+            log(`weather: ${w.dailyUpserted} daily, ${w.monthsUpserted} monthly${w.skipped ? ` (${w.skipped})` : ''}`);
+          } catch (werr: any) {
+            log(`weather sync skipped: ${String(werr?.message || werr).slice(0, 200)}`);
+          }
+          totalBills += summary.billsTotal;
+          totalNew += summary.billsAdded;
+          totalPdfs += result.pdfsDownloaded;
+          accountCount += 1;
+          if (firstAccountId === undefined) firstAccountId = summary.accountId;
+        }
       }
+
       await prisma.scrapeRun.update({
         where: { id: run.id },
         data: {
           status: 'SUCCESS',
           finishedAt: new Date(),
-          accountId: summary.accountId,
-          billsAdded: summary.billsAdded,
-          message: `${summary.billsTotal} bills (${summary.billsAdded} new), ${result.pdfsDownloaded} PDFs fetched`,
+          // ScrapeRun tracks one account; record the first scraped account so the
+          // single-account case is unchanged. (Per-account audit is a later step.)
+          accountId: firstAccountId,
+          billsAdded: totalNew,
+          message: `${accountCount} account(s): ${totalBills} bills (${totalNew} new), ${totalPdfs} PDFs fetched`,
         },
       });
       return run.id;

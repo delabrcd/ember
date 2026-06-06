@@ -13,10 +13,17 @@ export interface PersistSummary {
 export async function persist(result: CollectResult): Promise<PersistSummary> {
   const a = result.account;
 
+  // Tag the account with the login it was scraped under. Env-bootstrapped
+  // scrapes pass no loginId, so we leave it null (and don't clobber an existing
+  // value on update). When a login IS supplied we set/refresh it so re-running
+  // under a stored NgLogin claims accounts that were first seen via env creds.
+  const loginId = result.loginId;
+
   const account = await prisma.account.upsert({
     where: { accountNumber: a.accountNumber },
     create: {
       accountNumber: a.accountNumber,
+      loginId,
       accountLink: a.accountLink,
       region: a.region,
       companyCode: a.companyCode,
@@ -26,6 +33,7 @@ export async function persist(result: CollectResult): Promise<PersistSummary> {
       customerNumber: a.customerNumber,
     },
     update: {
+      ...(loginId !== undefined ? { loginId } : {}),
       accountLink: a.accountLink,
       region: a.region,
       companyCode: a.companyCode,

@@ -19,6 +19,14 @@ export function dataDir(): string {
   return DATA_DIR;
 }
 
+// Where a login's saved session lives. The env/default scrape keeps the original
+// `session.json` (so existing installs reuse their session unchanged); each
+// stored NgLogin gets its OWN file so multi-login scrapes don't cross-reuse one
+// account's cookies for another. A bad session must never bleed across logins.
+function stateFileFor(loginId?: number): string {
+  return loginId === undefined ? STATE_FILE : path.join(SESSION_DIR, `session-login-${loginId}.json`);
+}
+
 // Env credentials — the bootstrap/fallback source. Kept as-is so a fresh install
 // with no stored login (and no NgLogin table rows yet) scrapes exactly as before.
 export function getCreds(): Creds {
@@ -63,23 +71,25 @@ export async function resolveCreds(): Promise<Creds> {
   return getCreds();
 }
 
-export function contextOptions(): Record<string, unknown> {
+export function contextOptions(loginId?: number): Record<string, unknown> {
   const opts: Record<string, unknown> = {
     userAgent:
       'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
     viewport: { width: 1366, height: 900 },
   };
-  if (fs.existsSync(STATE_FILE)) opts.storageState = STATE_FILE;
+  const stateFile = stateFileFor(loginId);
+  if (fs.existsSync(stateFile)) opts.storageState = stateFile;
   return opts;
 }
 
-export async function saveState(ctx: BrowserContext): Promise<void> {
+export async function saveState(ctx: BrowserContext, loginId?: number): Promise<void> {
   // The session holds live auth cookies + bearer tokens — restrict it to the
   // owner (0700 dir, 0600 file) on top of living in a root-only Docker volume.
+  const stateFile = stateFileFor(loginId);
   fs.mkdirSync(SESSION_DIR, { recursive: true, mode: 0o700 });
   fs.chmodSync(SESSION_DIR, 0o700);
-  await ctx.storageState({ path: STATE_FILE });
-  fs.chmodSync(STATE_FILE, 0o600);
+  await ctx.storageState({ path: stateFile });
+  fs.chmodSync(stateFile, 0o600);
 }
 
 async function firstVisible(page: Page, selectors: string[], timeout = 15000): Promise<string | null> {
@@ -158,14 +168,20 @@ async function login(page: Page, user: string, pass: string, log: (m: string) =>
 
 // Reuse a saved session if still valid; otherwise log in fresh and persist it.
 // Returns the dashboard URL (carries the ?accountLink= param).
+//
+// `loginId` selects a SPECIFIC stored NgLogin (the per-login multi-account
+// orchestration in run.ts passes it so the fresh-login path authenticates as
+// that login). When omitted, fall back to store-first resolution (most-recently
+// verified NgLogin, else env creds) — preserving the original behavior.
 export async function ensureLoggedIn(
   page: Page,
-  log: (m: string) => void = () => {}
+  log: (m: string) => void = () => {},
+  loginId?: number
 ): Promise<string> {
   const ctx = page.context();
-  // Store-first: use a stored encrypted login when one exists, else env creds.
-  const { user, pass } = await resolveCreds();
-  if (fs.existsSync(STATE_FILE)) {
+  const { user, pass } = loginId !== undefined ? await resolveCredsForLogin(loginId) : await resolveCreds();
+  const stateFile = stateFileFor(loginId);
+  if (fs.existsSync(stateFile)) {
     log('trying saved session');
     await page
       .goto('https://myaccount.nationalgrid.com/dashboard', { waitUntil: 'domcontentloaded', timeout: 60000 })
@@ -179,7 +195,7 @@ export async function ensureLoggedIn(
     log('session expired, logging in fresh');
   }
   const url = await login(page, user, pass, log);
-  await saveState(ctx);
+  await saveState(ctx, loginId);
   log('session saved');
   return url;
 }

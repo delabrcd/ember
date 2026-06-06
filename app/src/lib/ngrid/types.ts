@@ -54,6 +54,10 @@ export interface CollectResult {
   costs: CostRow[];
   weather: WeatherRow[];
   pdfsDownloaded: number;
+  // The stored NgLogin this account was scraped under, if any. Threaded through
+  // to persist() so the upserted Account is tagged with its login. Undefined for
+  // env-bootstrapped scrapes (NGRID_USER/NGRID_PASS), which leave loginId null.
+  loginId?: number;
 }
 
 export type ProgressFn = (msg: string) => void;
