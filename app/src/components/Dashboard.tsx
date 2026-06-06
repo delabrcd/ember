@@ -14,6 +14,7 @@ interface Overview {
   account?: { accountNumber: string; serviceAddress?: string | null; region?: string | null; companyCode?: string | null; fuelTypes?: string[] } | null;
   billCount?: number;
   lifetimeSpend?: number;
+  nextBillEstimate?: { point: number; low: number; high: number; basis: string } | null;
   latestBill?: { statementDate: string; totalDueAmount: number | null } | null;
   firstStatement?: string | null;
   schedule?: { predictedNextBillDate: string | null; nextCheckAt: string | null; lastCheckedAt: string | null } | null;
@@ -173,6 +174,17 @@ export function Dashboard() {
             <div className="rounded-xl border border-amber-400/40 bg-amber-500/10 px-4 py-2 text-sm text-amber-200">
               Weather correction is enabled but there&apos;s no synced weather data yet. Click{' '}
               <span className="font-medium">Check for new bills</span> to pull Open-Meteo history, then it&apos;ll apply automatically.
+            </div>
+          )}
+          {ov?.nextBillEstimate && (
+            <div className="card">
+              <div className="card-title">
+                Est. next bill <span className="ml-1 rounded bg-slate-800/70 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-slate-400">estimate</span>
+              </div>
+              <div className="stat">~{usd(ov.nextBillEstimate.point, dp)}</div>
+              <div className="mt-1 text-xs text-slate-500">
+                range {usd(ov.nextBillEstimate.low, dp)}–{usd(ov.nextBillEstimate.high, dp)} · {ov.nextBillEstimate.basis} · not a real charge
+              </div>
             </div>
           )}
 

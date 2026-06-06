@@ -1,9 +1,33 @@
 import { describe, expect, it } from 'vitest';
-import { computeNextCheck, medianIntervalDays, predictNextBill } from '../src/lib/prediction';
+import { computeNextCheck, estimateNextBill, medianIntervalDays, predictNextBill } from '../src/lib/prediction';
+import type { MonthRow } from '../src/lib/chartSpec';
 
 const D = (s: string) => new Date(s + 'T00:00:00Z');
 const DAY = 24 * 60 * 60 * 1000;
 const iso = (d: Date) => d.toISOString().slice(0, 10);
+
+// Build a MonthRow with sensible nulls, then derive the all-in cost/rate fields
+// from kwh/therms at fixed unit prices so trailing12AllIn() is exactly known:
+// elec all-in = $0.20/kWh, gas all-in = $1.00/therm. billTotal is set explicitly.
+function row(p: { ym: number; kwh?: number | null; therms?: number | null; billTotal?: number | null }): MonthRow {
+  const kwh = p.kwh ?? null;
+  const therms = p.therms ?? null;
+  const elecBill = kwh != null ? +(kwh * 0.2).toFixed(6) : null;
+  const gasBill = therms != null ? +(therms * 1.0).toFixed(6) : null;
+  return {
+    ym: p.ym,
+    label: `${Math.floor(p.ym / 100)}-${String(p.ym % 100).padStart(2, '0')}`,
+    kwh,
+    therms,
+    elecSupply: null, gasSupply: null, elecDelivery: null, gasDelivery: null,
+    elecBill, gasBill,
+    elecRateSupply: null, gasRateSupply: null,
+    elecRateAllIn: null, gasRateAllIn: null,
+    avgTemp: null,
+    billTotal: p.billTotal ?? null,
+    hdd: null, cdd: null, kwhPerDegreeDay: null, thermsPerHdd: null,
+  };
+}
 
 describe('medianIntervalDays (hand-calculated)', () => {
   it('takes the median of consecutive gaps', () => {
@@ -51,5 +75,66 @@ describe('computeNextCheck (hand-calculated)', () => {
   it('weekly when there is no prediction', () => {
     const now = D('2026-06-08');
     expect(computeNextCheck(now, null).getTime()).toBe(now.getTime() + 7 * DAY);
+  });
+});
+
+describe('estimateNextBill (hand-calculated)', () => {
+  it('projects from the same calendar month last year and bands by ±1σ of recent costs', () => {
+    // 13 monthly rows 2025-05 .. 2026-05. Every row prices at $0.20/kWh and
+    // $1.00/therm (see row()), so trailing12AllIn -> exactly 0.20 and 1.00.
+    // Latest usage row is 2026-05 (ym 202605) -> target period 2026-06 (202606).
+    // Same month last year = 2025-06 (ym 202506), usage kwh=600, therms=40.
+    //   point = 600 * 0.20 + 40 * 1.00 = 120 + 40 = 160.00
+    // Band: sample stdev of the trailing-3 billTotal [150, 160, 170]:
+    //   mean 160; var = (100 + 0 + 100) / (3-1) = 100; stdev = 10; k=1
+    //   low = 160 - 10 = 150.00 ; high = 160 + 10 = 170.00
+    const rows: MonthRow[] = [
+      row({ ym: 202505, kwh: 500, therms: 50, billTotal: 100 }),
+      row({ ym: 202506, kwh: 600, therms: 40, billTotal: 100 }), // same month last year
+      row({ ym: 202507, kwh: 700, therms: 10, billTotal: 100 }),
+      row({ ym: 202508, kwh: 700, therms: 5, billTotal: 100 }),
+      row({ ym: 202509, kwh: 650, therms: 8, billTotal: 100 }),
+      row({ ym: 202510, kwh: 600, therms: 20, billTotal: 100 }),
+      row({ ym: 202511, kwh: 550, therms: 60, billTotal: 100 }),
+      row({ ym: 202512, kwh: 520, therms: 90, billTotal: 100 }),
+      row({ ym: 202601, kwh: 540, therms: 100, billTotal: 100 }),
+      row({ ym: 202602, kwh: 530, therms: 95, billTotal: 100 }),
+      row({ ym: 202603, kwh: 560, therms: 70, billTotal: 150 }), // trailing-3 cost
+      row({ ym: 202604, kwh: 580, therms: 45, billTotal: 160 }), // trailing-3 cost
+      row({ ym: 202605, kwh: 610, therms: 30, billTotal: 170 }), // latest usage + trailing-3 cost
+    ];
+    const est = estimateNextBill(rows);
+    expect(est).not.toBeNull();
+    expect(est!.point).toBeCloseTo(160.0, 6);
+    expect(est!.low).toBeCloseTo(150.0, 6);
+    expect(est!.high).toBeCloseTo(170.0, 6);
+    expect(est!.basis).toContain('same month last year');
+  });
+
+  it('falls back to the trailing-N usage average and a ±15% band when there is no last-year month or cost spread', () => {
+    // Only three rows, none a year before the target, and only ONE has billTotal
+    // (so sample stdev is undefined -> ±15% fallback band).
+    // Latest usage row 2026-05 (202605) -> target 2026-06 (202606); 202506 absent.
+    // Trailing-3 usage avg: kwh (100+200+300)/3 = 200 ; therms (10+20+30)/3 = 20.
+    //   point = 200 * 0.20 + 20 * 1.00 = 40 + 20 = 60.00
+    //   band: stdev undefined (one cost sample) -> ±15% of 60 = 9
+    //   low = 60 - 9 = 51.00 ; high = 60 + 9 = 69.00
+    const rows: MonthRow[] = [
+      row({ ym: 202603, kwh: 100, therms: 10, billTotal: 55 }),
+      row({ ym: 202604, kwh: 200, therms: 20 }),
+      row({ ym: 202605, kwh: 300, therms: 30 }),
+    ];
+    const est = estimateNextBill(rows);
+    expect(est).not.toBeNull();
+    expect(est!.point).toBeCloseTo(60.0, 6);
+    expect(est!.low).toBeCloseTo(51.0, 6);
+    expect(est!.high).toBeCloseTo(69.0, 6);
+    expect(est!.basis).toContain('trailing 3-mo avg');
+    expect(est!.basis).toContain('±15%');
+  });
+
+  it('returns null when there is no usable usage', () => {
+    expect(estimateNextBill([])).toBeNull();
+    expect(estimateNextBill([row({ ym: 202605, billTotal: 100 })])).toBeNull();
   });
 });
