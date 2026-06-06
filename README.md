@@ -27,7 +27,21 @@ docker compose up -d            # pulls the prebuilt image from GHCR
 
 Open **http://localhost:3000** and click **Check for new bills**.
 
-The image is published to **`ghcr.io/delabrcd/ngrid-dashboard`** by CI on every push to `main`. The first run logs
+### Image tags
+
+The image is published to **`ghcr.io/delabrcd/ngrid-dashboard`** by CI:
+
+| Tag | Points at |
+|---|---|
+| `latest` | the newest tagged release (what `docker compose` pulls by default) |
+| `X.Y.Z`, `X.Y`, `X` | a specific [semver](https://semver.org) release (e.g. `0.1.0`, `0.1`, `0`) |
+| `edge` | the current `main` branch |
+| `sha-xxxxxxx` | the exact commit of any build |
+
+Pin a release for reproducibility by setting `image: ghcr.io/delabrcd/ngrid-dashboard:0.1.0`
+in your compose file. Cutting a release: bump `app/package.json` `version`, then
+`git tag vX.Y.Z && git push origin vX.Y.Z` (CI builds and tags the image; create a GitHub
+Release from the tag for notes). The first run logs
 in, downloads your whole history and every PDF (a couple of minutes), then the charts
 fill in. After that it keeps itself up to date automatically.
 
