@@ -3,9 +3,17 @@
 // hand it DB rows.
 import { prisma } from '@/lib/db';
 import type { MonthRow } from '@/lib/chartSpec';
-import { deriveMonthlySeries } from '@/lib/series';
+import { deriveMonthlySeries, type DegreeDayInput } from '@/lib/series';
+import { sumDegreeDays } from '@/lib/weather/degreeDays';
+import { getSetting } from '@/lib/settings';
 
 const ymOf = (d: Date) => d.getUTCFullYear() * 100 + (d.getUTCMonth() + 1);
+const ymd = (d: Date) => d.toISOString().slice(0, 10);
+
+// First/last day of the calendar month a statement falls in (UTC), used as the
+// degree-day window fallback when a bill is missing periodFrom/periodTo.
+const monthStart = (d: Date) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1));
+const monthEnd = (d: Date) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0));
 
 export type { MonthRow };
 
@@ -15,11 +23,13 @@ export async function getDefaultAccount() {
 
 export async function getMonthlySeries(accountId: number): Promise<MonthRow[]> {
   const account = await prisma.account.findUnique({ where: { id: accountId } });
-  const [usages, costs, weather, bills] = await Promise.all([
+  const [usages, costs, weather, bills, daily, baseSetting] = await Promise.all([
     prisma.usage.findMany({ where: { accountId } }),
     prisma.cost.findMany({ where: { accountId } }),
     account?.region ? prisma.weather.findMany({ where: { region: account.region } }) : Promise.resolve([]),
     prisma.bill.findMany({ where: { accountId } }),
+    prisma.weatherDaily.findMany({ where: { accountId }, orderBy: { date: 'asc' } }),
+    getSetting('degreeDayBaseF'),
   ]);
 
   // One temp per month: prefer the full-history Open-Meteo rollup over NG's
@@ -30,6 +40,23 @@ export async function getMonthlySeries(accountId: number): Promise<MonthRow[]> {
     if (w.source === 'open-meteo' || !tempByYm.has(ym)) tempByYm.set(ym, w.avgTemperature);
   }
 
+  // Degree-days per bill PERIOD. Read the configurable balance point (default 65°F)
+  // and, for each bill, sum HDD/CDD over [periodFrom, periodTo] — falling back to
+  // the statement's calendar month when a period bound is missing — from the daily
+  // temps. Keyed to ymOf(statementDate) so it lines up with the rest of the series.
+  const baseF = Number.parseFloat(baseSetting ?? '');
+  const base = Number.isFinite(baseF) ? baseF : 65;
+  const dailyRows = daily.map((d) => ({ date: ymd(d.date), tMean: d.tMean }));
+  const degreeDays: DegreeDayInput[] = bills.map((b) => {
+    const from = b.periodFrom ?? monthStart(b.statementDate);
+    const to = b.periodTo ?? monthEnd(b.statementDate);
+    const lo = ymd(from);
+    const hi = ymd(to);
+    const window = dailyRows.filter((d) => d.date >= lo && d.date <= hi);
+    const { hdd, cdd } = sumDegreeDays(window, base);
+    return { ym: ymOf(b.statementDate), hdd, cdd };
+  });
+
   return deriveMonthlySeries({
     usages: usages.map((u) => ({ periodYearMonth: u.periodYearMonth, usageType: u.usageType, quantity: u.quantity })),
     costs: costs.map((c) => ({ periodYearMonth: c.periodYearMonth, fuelType: c.fuelType, kind: c.kind, amount: c.amount })),
@@ -37,6 +64,7 @@ export async function getMonthlySeries(accountId: number): Promise<MonthRow[]> {
     // Use the bill PDF's current charges (this period's energy cost) for analysis,
     // falling back to the API amount due only if a PDF wasn't parsed.
     bills: bills.map((b) => ({ ym: ymOf(b.statementDate), totalDueAmount: b.currentCharges ?? b.totalDueAmount })),
+    degreeDays,
   });
 }
 

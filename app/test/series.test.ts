@@ -16,6 +16,8 @@ describe('deriveMonthlySeries (hand-calculated)', () => {
     ],
     weather: [{ ym: 202601, avgTemperature: 25 }],
     bills: [{ ym: 202601, totalDueAmount: 147.5 }],
+    // A 31-day Jan period worth of degree-days, summed by the caller.
+    degreeDays: [{ ym: 202601, hdd: 1000, cdd: 250 }],
   });
   const r = rows[0];
 
@@ -44,6 +46,30 @@ describe('deriveMonthlySeries (hand-calculated)', () => {
     expect(r.gasRateAllIn).toBeCloseTo(1.0, 10); // 50 / 50
   });
 
+  it('degree-days attach to the month', () => {
+    expect(r.hdd).toBe(1000);
+    expect(r.cdd).toBe(250);
+  });
+
+  it('weather-normalized usage: kWh/(HDD+CDD) and therms/HDD', () => {
+    // kwhPerDegreeDay = kwh / (hdd + cdd) = 500 / (1000 + 250) = 500 / 1250 = 0.4
+    expect(r.kwhPerDegreeDay).toBeCloseTo(0.4, 10);
+    // thermsPerHdd = therms / hdd = 50 / 1000 = 0.05
+    expect(r.thermsPerHdd).toBeCloseTo(0.05, 10);
+  });
+
+  it('leaves normalized metrics null when degree-days are zero/missing', () => {
+    const [noDD] = deriveMonthlySeries({
+      usages: [{ periodYearMonth: 202603, usageType: 'TOTAL_KWH', quantity: 500 }],
+      costs: [],
+      weather: [],
+      bills: [],
+      degreeDays: [{ ym: 202603, hdd: 0, cdd: 0 }],
+    });
+    expect(noDD.kwhPerDegreeDay).toBeNull(); // 500 / 0 -> null
+    expect(noDD.thermsPerHdd).toBeNull(); // no therms and hdd 0 -> null
+  });
+
   it('leaves rates null when usage is missing (no divide-by-zero)', () => {
     const [only] = deriveMonthlySeries({
       usages: [],
@@ -61,7 +87,8 @@ const mkRow = (over: Partial<MonthRow>): MonthRow => ({
   elecSupply: null, gasSupply: null, elecDelivery: null, gasDelivery: null,
   elecBill: null, gasBill: null,
   elecRateSupply: null, gasRateSupply: null, elecRateAllIn: null, gasRateAllIn: null,
-  avgTemp: null, billTotal: null, ...over,
+  avgTemp: null, billTotal: null,
+  hdd: null, cdd: null, kwhPerDegreeDay: null, thermsPerHdd: null, ...over,
 });
 
 describe('trailing12AllIn (hand-calculated)', () => {

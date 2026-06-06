@@ -19,6 +19,13 @@ export interface MonthRow {
   gasRateAllIn: number | null;
   avgTemp: number | null;
   billTotal: number | null;
+  // Weather normalization (issue #5). hdd/cdd are summed over the bill period;
+  // the *PerDegreeDay rates divide usage by degree-days (see series.ts for the
+  // exact definitions). All null when the inputs are missing.
+  hdd: number | null;
+  cdd: number | null;
+  kwhPerDegreeDay: number | null;
+  thermsPerHdd: number | null;
 }
 
 export type SeriesKey = Exclude<keyof MonthRow, 'ym' | 'label'>;
@@ -48,10 +55,14 @@ const GAS = '#38bdf8';
 const GAS_SOFT = '#7dd3fc';
 const TEMP = '#fb7185';
 const TOTAL = '#e2e8f0';
+const HDD = '#fb7185';
+const CDD = '#38bdf8';
 
 const money = (v: number) => `$${v}`;
 const money2 = (v: number) => `$${(+v).toFixed(2)}`;
 const deg = (v: number) => `${v}°`;
+const dd = (v: number) => `${Math.round(v)}`;
+const num3 = (v: number) => `${(+v).toFixed(3)}`;
 
 export const CHART_SPECS: ChartSpec[] = [
   {
@@ -103,6 +114,29 @@ export const CHART_SPECS: ChartSpec[] = [
     ],
     rightFmt: deg,
     filter: (r) => r.avgTemp != null && (r.kwh != null || r.therms != null),
+  },
+  {
+    id: 'degreeDays',
+    title: 'Degree-days',
+    subtitle: 'Heating (HDD) and cooling (CDD) degree-days per bill period',
+    series: [
+      { key: 'hdd', label: 'HDD', color: HDD, role: 'bar', axis: 'left' },
+      { key: 'cdd', label: 'CDD', color: CDD, role: 'bar', axis: 'left' },
+    ],
+    leftFmt: dd,
+    filter: (r) => r.hdd != null || r.cdd != null,
+  },
+  {
+    id: 'normalized',
+    title: 'Weather-normalized usage',
+    subtitle: 'kWh per degree-day (HDD+CDD) and therms per HDD — flat = weather-driven',
+    series: [
+      { key: 'kwhPerDegreeDay', label: 'kWh / degree-day', color: ELEC, role: 'line', axis: 'left' },
+      { key: 'thermsPerHdd', label: 'therms / HDD', color: GAS, role: 'line', axis: 'right' },
+    ],
+    leftFmt: num3,
+    rightFmt: num3,
+    filter: (r) => r.kwhPerDegreeDay != null || r.thermsPerHdd != null,
   },
 ];
 
