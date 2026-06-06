@@ -1,21 +1,20 @@
 'use client';
 
-import {
-  RANGE_PRESETS,
-  resolveRange,
-  ymToYmd,
-  ymdToYm,
-  type RangePref,
-} from '@/lib/range';
+import { RANGE_PRESETS, resolveRange, type RangePref } from '@/lib/range';
+import { MonthRangePicker } from './MonthRangePicker';
 
-// The dashboard's date-range picker (issue #24). Preset chips (All / YTD / 12 /
-// 24 / 36 mo) plus a custom from→to month pair. It drives the charts, the bills
-// list AND the export scoping through a single persisted RangePref (prefs.range).
+// The dashboard's date-range picker (issue #24, visual picker in #39). Preset
+// chips (All / YTD / 12 / 24 / 36 mo) plus a visual month/year range popover that
+// replaces the old native <input type="month"> pair. It drives the charts, the
+// bills list AND the export scoping through a single persisted RangePref
+// (prefs.range).
 //
-// The from/to inputs always show the *resolved* bounds for the active preset, so
-// switching to "Custom" pre-fills with whatever was on screen rather than going
-// blank. Editing either input flips the preset to 'custom'. `allYms`/`nowYm` come
-// from the live data so the inputs clamp to the real history.
+// The picker always shows the *resolved* bounds for the active preset, so opening
+// it on a preset pre-fills with whatever is on screen rather than going blank.
+// Picking a month flips the preset to 'custom'; choosing a preset chip reflects
+// straight back into the picker's displayed span. `allYms`/`nowYm` come from the
+// live data so the picker clamps to the real history (months outside it are
+// greyed/disabled).
 export function RangeControl({
   range,
   onChange,
@@ -28,20 +27,9 @@ export function RangeControl({
   nowYm: number;
 }) {
   const resolved = resolveRange(range, allYms, nowYm);
-  // The date inputs operate on the first-of-month for the resolved bounds.
-  const fromYmd = ymToYmd(resolved.fromYm);
-  const toYmd = ymToYmd(resolved.toYm);
-  const dataMin = allYms.length ? ymToYmd(Math.min(...allYms)) : undefined;
-  const dataMax = allYms.length ? ymToYmd(Math.max(...allYms)) : undefined;
-
-  const setCustomFrom = (ymd: string) => {
-    const ym = ymdToYm(ymd);
-    onChange({ preset: 'custom', fromYm: ym, toYm: resolved.toYm });
-  };
-  const setCustomTo = (ymd: string) => {
-    const ym = ymdToYm(ymd);
-    onChange({ preset: 'custom', fromYm: resolved.fromYm, toYm: ym });
-  };
+  // Clamp the picker to the data's natural span (first statement → latest ym).
+  const minYm = allYms.length ? Math.min(...allYms) : null;
+  const maxYm = allYms.length ? Math.max(...allYms) : null;
 
   return (
     <div className="flex flex-wrap items-center gap-2">
@@ -60,31 +48,14 @@ export function RangeControl({
           </button>
         ))}
       </div>
-      <div
-        className={`inline-flex items-center gap-1 rounded-lg border px-2 py-0.5 transition ${
-          range.preset === 'custom' ? 'border-amber-500/60 bg-slate-800/60' : 'border-slate-700 bg-slate-800/30'
-        }`}
-      >
-        <input
-          type="month"
-          aria-label="Range start month"
-          value={fromYmd.slice(0, 7)}
-          min={dataMin?.slice(0, 7)}
-          max={toYmd.slice(0, 7)}
-          onChange={(e) => setCustomFrom(e.target.value)}
-          className="bg-transparent text-xs text-slate-200 focus:outline-none [color-scheme:dark]"
-        />
-        <span className="text-xs text-slate-500">→</span>
-        <input
-          type="month"
-          aria-label="Range end month"
-          value={toYmd.slice(0, 7)}
-          min={fromYmd.slice(0, 7)}
-          max={dataMax?.slice(0, 7)}
-          onChange={(e) => setCustomTo(e.target.value)}
-          className="bg-transparent text-xs text-slate-200 focus:outline-none [color-scheme:dark]"
-        />
-      </div>
+      <MonthRangePicker
+        fromYm={resolved.fromYm}
+        toYm={resolved.toYm}
+        minYm={minYm}
+        maxYm={maxYm}
+        active={range.preset === 'custom'}
+        onChange={({ fromYm, toYm }) => onChange({ preset: 'custom', fromYm, toYm })}
+      />
     </div>
   );
 }

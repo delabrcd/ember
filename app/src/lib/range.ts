@@ -78,6 +78,60 @@ export function ymMinusMonths(ym: number, n: number): number {
   return y * 100 + (mo + 1);
 }
 
+// ── visual month/year picker helpers (issue #39) ────────────────────────────
+// Pure building blocks for the RangeControl popover (12-month grid, year nav,
+// clamping/disabling, labels, from/to swap). No DB/browser/React. Tested in
+// test/monthPicker.test.ts.
+
+const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'] as const;
+
+// Compose a ym integer from a year and a 1-based month. PURE.
+export const ymOf = (year: number, month: number): number => year * 100 + month;
+
+// Split a ym back into { year, month } (month 1-based). PURE.
+export function ymParts(ym: number): { year: number; month: number } {
+  return { year: Math.floor(ym / 100), month: ym % 100 };
+}
+
+// The twelve months of a calendar year as pickable cells. PURE — the popover
+// maps these to buttons. `label` is the short month name; `ym` is YYYYMM.
+export function monthGrid(year: number): { month: number; label: string; ym: number }[] {
+  return MONTH_LABELS.map((label, i) => ({ month: i + 1, label, ym: ymOf(year, i + 1) }));
+}
+
+// Clamp a ym into the inclusive [minYm, maxYm] data window. Either bound may be
+// null/undefined to leave that side open. PURE.
+export function clampYm(ym: number, minYm: number | null | undefined, maxYm: number | null | undefined): number {
+  let out = ym;
+  if (minYm != null && out < minYm) out = minYm;
+  if (maxYm != null && out > maxYm) out = maxYm;
+  return out;
+}
+
+// A human label for a ym, e.g. 202405 → "May 2024". PURE — used on the picker
+// trigger button and the from/to headers.
+export function ymToLabel(ym: number | null | undefined): string {
+  if (ym == null) return '—';
+  const { year, month } = ymParts(ym);
+  const name = MONTH_LABELS[month - 1] ?? '??';
+  return `${name} ${year}`;
+}
+
+// True when a month falls outside the data window and so should be greyed/disabled
+// in the grid. Open bounds (null) never disable that side. PURE.
+export function isMonthDisabled(ym: number, minYm: number | null | undefined, maxYm: number | null | undefined): boolean {
+  if (minYm != null && ym < minYm) return true;
+  if (maxYm != null && ym > maxYm) return true;
+  return false;
+}
+
+// Normalise a (from, to) pair so from ≤ to, swapping if the user picked them out
+// of order. PURE — mirrors resolveRange's custom-range swap so the picker and the
+// resolver agree. Returns a fresh tuple.
+export function normalizeFromTo(fromYm: number, toYm: number): { fromYm: number; toYm: number } {
+  return fromYm <= toYm ? { fromYm, toYm } : { fromYm: toYm, toYm: fromYm };
+}
+
 // ── resolution ──────────────────────────────────────────────────────────────
 
 // Resolve a RangePref against the data's natural span into concrete inclusive
