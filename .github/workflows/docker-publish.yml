@@ -3,12 +3,33 @@ name: Build and publish image
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   release:
     types: [published]   # publishing a GitHub Release creates the tag and drives the build
   workflow_dispatch:
 
 jobs:
+  # Hand-calculated unit tests (vitest) via the Dockerfile `test` stage. Runs on
+  # every PR and push so numeric accuracy gates merges; build-push needs it green.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build test image
+        run: docker build --target test -t ngrid-dashboard-test ./app
+
+      - name: Run unit tests
+        run: docker run --rm ngrid-dashboard-test
+
   build-push:
+    # Gate the image publish on tests passing. PRs only run the test job above
+    # (no publish — no secrets, and forks can't push to GHCR).
+    needs: test
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
