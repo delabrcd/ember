@@ -25,10 +25,63 @@ jobs:
       - name: Run unit tests
         run: docker run --rm ngrid-dashboard-test
 
+  # Upgrade-safety: applying the current schema on top of the PREVIOUS release's
+  # database must not clobber data. The deploy entrypoint uses `prisma db push
+  # --accept-data-loss` with no rollback, so a destructive schema change would
+  # silently delete production rows. This seeds the old schema and upgrades.
+  migration-safety:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ngrid
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: ngrid
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ngrid" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://ngrid:ci@localhost:5432/ngrid
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need tags to resolve the previous release schema
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install prisma CLI
+        run: cd app && npm install --no-audit --no-fund
+
+      - name: Resolve previous release schema
+        id: prev
+        run: |
+          PREV=$(git tag -l 'v*' --sort=-v:refname | grep -vx "${GITHUB_REF_NAME}" | head -1 || true)
+          if [ -z "$PREV" ]; then
+            echo "No prior release tag — skipping (nothing to upgrade from)."
+            echo "skip=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "Previous release: $PREV"
+            git show "$PREV:app/prisma/schema.prisma" > /tmp/old.prisma
+            echo "skip=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Verify upgrade preserves data
+        if: steps.prev.outputs.skip == '0'
+        env:
+          OLD_SCHEMA: /tmp/old.prisma
+          NEW_SCHEMA: app/prisma/schema.prisma
+        run: bash .github/migration-safety/check.sh
+
   build-push:
-    # Gate the image publish on tests passing. PRs only run the test job above
-    # (no publish — no secrets, and forks can't push to GHCR).
-    needs: test
+    # Gate the image publish on tests AND the upgrade-safety check passing. PRs
+    # only run the test + migration-safety jobs above (no publish — no secrets,
+    # and forks can't push to GHCR).
+    needs: [test, migration-safety]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
