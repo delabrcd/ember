@@ -10,8 +10,10 @@
 // persisted somewhere, defeating the "key only in env" rule.
 //
 // This module is PURE given the key: every function accepts an optional explicit
-// key so tests don't depend on the environment. Only `deriveKey` reads env.
+// key so tests don't depend on the environment. Only `deriveKey` reads env, and
+// (when no env secret is set) the persisted auto-key — see lib/ngrid/secretKey.ts.
 import crypto from 'node:crypto';
+import { resolveSecretKeyMaterial } from '@/lib/ngrid/secretKey';
 
 // Fixed, non-secret application salt for the scrypt KDF. Changing this value
 // invalidates every previously-encrypted row, so treat it as a constant.
@@ -32,9 +34,11 @@ export interface EncryptedSecret {
 }
 
 // Derive the 32-byte AES key from a raw secret. Throws if the secret is missing
-// or too short. Reads `NGRID_SECRET_KEY` when no secret is passed.
+// or too short. When no secret is passed, resolves the key material via
+// lib/ngrid/secretKey.ts: `NGRID_SECRET_KEY` if set, else a persisted/auto-
+// generated key file. An explicit `secret` (e.g. in tests) bypasses the resolver.
 export function deriveKey(secret?: string): Buffer {
-  const raw = secret ?? process.env.NGRID_SECRET_KEY;
+  const raw = secret ?? resolveSecretKeyMaterial();
   if (!raw) {
     throw new Error(
       'NGRID_SECRET_KEY is not set — required to encrypt/decrypt stored National Grid credentials. ' +

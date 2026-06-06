@@ -20,6 +20,7 @@
 // stage with NO `prisma generate` — a transitive `@/lib/db` import would fail to
 // resolve `@prisma/client`. Prisma is therefore lazy-imported inside the runner.
 import { decryptSecret, encryptSecret } from '@/lib/crypto';
+import { resolveSecretKeyMaterial } from '@/lib/ngrid/secretKey';
 import { VERIFIED } from '@/lib/ngrid/loginStatus';
 
 // Normalize a username for the "already imported?" comparison: trimmed and
@@ -67,13 +68,16 @@ export type BootstrapResult =
 // username-exists check — and wrapped so it NEVER throws into startup.
 export async function bootstrapEnvLogin(): Promise<BootstrapResult> {
   try {
-    const secretKey = process.env.NGRID_SECRET_KEY;
+    // The encrypt key is ALWAYS resolvable now: env `NGRID_SECRET_KEY` if set,
+    // else the persisted/auto-generated key file (see lib/ngrid/secretKey.ts).
+    // So the cutover happens on first start with env creds present, no manual
+    // env var required. Resolving here also lazily creates the key file if absent.
+    const secretKey = resolveSecretKeyMaterial();
     const envUser = process.env.NGRID_USER;
     const envPass = process.env.NGRID_PASS;
 
-    // Cheap pre-checks that don't need the DB (key/creds present at all). If we
+    // Cheap pre-checks that don't need the DB (creds present at all). If we
     // already know we won't import, skip the query entirely.
-    if (!secretKey) return { ok: true, skipped: true, reason: 'NGRID_SECRET_KEY not set' };
     const user = (envUser ?? '').trim();
     if (!user || !envPass) {
       return { ok: true, skipped: true, reason: 'NGRID_USER / NGRID_PASS not set' };
@@ -86,6 +90,7 @@ export async function bootstrapEnvLogin(): Promise<BootstrapResult> {
     const existing = await prisma.ngLogin.findMany({ select: { username: true } });
     if (
       !shouldBootstrapEnvLogin({
+        // A key is always resolvable (env or auto-key file), so this is always true.
         secretKeySet: true,
         envUser,
         envPass,

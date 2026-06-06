@@ -14,6 +14,7 @@ import {
 import { ConfigurableChart } from './ConfigurableChart';
 import { AccountSwitcher } from './AccountSwitcher';
 import { RefreshButton } from './RefreshButton';
+import { NgLoginsSection } from './NgLoginsSection';
 import { dateLabel, num, rate, relativeFromNow, usd } from '@/lib/format';
 
 interface Overview {
@@ -44,6 +45,13 @@ export function Dashboard() {
   // Logins flagged needs_reauth: scraping for them is paused until the operator
   // re-authenticates (in Settings). Existing data keeps showing regardless.
   const [reauthLogins, setReauthLogins] = useState<{ id: number; label: string }[]>([]);
+  // First-run setup: a brand-new install with no data and no credential to scrape
+  // with. Shows the guided setup state instead of the empty dashboard. null until
+  // /api/ng-logins answers, so we don't flash the wrong state on load.
+  const [needsSetup, setNeedsSetup] = useState<boolean | null>(null);
+  // Becomes true once a login has been added during setup, so we can prompt for
+  // the initial scrape ("Check for new bills") right there.
+  const [hasLogin, setHasLogin] = useState(false);
 
   // The selected account, validated against the live list (a stale persisted id
   // is ignored). null = the default account, which the routes already resolve.
@@ -59,16 +67,30 @@ export function Dashboard() {
       .catch(() => setAccounts([]));
   }, []);
 
-  // Surface any login that needs re-authentication so the operator knows
-  // scraping is paused for it (the data below is still its last-known state).
-  useEffect(() => {
-    fetch('/api/ng-logins', { cache: 'no-store' })
-      .then((r) => r.json())
-      .then((j: { logins?: { id: number; label: string; status: string | null }[] }) =>
-        setReauthLogins((j.logins || []).filter((l) => l.status === 'needs_reauth').map((l) => ({ id: l.id, label: l.label })))
-      )
-      .catch(() => setReauthLogins([]));
+  // Pull the NG-login state: surfaces any login that needs re-authentication (so
+  // the operator knows scraping is paused for it) AND the first-run `needsSetup`
+  // flag. Re-fetched after a login is added during setup so the UI advances.
+  const loadLogins = useCallback(async () => {
+    try {
+      const j: {
+        needsSetup?: boolean;
+        logins?: { id: number; label: string; status: string | null }[];
+      } = await fetch('/api/ng-logins', { cache: 'no-store' }).then((r) => r.json());
+      const logins = j.logins || [];
+      setReauthLogins(
+        logins.filter((l) => l.status === 'needs_reauth').map((l) => ({ id: l.id, label: l.label }))
+      );
+      setNeedsSetup(Boolean(j.needsSetup));
+      setHasLogin(logins.length > 0);
+    } catch {
+      setReauthLogins([]);
+      setNeedsSetup(false);
+    }
   }, []);
+
+  useEffect(() => {
+    loadLogins();
+  }, [loadLogins]);
 
   const load = useCallback(async () => {
     const [o, s, b] = await Promise.all([
@@ -98,6 +120,50 @@ export function Dashboard() {
   const ranged = prefs.rangeMonths > 0 ? rows.slice(-prefs.rangeMonths) : rows;
   const dp = prefs.currencyDecimals;
   const visibleCharts = prefs.order.filter((id) => prefs.charts[id]?.visible && SPEC_BY_ID[id]);
+
+  // First-run setup: a fresh install with no data and nothing to scrape with.
+  // Show a guided welcome + the add-login flow front-and-center instead of the
+  // empty dashboard. Existing installs never reach here (needsSetup is false).
+  if (needsSetup) {
+    return (
+      <div className="mx-auto max-w-2xl space-y-6">
+        <header className="text-center">
+          <div className="flex items-center justify-center gap-2">
+            <h1 className="text-2xl font-bold tracking-tight text-slate-50">Welcome to your National Grid Dashboard</h1>
+            <span className="rounded-full border border-slate-700/70 bg-slate-800/50 px-2 py-0.5 font-mono text-xs text-slate-400">
+              v{process.env.NEXT_PUBLIC_APP_VERSION || 'dev'}
+            </span>
+          </div>
+          <p className="mx-auto mt-2 max-w-prose text-sm text-slate-400">
+            Let&apos;s get set up. Add your National Grid login below — it&apos;s stored encrypted (AES-256-GCM) and used
+            only to scrape your own account&apos;s bills and usage. Adding it runs a real login to verify it; if National
+            Grid sends a one-time code you&apos;ll be asked for it here.
+          </p>
+        </header>
+
+        {/* The existing add-login flow (with its OTP pre-flight) front-and-center. */}
+        <NgLoginsSection />
+
+        {/* Once a login exists, prompt the first scrape right here. */}
+        {hasLogin ? (
+          <div className="card text-center">
+            <h2 className="text-lg font-semibold text-slate-100">You&apos;re connected</h2>
+            <p className="mx-auto mt-1 max-w-prose text-sm text-slate-400">
+              Now pull your history. The first run downloads every bill and PDF and can take a couple of minutes.
+            </p>
+            <div className="mt-3 flex justify-center">
+              <RefreshButton onDone={() => { load(); loadLogins(); }} />
+            </div>
+          </div>
+        ) : (
+          <p className="text-center text-xs text-slate-500">
+            Already running behind a reverse proxy or SSO? This page inherits that access gate — it&apos;s not a public
+            login.
+          </p>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -170,7 +236,7 @@ export function Dashboard() {
         </div>
       )}
 
-      {loading ? (
+      {loading || needsSetup === null ? (
         <div className="card text-slate-400">Loading…</div>
       ) : empty ? (
         <div className="card">
