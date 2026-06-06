@@ -3,10 +3,27 @@
 // hitting /api/cron/tick — no in-process cron daemon (keeps the build edge-safe
 // and the trigger reliable on the Node runtime).
 import { prisma } from '@/lib/db';
+import { bootstrapEnvLogin } from '@/lib/ngrid/bootstrap';
 import { ScrapeBusyError, ScrapeThrottledError, runScrape } from '@/lib/ngrid/run';
 import { isSchedulerEnabled } from '@/lib/settings';
 
+// Process-level guard so the env→NgLogin cutover bootstrap only does its DB query
+// once per process (it's a no-op after the first import, so re-checking every
+// hourly tick would be wasted work). It MUST still run on the FIRST tick after
+// boot — that is the reliable trigger, because Next's instrumentation `register()`
+// hook does NOT fire under `npx next start` in the built image.
+let bootstrapRan = false;
+
 export async function tickOnce(): Promise<{ ran: boolean; reason: string }> {
+  // Run the one-time env→NgLogin cutover bootstrap before any due/disabled checks
+  // so a fresh prod deploy is migrated to the encrypted store even when the
+  // scheduler is disabled. `bootstrapEnvLogin()` is idempotent (username-exists
+  // check) and never throws, so it can't break the tick.
+  if (!bootstrapRan) {
+    bootstrapRan = true;
+    await bootstrapEnvLogin();
+  }
+
   if (!(await isSchedulerEnabled())) return { ran: false, reason: 'disabled' };
   const states = await prisma.scheduleState.findMany();
   const now = new Date();
