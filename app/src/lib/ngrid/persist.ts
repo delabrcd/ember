@@ -111,11 +111,14 @@ export async function persist(result: CollectResult): Promise<PersistSummary> {
     });
   }
 
+  // NG's weather feed is the FALLBACK source ("ng"). The full-history Open-Meteo
+  // rows are written separately (source="open-meteo") by syncHistoricalWeather,
+  // so the two never collide on the (region, monthYear, source) key.
   for (const w of result.weather) {
     const monthYear = asDate(w.monthYear)!;
     await prisma.weather.upsert({
-      where: { region_monthYear: { region: w.region, monthYear } },
-      create: { region: w.region, monthYear, avgTemperature: w.avgTemperature, unit: w.unit },
+      where: { region_monthYear_source: { region: w.region, monthYear, source: 'ng' } },
+      create: { region: w.region, monthYear, avgTemperature: w.avgTemperature, unit: w.unit, source: 'ng' },
       update: { avgTemperature: w.avgTemperature, unit: w.unit },
     });
   }

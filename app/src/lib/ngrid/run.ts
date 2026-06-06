@@ -3,6 +3,7 @@
 // (manual button) and the scheduler.
 import { prisma } from '@/lib/db';
 import { computeNextCheck, predictNextBill } from '@/lib/prediction';
+import { syncHistoricalWeather } from '@/lib/weather/sync';
 import { collect } from './collect';
 import { persist } from './persist';
 import type { ProgressFn } from './types';
@@ -54,6 +55,14 @@ export async function runScrape(
       });
       const summary = await persist(result);
       await updateSchedule(summary.accountId);
+      // Pull full-history daily temps from Open-Meteo (NG's feed is ~24 mo only).
+      // Non-fatal: a weather hiccup must not fail an otherwise-good scrape.
+      try {
+        const w = await syncHistoricalWeather(summary.accountId);
+        log(`weather: ${w.dailyUpserted} daily, ${w.monthsUpserted} monthly${w.skipped ? ` (${w.skipped})` : ''}`);
+      } catch (werr: any) {
+        log(`weather sync skipped: ${String(werr?.message || werr).slice(0, 200)}`);
+      }
       await prisma.scrapeRun.update({
         where: { id: run.id },
         data: {
