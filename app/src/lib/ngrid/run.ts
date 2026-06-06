@@ -8,9 +8,14 @@ import { notifyNewBills } from '@/lib/notify';
 import { collect } from './collect';
 import { persist } from './persist';
 import { classifyLoginError, shouldSkipScheduled, statusOnSuccess } from './loginStatus';
+import { formatProgressLine } from './progress';
 import type { ProgressFn } from './types';
 
 const MIN_SCHEDULED_GAP_MS = 5 * 60 * 1000; // don't auto-scrape more often than this
+// Don't write a live-progress update to the DB more often than this. Steps that
+// fire in a tight burst (e.g. per-PDF logs) collapse to at most one write per
+// window so we stay cheap; the trailing edge always flushes the latest line.
+const PROGRESS_THROTTLE_MS = 1000;
 let inFlight: Promise<number> | null = null; // in-process concurrency guard
 
 export class ScrapeBusyError extends Error {}
@@ -55,6 +60,50 @@ export async function runScrape(
 
   const run = await prisma.scrapeRun.create({ data: { trigger, status: 'RUNNING' } });
 
+  // Live progress (issue #40): persist the latest progress line into
+  // ScrapeRun.message while the run is RUNNING so the UI can poll it and show the
+  // current step. Throttled to one write per PROGRESS_THROTTLE_MS (per-PDF logs
+  // can fire fast) with a trailing flush so the newest line always lands. The
+  // final success/error message (set below) overwrites this — we never write
+  // progress after the run is finalized. Each write is best-effort: a transient
+  // DB hiccup updating progress must never fail an otherwise-good scrape.
+  let lastWrite = 0;
+  let pending: string | null = null;
+  let flushTimer: ReturnType<typeof setTimeout> | null = null;
+  let finalized = false;
+  const writeProgress = (line: string): void => {
+    if (finalized) return;
+    void prisma.scrapeRun
+      .updateMany({ where: { id: run.id, status: 'RUNNING' }, data: { message: line } })
+      .catch(() => {});
+  };
+  const progress: ProgressFn = (msg) => {
+    log(msg); // preserve the caller's logging (scheduler console, etc.)
+    if (finalized) return;
+    const line = formatProgressLine(msg);
+    if (!line) return;
+    const now = Date.now();
+    if (now - lastWrite >= PROGRESS_THROTTLE_MS) {
+      lastWrite = now;
+      pending = null;
+      writeProgress(line);
+    } else {
+      // Within the window: remember the latest line and schedule a trailing flush.
+      pending = line;
+      if (!flushTimer) {
+        flushTimer = setTimeout(() => {
+          flushTimer = null;
+          if (pending !== null) {
+            lastWrite = Date.now();
+            const l = pending;
+            pending = null;
+            writeProgress(l);
+          }
+        }, PROGRESS_THROTTLE_MS - (now - lastWrite));
+      }
+    }
+  };
+
   const task = (async (): Promise<number> => {
     try {
       // Scrape each stored NgLogin sequentially (good-guest: one session at a
@@ -69,7 +118,7 @@ export async function runScrape(
         trigger === 'SCHEDULED' ? allLogins.filter((l) => !shouldSkipScheduled(l.status)) : allLogins;
       for (const l of allLogins) {
         if (trigger === 'SCHEDULED' && shouldSkipScheduled(l.status)) {
-          log(`skipping login "${l.label}" (needs re-authentication)`);
+          progress(`skipping login "${l.label}" (needs re-authentication)`);
         }
       }
       const passes: { loginId?: number }[] = logins.length
@@ -92,7 +141,7 @@ export async function runScrape(
         // and returns one result per account.
         let results;
         try {
-          results = await collect((m) => log(m), { loginId: pass.loginId });
+          results = await collect((m) => progress(m), { loginId: pass.loginId });
         } catch (loginErr: any) {
           const msg = String(loginErr?.message || loginErr);
           const cls = classifyLoginError(msg);
@@ -107,7 +156,7 @@ export async function runScrape(
               where: { id: pass.loginId },
               data: { status: 'needs_reauth', lastVerifiedAt: undefined },
             });
-            log(`login ${pass.loginId} needs re-authentication: ${cls.reason} — skipping it`);
+            progress(`login ${pass.loginId} needs re-authentication: ${cls.reason} — skipping it`);
             skippedLogins += 1;
             continue;
           }
@@ -121,9 +170,9 @@ export async function runScrape(
           // only). Non-fatal: a weather hiccup must not fail a good scrape.
           try {
             const w = await syncHistoricalWeather(summary.accountId);
-            log(`weather: ${w.dailyUpserted} daily, ${w.monthsUpserted} monthly${w.skipped ? ` (${w.skipped})` : ''}`);
+            progress(`weather: ${w.dailyUpserted} daily, ${w.monthsUpserted} monthly${w.skipped ? ` (${w.skipped})` : ''}`);
           } catch (werr: any) {
-            log(`weather sync skipped: ${String(werr?.message || werr).slice(0, 200)}`);
+            progress(`weather sync skipped: ${String(werr?.message || werr).slice(0, 200)}`);
           }
           totalBills += summary.billsTotal;
           totalNew += summary.billsAdded;
@@ -153,12 +202,16 @@ export async function runScrape(
             where: { accountId: { in: [...scrapedAccountIds] } },
             select: { statementDate: true, periodFrom: true, periodTo: true, currentCharges: true },
           });
-          await notifyNewBills(bills, (m) => log(m));
+          await notifyNewBills(bills, (m) => progress(m));
         } catch (nerr: any) {
-          log(`notify skipped: ${String(nerr?.message || nerr).slice(0, 200)}`);
+          progress(`notify skipped: ${String(nerr?.message || nerr).slice(0, 200)}`);
         }
       }
 
+      // Stop live-progress writes before stamping the final summary so a
+      // trailing flush can't overwrite it.
+      finalized = true;
+      if (flushTimer) clearTimeout(flushTimer);
       await prisma.scrapeRun.update({
         where: { id: run.id },
         data: {
@@ -175,12 +228,16 @@ export async function runScrape(
       });
       return run.id;
     } catch (err: any) {
+      finalized = true;
+      if (flushTimer) clearTimeout(flushTimer);
       await prisma.scrapeRun.update({
         where: { id: run.id },
         data: { status: 'ERROR', finishedAt: new Date(), message: String(err?.message || err).slice(0, 500) },
       });
       throw err;
     } finally {
+      finalized = true;
+      if (flushTimer) clearTimeout(flushTimer);
       inFlight = null;
     }
   })();
