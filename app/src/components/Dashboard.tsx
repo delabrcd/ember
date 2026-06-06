@@ -179,7 +179,8 @@ export function Dashboard() {
       )}
 
       <footer className="pt-2 text-center text-xs text-slate-600">
-        Self-hosted · data scraped from your own National Grid account · not affiliated with National Grid
+        ngrid-dashboard v{process.env.NEXT_PUBLIC_APP_VERSION || 'dev'} · self-hosted · data scraped from your own
+        National Grid account · not affiliated with National Grid
       </footer>
     </div>
   );

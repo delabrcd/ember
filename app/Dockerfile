@@ -16,10 +16,14 @@ CMD ["npx", "vitest", "run"]
 FROM mcr.microsoft.com/playwright:v1.60.0-noble AS builder
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
+# Version comes from the git tag at build time (see the CI workflow). It is
+# written into package.json and inlined into the app as NEXT_PUBLIC_APP_VERSION.
+ARG APP_VERSION=0.0.0-dev
+ENV NEXT_PUBLIC_APP_VERSION=$APP_VERSION
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-# `npm run build` runs `prisma generate && next build`.
-RUN npm run build
+# Stamp the version, then `npm run build` (= prisma generate && next build).
+RUN npm pkg set version="$APP_VERSION" && npm run build
 
 FROM mcr.microsoft.com/playwright:v1.60.0-noble AS runner
 WORKDIR /app
