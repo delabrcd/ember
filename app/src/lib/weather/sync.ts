@@ -9,12 +9,12 @@
 import { prisma } from '@/lib/db';
 import { geocode, type LatLon } from './geocode';
 import { fetchDailyTemps, rollupDailyToMonthly, type DailyTemp } from './openMeteo';
+import { isoDate as ymd } from '@/lib/ym';
 
 const UNIT = 'F' as const;
 const SOURCE = 'open-meteo';
 
 const toDate = (s: string): Date => new Date(s + 'T00:00:00Z');
-const ymd = (d: Date): string => d.toISOString().slice(0, 10);
 
 export interface SyncResult {
   geocoded: boolean;

@@ -3,6 +3,8 @@
 // the unit suite can exercise these without a generated Prisma client. The
 // impure dispatcher (send + AppSetting watermark advance) lives in `notify.ts`.
 
+import { isoDate } from './ym';
+
 export const LAST_NOTIFIED_KEY = 'lastNotifiedStatementDate';
 
 export type NotifyChannel = 'off' | 'webhook' | 'ntfy' | 'smtp';
@@ -28,8 +30,6 @@ export interface BillNotification {
   amount: number | null;
   statementDate: string; // YYYY-MM-DD
 }
-
-const isoDate = (d: Date): string => d.toISOString().slice(0, 10);
 
 const fmtUsd = (n: number | null): string =>
   n == null ? 'n/a' : `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
