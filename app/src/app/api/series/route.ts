@@ -1,11 +1,13 @@
 import { NextResponse } from 'next/server';
-import { getDefaultAccount, getMonthlySeries } from '@/lib/queries';
+import { getMonthlySeries, resolveRequestAccount } from '@/lib/queries';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
-export async function GET() {
-  const acct = await getDefaultAccount();
+// ?accountId= scopes the series to that account; omitted = the default account.
+export async function GET(req: Request) {
+  const acct = await resolveRequestAccount(req.url);
+  if (acct === 'invalid') return NextResponse.json({ error: 'unknown accountId' }, { status: 400 });
   if (!acct) return NextResponse.json({ rows: [] });
   return NextResponse.json({ rows: await getMonthlySeries(acct.id) });
 }

@@ -17,6 +17,10 @@ export interface Prefs {
   currencyDecimals: number;
   order: string[];
   charts: Record<string, ChartConfig>;
+  // The account the dashboard is scoped to. null = the default account (and the
+  // only sensible value on a single-account install). Survives reload via
+  // localStorage; an id that no longer exists is ignored at fetch time.
+  selectedAccountId: number | null;
 }
 
 const baseChart = (over: Partial<ChartConfig> = {}): ChartConfig => ({
@@ -32,6 +36,7 @@ const baseChart = (over: Partial<ChartConfig> = {}): ChartConfig => ({
 export const DEFAULT_PREFS: Prefs = {
   rangeMonths: 0,
   currencyDecimals: 2,
+  selectedAccountId: null,
   order: CHART_SPECS.map((s) => s.id),
   charts: {
     usage: baseChart({ stacked: false }),
@@ -67,6 +72,7 @@ export function mergePrefs(saved: Partial<Prefs> | null): Prefs {
   return {
     rangeMonths: saved.rangeMonths ?? DEFAULT_PREFS.rangeMonths,
     currencyDecimals: saved.currencyDecimals ?? DEFAULT_PREFS.currencyDecimals,
+    selectedAccountId: saved.selectedAccountId ?? DEFAULT_PREFS.selectedAccountId,
     order: mergeOrder(saved.order, DEFAULT_PREFS.order),
     charts,
   };

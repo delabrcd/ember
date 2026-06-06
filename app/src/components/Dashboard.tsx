@@ -5,7 +5,14 @@ import { useCallback, useEffect, useState } from 'react';
 import { SPEC_BY_ID, type MonthRow } from '@/lib/chartSpec';
 import { trailing12AllIn } from '@/lib/series';
 import { usePrefs } from '@/lib/prefs';
+import {
+  buildAccountGroups,
+  hasMultipleAccounts,
+  resolveSelectedAccountId,
+  type AccountSummary,
+} from '@/lib/accountSwitcher';
 import { ConfigurableChart } from './ConfigurableChart';
+import { AccountSwitcher } from './AccountSwitcher';
 import { RefreshButton } from './RefreshButton';
 import { dateLabel, num, rate, relativeFromNow, usd } from '@/lib/format';
 
@@ -28,28 +35,48 @@ interface Bill {
 }
 
 export function Dashboard() {
-  const { prefs } = usePrefs();
+  const { prefs, patch, loaded } = usePrefs();
   const [ov, setOv] = useState<Overview | null>(null);
   const [rows, setRows] = useState<MonthRow[]>([]);
   const [bills, setBills] = useState<Bill[]>([]);
+  const [accounts, setAccounts] = useState<AccountSummary[]>([]);
   const [loading, setLoading] = useState(true);
+
+  // The selected account, validated against the live list (a stale persisted id
+  // is ignored). null = the default account, which the routes already resolve.
+  const selectedAccountId = resolveSelectedAccountId(accounts, prefs.selectedAccountId);
+  // Scope every data fetch to the selection; no param = default-account behaviour.
+  const scope = selectedAccountId != null ? `?accountId=${selectedAccountId}` : '';
+
+  // The account list is independent of the selection, so fetch it once.
+  useEffect(() => {
+    fetch('/api/accounts', { cache: 'no-store' })
+      .then((r) => r.json())
+      .then((a) => setAccounts(a.accounts || []))
+      .catch(() => setAccounts([]));
+  }, []);
 
   const load = useCallback(async () => {
     const [o, s, b] = await Promise.all([
-      fetch('/api/overview', { cache: 'no-store' }).then((r) => r.json()),
-      fetch('/api/series', { cache: 'no-store' }).then((r) => r.json()),
-      fetch('/api/bills', { cache: 'no-store' }).then((r) => r.json()),
+      fetch(`/api/overview${scope}`, { cache: 'no-store' }).then((r) => r.json()),
+      fetch(`/api/series${scope}`, { cache: 'no-store' }).then((r) => r.json()),
+      fetch(`/api/bills${scope}`, { cache: 'no-store' }).then((r) => r.json()),
     ]);
     setOv(o);
     setRows(s.rows || []);
     setBills(b.bills || []);
     setLoading(false);
-  }, []);
+  }, [scope]);
 
+  // Re-fetch on mount and whenever the selected account changes. Wait until prefs
+  // have loaded so the first fetch already reflects a persisted selection rather
+  // than firing for the default and then again for the restored account.
   useEffect(() => {
-    load();
-  }, [load]);
+    if (loaded) load();
+  }, [load, loaded]);
 
+  const groups = buildAccountGroups(accounts);
+  const showSwitcher = hasMultipleAccounts(accounts);
   const empty = !ov || ov.empty || !ov.billCount;
   const lastRow = [...rows].reverse().find((r) => r.elecRateSupply != null || r.gasRateSupply != null);
   const elecAllIn = trailing12AllIn(rows, 'elec');
@@ -63,12 +90,22 @@ export function Dashboard() {
       <header className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold tracking-tight text-slate-50">National Grid Dashboard</h1>
-          {ov?.account && (
-            <p className="mt-1 text-sm text-slate-400">
-              Account {ov.account.accountNumber}
-              {ov.account.serviceAddress ? ` · ${ov.account.serviceAddress}` : ''}
-              {ov.account.companyCode ? ` · ${ov.account.companyCode}` : ''}
-            </p>
+          {showSwitcher ? (
+            <div className="mt-2">
+              <AccountSwitcher
+                groups={groups}
+                selectedId={selectedAccountId}
+                onSelect={(id) => patch({ selectedAccountId: id })}
+              />
+            </div>
+          ) : (
+            ov?.account && (
+              <p className="mt-1 text-sm text-slate-400">
+                Account {ov.account.accountNumber}
+                {ov.account.serviceAddress ? ` · ${ov.account.serviceAddress}` : ''}
+                {ov.account.companyCode ? ` · ${ov.account.companyCode}` : ''}
+              </p>
+            )
           )}
         </div>
         <div className="flex items-center gap-2">

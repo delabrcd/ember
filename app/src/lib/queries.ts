@@ -8,6 +8,7 @@ import { sumDegreeDays } from '@/lib/weather/degreeDays';
 import { monthlyTempByYm } from '@/lib/weather/monthlyTemp';
 import { getSetting } from '@/lib/settings';
 import { estimateNextBill } from '@/lib/prediction';
+import { shapeAccount, type AccountSummary } from '@/lib/accountSwitcher';
 
 const ymOf = (d: Date) => d.getUTCFullYear() * 100 + (d.getUTCMonth() + 1);
 const ymd = (d: Date) => d.toISOString().slice(0, 10);
@@ -21,6 +22,45 @@ export type { MonthRow };
 
 export async function getDefaultAccount() {
   return prisma.account.findFirst({ orderBy: { id: 'asc' } });
+}
+
+// True when the given id maps to a real account. Used by the read routes to
+// validate an incoming ?accountId= before scoping a query to it.
+export async function accountExists(accountId: number): Promise<boolean> {
+  const a = await prisma.account.findUnique({ where: { id: accountId }, select: { id: true } });
+  return a !== null;
+}
+
+// All accounts (id-ordered, same as the default) with their login joined so the
+// switcher can group + label them. The flat, client-safe shaping is the pure
+// shapeAccount (accountSwitcher.ts) — it never leaks a credential.
+export async function listAccounts(): Promise<AccountSummary[]> {
+  const accounts = await prisma.account.findMany({
+    orderBy: { id: 'asc' },
+    select: {
+      id: true,
+      accountNumber: true,
+      serviceAddress: true,
+      region: true,
+      loginId: true,
+      login: { select: { id: true, label: true } },
+    },
+  });
+  return accounts.map(shapeAccount);
+}
+
+// Resolve the account a read route should scope to. With no ?accountId= we keep
+// the historical behaviour (the default account). A well-formed id that exists
+// is used as-is; a malformed or non-existent id is a client error (caller
+// returns 400). Returns the account or, on a bad explicit id, `'invalid'`.
+export async function resolveRequestAccount(
+  url: string
+): Promise<{ id: number } | null | 'invalid'> {
+  const raw = new URL(url).searchParams.get('accountId');
+  if (raw == null || raw === '') return getDefaultAccount();
+  const id = Number(raw);
+  if (!Number.isInteger(id) || id <= 0) return 'invalid';
+  return (await accountExists(id)) ? { id } : 'invalid';
 }
 
 export async function getMonthlySeries(accountId: number): Promise<MonthRow[]> {

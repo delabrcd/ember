@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import { CHART_SPECS } from '@/lib/chartSpec';
 import { usePrefs } from '@/lib/prefs';
+import { resolveSelectedAccountId, type AccountSummary } from '@/lib/accountSwitcher';
 import { dateLabel, relativeFromNow } from '@/lib/format';
 import { RefreshButton } from './RefreshButton';
 import { NgLoginsSection } from './NgLoginsSection';
@@ -50,6 +51,7 @@ export function SettingsView() {
   const { prefs, patch, updateChart, reset } = usePrefs();
   const [server, setServer] = useState<ServerSettings | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
+  const [accounts, setAccounts] = useState<AccountSummary[]>([]);
   const [savingSched, setSavingSched] = useState(false);
   const [verify, setVerify] = useState<{ ok: boolean; total: number; failed: number; bills: { statementDate: string; ok: boolean; checks: { name: string; ok: boolean; detail?: string }[] }[] } | null>(null);
   const [verifying, setVerifying] = useState(false);
@@ -63,13 +65,21 @@ export function SettingsView() {
   };
 
   const loadServer = useCallback(async () => {
-    const [s, r] = await Promise.all([
+    const [s, r, a] = await Promise.all([
       fetch('/api/settings', { cache: 'no-store' }).then((x) => x.json()),
       fetch('/api/runs', { cache: 'no-store' }).then((x) => x.json()),
+      fetch('/api/accounts', { cache: 'no-store' }).then((x) => x.json()),
     ]);
     setServer(s);
     setRuns(r.runs || []);
+    setAccounts(a.accounts || []);
   }, []);
+
+  // Match the dashboard's scoping so an export = what's on screen. Validate the
+  // persisted selection against the live list (a stale id is ignored → default
+  // account); only a real, non-default selection adds a query param.
+  const selectedAccountId = resolveSelectedAccountId(accounts, prefs.selectedAccountId);
+  const exportScope = selectedAccountId != null ? `&accountId=${selectedAccountId}` : '';
 
   useEffect(() => {
     loadServer();
@@ -192,10 +202,10 @@ export function SettingsView() {
               <div className="text-xs text-slate-500">Export the monthly series or the bills list as a spreadsheet-ready file.</div>
             </div>
             <div className="flex flex-wrap gap-2">
-              <a className="btn border border-slate-700/70 bg-slate-800/40 text-slate-200 hover:bg-slate-700" href="/api/export?dataset=series" download>
+              <a className="btn border border-slate-700/70 bg-slate-800/40 text-slate-200 hover:bg-slate-700" href={`/api/export?dataset=series${exportScope}`} download>
                 Series
               </a>
-              <a className="btn border border-slate-700/70 bg-slate-800/40 text-slate-200 hover:bg-slate-700" href="/api/export?dataset=bills" download>
+              <a className="btn border border-slate-700/70 bg-slate-800/40 text-slate-200 hover:bg-slate-700" href={`/api/export?dataset=bills${exportScope}`} download>
                 Bills
               </a>
             </div>
