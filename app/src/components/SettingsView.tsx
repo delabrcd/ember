@@ -187,6 +187,23 @@ export function SettingsView() {
         <div className="border-t border-slate-800 pt-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
+              <div className="text-sm font-medium text-slate-200">Download CSV</div>
+              <div className="text-xs text-slate-500">Export the monthly series or the bills list as a spreadsheet-ready file.</div>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <a className="btn border border-slate-700/70 bg-slate-800/40 text-slate-200 hover:bg-slate-700" href="/api/export?dataset=series" download>
+                Series
+              </a>
+              <a className="btn border border-slate-700/70 bg-slate-800/40 text-slate-200 hover:bg-slate-700" href="/api/export?dataset=bills" download>
+                Bills
+              </a>
+            </div>
+          </div>
+        </div>
+
+        <div className="border-t border-slate-800 pt-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
               <div className="text-sm font-medium text-slate-200">Data integrity</div>
               <div className="text-xs text-slate-500">Re-parse every bill PDF and cross-check the stored numbers against it.</div>
             </div>
