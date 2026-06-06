@@ -152,7 +152,20 @@ const CloseIcon = (
   </svg>
 );
 
-export function ConfigurableChart({ spec, rows }: { spec: ChartSpec; rows: MonthRow[] }) {
+// `fill` makes the chart grow to fill its grid cell (cockpit "fit" mode, issue
+// #2): the card becomes a flex column and the chart body takes the leftover
+// height. Otherwise the chart keeps its fixed `height` (the classic layout).
+export function ConfigurableChart({
+  spec,
+  rows,
+  fill = false,
+  height = 288,
+}: {
+  spec: ChartSpec;
+  rows: MonthRow[];
+  fill?: boolean;
+  height?: number;
+}) {
   const { prefs, updateChart } = usePrefs();
   const config = prefs.charts[spec.id];
   const [menu, setMenu] = useState(false);
@@ -161,14 +174,26 @@ export function ConfigurableChart({ spec, rows }: { spec: ChartSpec; rows: Month
   const onChange = (c: Partial<ChartConfig>) => updateChart(spec.id, c);
 
   return (
-    <div className="card relative">
-      <div className="mb-3 flex items-start justify-between">
-        <div>
-          <h3 className="text-base font-semibold text-slate-100">{spec.title}</h3>
-          {spec.subtitle && <p className="text-xs text-slate-400">{spec.subtitle}</p>}
+    <div className={`card relative ${fill ? 'flex min-h-0 flex-col' : ''}`}>
+      <div className="mb-2 flex shrink-0 items-start justify-between">
+        <div className="min-w-0">
+          <h3 className="truncate text-sm font-semibold text-slate-100">{spec.title}</h3>
+          {spec.subtitle && !fill && <p className="truncate text-xs text-slate-400">{spec.subtitle}</p>}
         </div>
-        <div className="flex items-center gap-1">
-          <IconButton title="Configure" onClick={() => setMenu((v) => !v)}>{GearIcon}</IconButton>
+        <div className="flex shrink-0 items-center gap-1">
+          {/* Discoverable "Customize" affordance (issue #24) — a labelled gear, not a bare icon. */}
+          <button
+            title="Customize this chart"
+            onClick={() => setMenu((v) => !v)}
+            className={`inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-xs transition ${
+              menu
+                ? 'border-amber-500/60 bg-amber-500/15 text-amber-200'
+                : 'border-slate-700/70 bg-slate-800/40 text-slate-300 hover:bg-slate-700 hover:text-white'
+            }`}
+          >
+            {GearIcon}
+            <span className="hidden sm:inline">Customize</span>
+          </button>
           <IconButton title="Expand" onClick={() => setExpand(true)}>{ExpandIcon}</IconButton>
         </div>
       </div>
@@ -176,13 +201,19 @@ export function ConfigurableChart({ spec, rows }: { spec: ChartSpec; rows: Month
       {menu && (
         <>
           <div className="fixed inset-0 z-10" onClick={() => setMenu(false)} />
-          <div className="absolute right-4 top-16 z-20 w-64 rounded-xl border border-slate-700 bg-slate-900 p-4 shadow-2xl">
+          <div className="absolute right-4 top-14 z-20 max-h-[70vh] w-64 overflow-auto rounded-xl border border-slate-700 bg-slate-900 p-4 shadow-2xl">
             <ChartConfigMenu spec={spec} config={config} onChange={onChange} />
           </div>
         </>
       )}
 
-      <ChartBody spec={spec} config={config} rows={rows} height={288} />
+      {fill ? (
+        <div className="min-h-0 flex-1">
+          <ChartBody spec={spec} config={config} rows={rows} height="100%" />
+        </div>
+      ) : (
+        <ChartBody spec={spec} config={config} rows={rows} height={height} />
+      )}
 
       <Modal open={expand} onClose={() => setExpand(false)}>
         <div className="mb-3 flex shrink-0 items-start justify-between">

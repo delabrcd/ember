@@ -2,6 +2,7 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { CHART_SPECS } from './chartSpec';
+import { DEFAULT_RANGE, migrateRangeMonths, type RangePref, type RangePreset } from './range';
 
 export interface ChartConfig {
   visible: boolean;
@@ -12,9 +13,17 @@ export interface ChartConfig {
   rightScale: 'linear' | 'log';
 }
 
+// Density of the cockpit layout (issue #2). 'fit' packs the main view into a
+// 16:9 desktop viewport with no page scroll (vh-based chart heights); 'comfortable'
+// is the classic taller, page-scrolling layout. Only affects ≥1280px.
+export type Density = 'fit' | 'comfortable';
+
 export interface Prefs {
-  rangeMonths: number; // 0 = all
+  // Range selection (issue #24). The RangePref model (preset + custom ym bounds)
+  // replaces the old `rangeMonths` number; a stale rangeMonths is migrated on load.
+  range: RangePref;
   currencyDecimals: number;
+  density: Density;
   order: string[];
   charts: Record<string, ChartConfig>;
   // The account the dashboard is scoped to. null = the default account (and the
@@ -34,8 +43,9 @@ const baseChart = (over: Partial<ChartConfig> = {}): ChartConfig => ({
 });
 
 export const DEFAULT_PREFS: Prefs = {
-  rangeMonths: 0,
+  range: DEFAULT_RANGE,
   currencyDecimals: 2,
+  density: 'fit',
   selectedAccountId: null,
   order: CHART_SPECS.map((s) => s.id),
   charts: {
@@ -63,15 +73,37 @@ export function mergeOrder(savedOrder: string[] | undefined, defaultOrder: strin
   return [...saved, ...appended];
 }
 
-export function mergePrefs(saved: Partial<Prefs> | null): Prefs {
+// The saved blob may predate the RangePref model (issue #24): older prefs carry
+// a `rangeMonths` number instead of a `range` object. Resolve the range from
+// whichever is present — a real `range` wins; otherwise migrate `rangeMonths`;
+// otherwise the default. A partial/garbage `range` is repaired field-by-field.
+// PURE — unit-tested. The `rangeMonths` legacy field is read here but never
+// written back, so it ages out of a returning user's stored prefs.
+const VALID_PRESETS: RangePreset[] = ['all', 'ytd', '12mo', '24mo', '36mo', 'custom'];
+
+export function mergeRange(saved: { range?: unknown; rangeMonths?: number } | null | undefined): RangePref {
+  const r = saved?.range as Partial<RangePref> | undefined;
+  if (r && typeof r === 'object' && typeof r.preset === 'string' && VALID_PRESETS.includes(r.preset as RangePreset)) {
+    return {
+      preset: r.preset as RangePreset,
+      fromYm: typeof r.fromYm === 'number' ? r.fromYm : null,
+      toYm: typeof r.toYm === 'number' ? r.toYm : null,
+    };
+  }
+  if (saved && typeof saved.rangeMonths === 'number') return migrateRangeMonths(saved.rangeMonths);
+  return { ...DEFAULT_RANGE };
+}
+
+export function mergePrefs(saved: (Partial<Prefs> & { rangeMonths?: number }) | null): Prefs {
   if (!saved) return DEFAULT_PREFS;
   const charts: Record<string, ChartConfig> = {};
   for (const id of DEFAULT_PREFS.order) {
     charts[id] = { ...DEFAULT_PREFS.charts[id], ...(saved.charts?.[id] || {}) };
   }
   return {
-    rangeMonths: saved.rangeMonths ?? DEFAULT_PREFS.rangeMonths,
+    range: mergeRange(saved),
     currencyDecimals: saved.currencyDecimals ?? DEFAULT_PREFS.currencyDecimals,
+    density: saved.density === 'comfortable' || saved.density === 'fit' ? saved.density : DEFAULT_PREFS.density,
     selectedAccountId: saved.selectedAccountId ?? DEFAULT_PREFS.selectedAccountId,
     order: mergeOrder(saved.order, DEFAULT_PREFS.order),
     charts,
@@ -84,6 +116,7 @@ interface Ctx {
   setPrefs: (p: Prefs) => void;
   patch: (p: Partial<Prefs>) => void;
   updateChart: (id: string, c: Partial<ChartConfig>) => void;
+  setRange: (r: RangePref) => void;
   reset: () => void;
 }
 
@@ -119,6 +152,7 @@ export function PrefsProvider({ children }: { children: React.ReactNode }) {
       setPrefs: persist,
       patch: (p) => persist({ ...prefs, ...p }),
       updateChart: (id, c) => persist({ ...prefs, charts: { ...prefs.charts, [id]: { ...prefs.charts[id], ...c } } }),
+      setRange: (r) => persist({ ...prefs, range: r }),
       reset: () => persist(DEFAULT_PREFS),
     }),
     [prefs, loaded, persist]

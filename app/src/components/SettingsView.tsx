@@ -2,11 +2,13 @@
 
 import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
-import { CHART_SPECS } from '@/lib/chartSpec';
+import { SPEC_BY_ID } from '@/lib/chartSpec';
 import { usePrefs } from '@/lib/prefs';
 import { resolveSelectedAccountId, type AccountSummary } from '@/lib/accountSwitcher';
+import { resolveRange, ymOfDate, ymdToYm } from '@/lib/range';
 import { dateLabel, relativeFromNow } from '@/lib/format';
 import { RefreshButton } from './RefreshButton';
+import { RangeControl } from './RangeControl';
 import { NgLoginsSection } from './NgLoginsSection';
 
 interface ServerSettings {
@@ -41,15 +43,8 @@ function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean
   );
 }
 
-const RANGES: { label: string; value: number }[] = [
-  { label: 'All', value: 0 },
-  { label: '12 mo', value: 12 },
-  { label: '24 mo', value: 24 },
-  { label: '36 mo', value: 36 },
-];
-
 export function SettingsView() {
-  const { prefs, patch, updateChart, reset } = usePrefs();
+  const { prefs, patch, setRange, updateChart, reset } = usePrefs();
   const [server, setServer] = useState<ServerSettings | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
   const [accounts, setAccounts] = useState<AccountSummary[]>([]);
@@ -84,7 +79,19 @@ export function SettingsView() {
   // persisted selection against the live list (a stale id is ignored → default
   // account); only a real, non-default selection adds a query param.
   const selectedAccountId = resolveSelectedAccountId(accounts, prefs.selectedAccountId);
-  const exportScope = selectedAccountId != null ? `&accountId=${selectedAccountId}` : '';
+
+  // The selected date range scopes the CSV exports too (issue #24), matching the
+  // dashboard. We only know the account's first/last statement here, which is all
+  // resolveRange needs to clamp/anchor (min/max), so build allYms from those.
+  const nowYm = ymOfDate(new Date());
+  const allYms = [ymdToYm(server?.firstStatement), ymdToYm(server?.latestBill?.statementDate)].filter(
+    (y): y is number => y != null
+  );
+  const resolved = resolveRange(prefs.range, allYms, nowYm);
+  // Account-only scope (the PDF bundle has its own from/to ISO date inputs below);
+  // CSV exports additionally carry the selected ym range so they match the dashboard.
+  const acctScope = selectedAccountId != null ? `&accountId=${selectedAccountId}` : '';
+  const exportScope = `${acctScope}&from=${resolved.fromYm}&to=${resolved.toYm}`;
 
   useEffect(() => {
     loadServer();
@@ -98,7 +105,7 @@ export function SettingsView() {
   }, [server?.firstStatement, server?.latestBill?.statementDate]);
 
   const pdfRangeValid = !!pdfFrom && !!pdfTo && pdfFrom <= pdfTo;
-  const pdfExportQuery = `?from=${pdfFrom}&to=${pdfTo}${exportScope}`;
+  const pdfExportQuery = `?from=${pdfFrom}&to=${pdfTo}${acctScope}`;
 
   const setScheduler = async (enabled: boolean) => {
     setSavingSched(true);
@@ -125,13 +132,21 @@ export function SettingsView() {
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <div className="text-sm font-medium text-slate-200">Date range</div>
-            <div className="text-xs text-slate-500">How much history the charts show</div>
+            <div className="text-xs text-slate-500">Drives the charts, the bills list, and the exports below</div>
+          </div>
+          <RangeControl range={prefs.range} onChange={setRange} allYms={allYms} nowYm={nowYm} />
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <div className="text-sm font-medium text-slate-200">Layout density</div>
+            <div className="text-xs text-slate-500">Fit packs the dashboard into one screen (no scroll on wide displays); comfortable lets it grow</div>
           </div>
           <div className="inline-flex overflow-hidden rounded-lg border border-slate-700">
-            {RANGES.map((r) => (
-              <button key={r.value} onClick={() => patch({ rangeMonths: r.value })}
-                className={`px-3 py-1 text-xs transition ${prefs.rangeMonths === r.value ? 'bg-amber-500 text-slate-950' : 'bg-slate-800/50 text-slate-300 hover:bg-slate-700'}`}>
-                {r.label}
+            {(['fit', 'comfortable'] as const).map((d) => (
+              <button key={d} onClick={() => patch({ density: d })}
+                className={`px-3 py-1 text-xs capitalize transition ${prefs.density === d ? 'bg-amber-500 text-slate-950' : 'bg-slate-800/50 text-slate-300 hover:bg-slate-700'}`}>
+                {d === 'fit' ? 'Fit to screen' : 'Comfortable'}
               </button>
             ))}
           </div>
@@ -153,22 +168,42 @@ export function SettingsView() {
         </div>
 
         <div>
-          <div className="text-sm font-medium text-slate-200">Charts shown</div>
-          <div className="mb-2 text-xs text-slate-500">Toggle which charts appear on the dashboard (configure each chart from its gear menu)</div>
-          <div className="flex flex-wrap gap-2">
-            {CHART_SPECS.map((spec) => {
-              const on = prefs.charts[spec.id]?.visible;
+          <div className="text-sm font-medium text-slate-200">Charts shown &amp; order</div>
+          <div className="mb-2 text-xs text-slate-500">Toggle visibility and reorder the dashboard charts (customize each chart&apos;s series, type, and axes from its <span className="text-slate-300">Customize</span> button on the dashboard)</div>
+          <ul className="space-y-1.5">
+            {prefs.order.map((id, i) => {
+              const spec = SPEC_BY_ID[id];
+              if (!spec) return null;
+              const on = prefs.charts[id]?.visible;
+              const move = (delta: number) => {
+                const next = [...prefs.order];
+                const j = i + delta;
+                if (j < 0 || j >= next.length) return;
+                [next[i], next[j]] = [next[j], next[i]];
+                patch({ order: next });
+              };
               return (
-                <button key={spec.id} onClick={() => updateChart(spec.id, { visible: !on })}
-                  className={`pill ${on ? 'border-amber-500/60 text-amber-300' : 'opacity-60'}`}>
-                  {on ? '✓ ' : ''}{spec.title}
-                </button>
+                <li key={id} className="flex items-center justify-between gap-2 rounded-lg border border-slate-800/70 bg-slate-800/30 px-3 py-1.5">
+                  <button onClick={() => updateChart(id, { visible: !on })}
+                    className={`flex items-center gap-2 text-sm ${on ? 'text-slate-100' : 'text-slate-500'}`}>
+                    <span className={`inline-block h-3 w-3 rounded-full border ${on ? 'border-amber-500 bg-amber-500' : 'border-slate-600'}`} />
+                    {spec.title}
+                  </button>
+                  <div className="flex items-center gap-1">
+                    <button onClick={() => move(-1)} disabled={i === 0} title="Move up"
+                      className="rounded border border-slate-700/70 bg-slate-800/40 px-1.5 py-0.5 text-slate-300 transition hover:bg-slate-700 disabled:opacity-30">↑</button>
+                    <button onClick={() => move(1)} disabled={i === prefs.order.length - 1} title="Move down"
+                      className="rounded border border-slate-700/70 bg-slate-800/40 px-1.5 py-0.5 text-slate-300 transition hover:bg-slate-700 disabled:opacity-30">↓</button>
+                  </div>
+                </li>
               );
             })}
-          </div>
+          </ul>
         </div>
 
-        <button onClick={reset} className="text-xs text-slate-400 underline hover:text-slate-200">Reset display settings to defaults</button>
+        <button onClick={reset} className="btn border border-slate-700/70 bg-slate-800/40 text-xs text-slate-300 hover:bg-slate-700">
+          Reset display settings to defaults
+        </button>
       </section>
 
       {/* Automation */}

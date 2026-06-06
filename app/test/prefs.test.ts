@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mergeOrder } from '../src/lib/prefs';
+import { mergeOrder, mergeRange } from '../src/lib/prefs';
 
 // mergeOrder keeps the user's saved chart order but appends charts that were
 // added to the app AFTER they last saved their prefs (the bug that hid the
@@ -34,5 +34,37 @@ describe('mergeOrder (hand-calculated)', () => {
 
   it('keeps a complete, already-current order unchanged', () => {
     expect(mergeOrder([...def], def)).toEqual(def);
+  });
+});
+
+// mergeRange migrates a returning user's saved prefs to the RangePref model
+// (issue #24): a real `range` wins, an old `rangeMonths` number is migrated, and
+// missing/garbage falls back to the "all" default.
+describe('mergeRange (hand-calculated)', () => {
+  it('passes through a valid new-style range', () => {
+    expect(mergeRange({ range: { preset: 'custom', fromYm: 202301, toYm: 202312 } })).toEqual({
+      preset: 'custom',
+      fromYm: 202301,
+      toYm: 202312,
+    });
+  });
+
+  it('migrates a stale rangeMonths number to a preset', () => {
+    expect(mergeRange({ rangeMonths: 12 })).toEqual({ preset: '12mo', fromYm: null, toYm: null });
+    expect(mergeRange({ rangeMonths: 0 })).toEqual({ preset: 'all', fromYm: null, toYm: null });
+  });
+
+  it('defaults to "all" when nothing is saved', () => {
+    expect(mergeRange(null)).toEqual({ preset: 'all', fromYm: null, toYm: null });
+    expect(mergeRange({})).toEqual({ preset: 'all', fromYm: null, toYm: null });
+  });
+
+  it('repairs a partial/garbage range field-by-field', () => {
+    expect(mergeRange({ range: { preset: 'bogus' } as never })).toEqual({ preset: 'all', fromYm: null, toYm: null });
+    expect(mergeRange({ range: { preset: 'custom', fromYm: 202305 } as never })).toEqual({
+      preset: 'custom',
+      fromYm: 202305,
+      toYm: null,
+    });
   });
 });

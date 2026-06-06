@@ -9,11 +9,12 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className="dark">
-      <body>
-        <PrefsProvider>
-          <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6">{children}</div>
-        </PrefsProvider>
+    <html lang="en" className="dark h-full">
+      {/* The body fills the viewport so the cockpit dashboard (issue #2) can pin a
+          no-scroll, full-height grid. Each page owns its own container/padding:
+          the dashboard goes edge-to-edge and full-height; settings stays centered. */}
+      <body className="h-full min-h-dvh">
+        <PrefsProvider>{children}</PrefsProvider>
       </body>
     </html>
   );
