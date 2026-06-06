@@ -6,6 +6,7 @@ import type { MonthRow } from '@/lib/chartSpec';
 import { deriveMonthlySeries, type DegreeDayInput } from '@/lib/series';
 import { sumDegreeDays } from '@/lib/weather/degreeDays';
 import { getSetting } from '@/lib/settings';
+import { estimateNextBill } from '@/lib/prediction';
 
 const ymOf = (d: Date) => d.getUTCFullYear() * 100 + (d.getUTCMonth() + 1);
 const ymd = (d: Date) => d.toISOString().slice(0, 10);
@@ -84,15 +85,19 @@ export async function getBills(accountId: number) {
 }
 
 export async function getOverview(accountId: number) {
-  const [account, bills, schedule, lastRun] = await Promise.all([
+  const [account, bills, schedule, lastRun, series] = await Promise.all([
     prisma.account.findUnique({ where: { id: accountId } }),
     prisma.bill.findMany({ where: { accountId }, orderBy: { statementDate: 'desc' } }),
     prisma.scheduleState.findUnique({ where: { accountId } }),
     prisma.scrapeRun.findFirst({ orderBy: { startedAt: 'desc' } }),
+    getMonthlySeries(accountId),
   ]);
   // Lifetime energy spend = sum of each period's actual charges (not statement
   // amounts due, which would double-count any carried-over balances).
   const lifetimeSpend = bills.reduce((s, b) => s + (b.currentCharges ?? b.totalDueAmount ?? 0), 0);
+  // Estimated cost of the next bill from recent usage + current rates (pure,
+  // PDF-sourced; an estimate, never stored and never fed to /api/verify).
+  const nextBillEstimate = estimateNextBill(series);
   const latest = bills[0];
   return {
     account: account
@@ -106,6 +111,7 @@ export async function getOverview(accountId: number) {
       : null,
     billCount: bills.length,
     lifetimeSpend,
+    nextBillEstimate,
     latestBill: latest
       ? {
           statementDate: latest.statementDate.toISOString().slice(0, 10),
