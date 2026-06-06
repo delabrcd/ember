@@ -1,24 +1,51 @@
 'use client';
 
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 type RunStatus = 'RUNNING' | 'SUCCESS' | 'ERROR';
 
-export function RefreshButton({ onDone }: { onDone: () => void }) {
+// When `onStarted` is supplied (the Dashboard), the button hands the freshly
+// started run id up to the shared live-progress banner and lets IT poll/show the
+// step-by-step progress and the success/error outcome — the button just goes
+// busy until that run resolves (signaled back via `running`). Without it (any
+// standalone use) the button keeps its original self-polling behavior.
+export function RefreshButton({
+  onDone,
+  onStarted,
+  running,
+}: {
+  onDone: () => void;
+  onStarted?: (runId: number) => void;
+  running?: boolean;
+}) {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const delegated = !!onStarted;
 
   const stop = () => {
     if (pollRef.current) clearInterval(pollRef.current);
     pollRef.current = null;
   };
 
+  // When delegating, the shared banner owns the run lifecycle; reflect its
+  // RUNNING state on the button and clear our local busy once it resolves.
+  useEffect(() => {
+    if (!delegated) return;
+    if (running) {
+      setBusy(true);
+      setMsg(null);
+      setErr(null);
+    } else {
+      setBusy(false);
+    }
+  }, [delegated, running]);
+
   const start = useCallback(async () => {
     setBusy(true);
     setErr(null);
-    setMsg('Logging in & checking National Grid…');
+    setMsg(delegated ? null : 'Logging in & checking National Grid…');
     try {
       const res = await fetch('/api/refresh', { method: 'POST' });
       if (res.status === 409) {
@@ -33,6 +60,13 @@ export function RefreshButton({ onDone }: { onDone: () => void }) {
       }
       const { runId } = await res.json();
       if (!runId) throw new Error('No run id returned');
+
+      // Delegated mode: hand the run to the shared progress banner and stop here;
+      // it polls and reports back via `running`/`onDone`.
+      if (onStarted) {
+        onStarted(runId);
+        return;
+      }
 
       stop();
       pollRef.current = setInterval(async () => {
@@ -63,7 +97,7 @@ export function RefreshButton({ onDone }: { onDone: () => void }) {
       setErr((e as Error).message);
       setMsg(null);
     }
-  }, [onDone]);
+  }, [onDone, onStarted, delegated]);
 
   return (
     <div className="flex flex-col items-end gap-1">

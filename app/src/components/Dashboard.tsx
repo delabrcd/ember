@@ -22,6 +22,8 @@ import {
 import { ConfigurableChart } from './ConfigurableChart';
 import { AccountSwitcher } from './AccountSwitcher';
 import { RefreshButton } from './RefreshButton';
+import { ScrapeProgressBanner, useScrapeProgress } from './ScrapeProgress';
+import type { RunStatus, ProgressRun } from '@/lib/ngrid/progress';
 import { RangeControl } from './RangeControl';
 import { NgLoginsSection } from './NgLoginsSection';
 import { dateLabel, estimateTooltip, num, rate, relativeFromNow, usd } from '@/lib/format';
@@ -55,6 +57,7 @@ interface Overview {
   latestBill?: { statementDate: string; totalDueAmount: number | null } | null;
   firstStatement?: string | null;
   schedule?: { predictedNextBillDate: string | null; nextCheckAt: string | null; lastCheckedAt: string | null } | null;
+  lastRun?: { id: number; status: RunStatus; trigger: string; startedAt: string; finishedAt: string | null; message: string | null } | null;
 }
 interface Bill {
   statementDate: string;
@@ -140,6 +143,36 @@ export function Dashboard() {
     if (loaded) load();
   }, [load, loaded]);
 
+  // Live scrape-progress indicator (issue #40). Tracks the in-flight run — either
+  // one the page loaded mid-scrape (overview's `lastRun`, RUNNING) or one the
+  // Refresh button just started — and shows the animated banner below the header.
+  // On SUCCESS we refresh dashboard data + login state so the new bills appear.
+  const initialRun: ProgressRun | null = ov?.lastRun
+    ? { id: ov.lastRun.id, status: ov.lastRun.status, message: ov.lastRun.message }
+    : null;
+  const {
+    run: progressRun,
+    track: trackRun,
+    dismiss: dismissProgress,
+  } = useScrapeProgress(initialRun, () => {
+    load();
+    loadLogins();
+  });
+  const scraping = progressRun?.status === 'RUNNING';
+
+  // Retry from the error banner: kick a fresh scrape and adopt it. Mirrors the
+  // Refresh button's POST so the banner can recover without a page reload.
+  const retryScrape = useCallback(async () => {
+    try {
+      const res = await fetch('/api/refresh', { method: 'POST' });
+      if (!res.ok) return;
+      const { runId } = await res.json();
+      if (runId) trackRun(runId);
+    } catch {
+      /* leave the error banner in place */
+    }
+  }, [trackRun]);
+
   const groups = buildAccountGroups(accounts);
   const showSwitcher = hasMultipleAccounts(accounts);
   const empty = !ov || ov.empty || !ov.billCount;
@@ -219,7 +252,16 @@ export function Dashboard() {
               Now pull your history. The first run downloads every bill and PDF and can take a couple of minutes.
             </p>
             <div className="mt-3 flex justify-center">
-              <RefreshButton onDone={() => { load(); loadLogins(); }} />
+              <RefreshButton
+                onDone={() => { load(); loadLogins(); }}
+                onStarted={trackRun}
+                running={scraping}
+              />
+            </div>
+            {/* The long first run shows its live progress right here so it never
+                looks frozen while logging in, pulling history, and PDFs. */}
+            <div className="mt-3 text-left">
+              <ScrapeProgressBanner run={progressRun} onRetry={retryScrape} onDismiss={dismissProgress} />
             </div>
           </div>
         ) : (
@@ -276,9 +318,13 @@ export function Dashboard() {
             </svg>
             Settings
           </Link>
-          <RefreshButton onDone={load} />
+          <RefreshButton onDone={load} onStarted={trackRun} running={scraping} />
         </div>
       </header>
+
+      {/* Live scrape-progress indicator (issue #40): a prominent animated banner
+          shown whenever a scrape is in flight, then a brief success/error state. */}
+      <ScrapeProgressBanner run={progressRun} onRetry={retryScrape} onDismiss={dismissProgress} />
 
       {reauthLogins.length > 0 && (
         <div className="shrink-0 rounded-lg border border-rose-500/40 bg-rose-500/10 px-4 py-2 text-sm text-rose-200">
