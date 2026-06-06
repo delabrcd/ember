@@ -6,6 +6,14 @@ import { SPEC_BY_ID, type MonthRow } from '@/lib/chartSpec';
 import { trailing12AllIn } from '@/lib/series';
 import { usePrefs } from '@/lib/prefs';
 import {
+  filterByYm,
+  filterBillsByYm,
+  resolveRange,
+  ymOfDate,
+  ymToYmd,
+  ymToLastYmd,
+} from '@/lib/range';
+import {
   buildAccountGroups,
   hasMultipleAccounts,
   resolveSelectedAccountId,
@@ -14,6 +22,7 @@ import {
 import { ConfigurableChart } from './ConfigurableChart';
 import { AccountSwitcher } from './AccountSwitcher';
 import { RefreshButton } from './RefreshButton';
+import { RangeControl } from './RangeControl';
 import { NgLoginsSection } from './NgLoginsSection';
 import { dateLabel, num, rate, relativeFromNow, usd } from '@/lib/format';
 
@@ -36,7 +45,7 @@ interface Bill {
 }
 
 export function Dashboard() {
-  const { prefs, patch, loaded } = usePrefs();
+  const { prefs, patch, setRange, loaded } = usePrefs();
   const [ov, setOv] = useState<Overview | null>(null);
   const [rows, setRows] = useState<MonthRow[]>([]);
   const [bills, setBills] = useState<Bill[]>([]);
@@ -117,16 +126,33 @@ export function Dashboard() {
   const lastRow = [...rows].reverse().find((r) => r.elecRateSupply != null || r.gasRateSupply != null);
   const elecAllIn = trailing12AllIn(rows, 'elec');
   const gasAllIn = trailing12AllIn(rows, 'gas');
-  const ranged = prefs.rangeMonths > 0 ? rows.slice(-prefs.rangeMonths) : rows;
   const dp = prefs.currencyDecimals;
+
+  // The selected date range drives every chart, the bills list and the export
+  // scoping (issue #24) from a single persisted pref. resolveRange is pure; we
+  // anchor it to today and the data's natural span.
+  const nowYm = ymOfDate(new Date());
+  const allYms = rows.map((r) => r.ym);
+  const resolved = resolveRange(prefs.range, allYms, nowYm);
+  const ranged = filterByYm(rows, resolved);
+  const rangedBills = filterBillsByYm(bills, resolved);
+
+  // The export links scope to BOTH the account and the on-screen date range so a
+  // download matches what's visible. CSV exports take ym integers (from/to);
+  // the PDF bundle takes a full-month ISO date span (its existing contract).
+  const acctQuery = selectedAccountId != null ? `&accountId=${selectedAccountId}` : '';
+  const csvScope = `&from=${resolved.fromYm}&to=${resolved.toYm}${acctQuery}`;
+  const pdfScope = `?from=${ymToYmd(resolved.fromYm)}&to=${ymToLastYmd(resolved.toYm)}${acctQuery}`;
+
   const visibleCharts = prefs.order.filter((id) => prefs.charts[id]?.visible && SPEC_BY_ID[id]);
+  const fit = prefs.density === 'fit';
 
   // First-run setup: a fresh install with no data and nothing to scrape with.
   // Show a guided welcome + the add-login flow front-and-center instead of the
   // empty dashboard. Existing installs never reach here (needsSetup is false).
   if (needsSetup) {
     return (
-      <div className="mx-auto max-w-2xl space-y-6">
+      <div className="mx-auto max-w-2xl space-y-6 px-4 py-8 sm:px-6">
         <header className="text-center">
           <div className="flex items-center justify-center gap-2">
             <h1 className="text-2xl font-bold tracking-tight text-slate-50">Welcome to your National Grid Dashboard</h1>
@@ -165,27 +191,35 @@ export function Dashboard() {
     );
   }
 
+  // Cockpit shell. At ≥xl in "fit" density the page is pinned to the viewport
+  // height (overflow-hidden) and the chart/bills region flexes to fill it, so the
+  // PAGE never scrolls — only the bills card and chart-config popovers scroll
+  // internally. Below xl (and in "comfortable" density) the page scrolls normally
+  // and nothing overflows horizontally (single column < 768, 2-col 768–1280).
+  const lockViewport = fit; // only meaningful at ≥xl via the responsive classes below
   return (
-    <div className="space-y-6">
-      <header className="flex flex-wrap items-start justify-between gap-4">
-        <div>
+    <div
+      className={`mx-auto flex w-full max-w-[1800px] flex-col gap-3 px-3 py-3 sm:px-5 sm:py-4 ${
+        lockViewport ? 'xl:h-dvh xl:gap-2 xl:overflow-hidden xl:py-3' : ''
+      }`}
+    >
+      <header className="flex shrink-0 flex-wrap items-center justify-between gap-x-4 gap-y-2">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
           <div className="flex items-center gap-2">
-            <h1 className="text-2xl font-bold tracking-tight text-slate-50">National Grid Dashboard</h1>
+            <h1 className="text-xl font-bold tracking-tight text-slate-50">National Grid Dashboard</h1>
             <span className="rounded-full border border-slate-700/70 bg-slate-800/50 px-2 py-0.5 font-mono text-xs text-slate-400">
               v{process.env.NEXT_PUBLIC_APP_VERSION || 'dev'}
             </span>
           </div>
           {showSwitcher ? (
-            <div className="mt-2">
-              <AccountSwitcher
-                groups={groups}
-                selectedId={selectedAccountId}
-                onSelect={(id) => patch({ selectedAccountId: id })}
-              />
-            </div>
+            <AccountSwitcher
+              groups={groups}
+              selectedId={selectedAccountId}
+              onSelect={(id) => patch({ selectedAccountId: id })}
+            />
           ) : (
             ov?.account && (
-              <p className="mt-1 text-sm text-slate-400">
+              <p className="text-sm text-slate-400">
                 Account {ov.account.accountNumber}
                 {ov.account.serviceAddress ? ` · ${ov.account.serviceAddress}` : ''}
                 {ov.account.companyCode ? ` · ${ov.account.companyCode}` : ''}
@@ -206,7 +240,7 @@ export function Dashboard() {
       </header>
 
       {reauthLogins.length > 0 && (
-        <div className="rounded-lg border border-rose-500/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
+        <div className="shrink-0 rounded-lg border border-rose-500/40 bg-rose-500/10 px-4 py-2 text-sm text-rose-200">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
               <span className="font-medium">Not connected — re-authenticate</span>
@@ -225,16 +259,22 @@ export function Dashboard() {
         </div>
       )}
 
-      {ov?.schedule && (
-        <div className="flex flex-wrap gap-2">
-          <span className="pill">
-            Next bill predicted <strong className="text-slate-100">{dateLabel(ov.schedule.predictedNextBillDate)}</strong>
-            {ov.schedule.predictedNextBillDate ? ` (${relativeFromNow(ov.schedule.predictedNextBillDate + 'T00:00:00')})` : ''}
-          </span>
-          <span className="pill">Last checked {relativeFromNow(ov.schedule.lastCheckedAt)}</span>
-          <span className="pill">Next auto-check {relativeFromNow(ov.schedule.nextCheckAt)}</span>
-        </div>
-      )}
+      {/* Control strip: range picker + schedule pills. Compact, no-wrap-by-default. */}
+      <div className="flex shrink-0 flex-wrap items-center justify-between gap-x-4 gap-y-2">
+        {!empty && (
+          <RangeControl range={prefs.range} onChange={setRange} allYms={allYms} nowYm={nowYm} />
+        )}
+        {ov?.schedule && (
+          <div className="flex flex-wrap gap-2">
+            <span className="pill">
+              Next bill <strong className="text-slate-100">{dateLabel(ov.schedule.predictedNextBillDate)}</strong>
+              {ov.schedule.predictedNextBillDate ? ` (${relativeFromNow(ov.schedule.predictedNextBillDate + 'T00:00:00')})` : ''}
+            </span>
+            <span className="pill">Checked {relativeFromNow(ov.schedule.lastCheckedAt)}</span>
+            <span className="pill">Next {relativeFromNow(ov.schedule.nextCheckAt)}</span>
+          </div>
+        )}
+      </div>
 
       {loading || needsSetup === null ? (
         <div className="card text-slate-400">Loading…</div>
@@ -248,92 +288,127 @@ export function Dashboard() {
         </div>
       ) : (
         <>
-          <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-            <div className="card">
-              <div className="card-title">Latest bill</div>
-              <div className="stat">{usd(ov?.latestBill?.totalDueAmount, dp)}</div>
-              <div className="mt-1 text-xs text-slate-500">{dateLabel(ov?.latestBill?.statementDate)}</div>
+          {/* Compact stat strip: latest / lifetime / elec / gas / est-next, side by
+              side on desktop, wrapping to a 2-col grid on narrow screens. */}
+          {/* In fit density the stat strip is compacted at ≥xl (smaller padding +
+              stat type) so the three chart rows below fit in 100dvh with no page
+              scroll; the FILL_BODY_CLASSES height constant is tuned to this chrome. */}
+          <div className={`grid shrink-0 grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-5 ${fit ? 'xl:[&_.card]:!p-2.5 xl:[&_.stat]:!text-xl' : ''}`}>
+            <div className="card !p-3">
+              <div className="card-title text-xs">Latest bill</div>
+              <div className="stat text-2xl">{usd(ov?.latestBill?.totalDueAmount, dp)}</div>
+              <div className="mt-0.5 text-[11px] text-slate-500">{dateLabel(ov?.latestBill?.statementDate)}</div>
             </div>
-            <div className="card">
-              <div className="card-title">Lifetime spend</div>
-              <div className="stat">{usd(ov?.lifetimeSpend, 0)}</div>
-              <div className="mt-1 text-xs text-slate-500">across {num(ov?.billCount)} bills</div>
+            <div className="card !p-3">
+              <div className="card-title text-xs">Lifetime spend</div>
+              <div className="stat text-2xl">{usd(ov?.lifetimeSpend, 0)}</div>
+              <div className="mt-0.5 text-[11px] text-slate-500">across {num(ov?.billCount)} bills</div>
             </div>
-            <div className="card">
-              <div className="card-title">Electric rate</div>
-              <div className="stat">{rate(elecAllIn)}<span className="text-base text-slate-500">/kWh</span></div>
-              <div className="mt-1 text-xs text-slate-500">all-in, 12-mo avg · supply {rate(lastRow?.elecRateSupply)}</div>
+            <div className="card !p-3">
+              <div className="card-title text-xs">Electric rate</div>
+              <div className="stat text-2xl">{rate(elecAllIn)}<span className="text-sm text-slate-500">/kWh</span></div>
+              <div className="mt-0.5 text-[11px] text-slate-500">12-mo all-in · supply {rate(lastRow?.elecRateSupply)}</div>
             </div>
-            <div className="card">
-              <div className="card-title">Gas rate</div>
-              <div className="stat">{rate(gasAllIn, 2)}<span className="text-base text-slate-500">/therm</span></div>
-              <div className="mt-1 text-xs text-slate-500">all-in, 12-mo avg · supply {rate(lastRow?.gasRateSupply, 2)}</div>
+            <div className="card !p-3">
+              <div className="card-title text-xs">Gas rate</div>
+              <div className="stat text-2xl">{rate(gasAllIn, 2)}<span className="text-sm text-slate-500">/therm</span></div>
+              <div className="mt-0.5 text-[11px] text-slate-500">12-mo all-in · supply {rate(lastRow?.gasRateSupply, 2)}</div>
             </div>
+            {ov?.nextBillEstimate ? (
+              <div className="card !p-3">
+                <div className="card-title flex items-center gap-1 text-xs">
+                  Est. next bill
+                  <span className="rounded bg-slate-800/70 px-1 py-0.5 text-[9px] uppercase tracking-wide text-slate-400">est</span>
+                </div>
+                <div className="stat text-2xl">~{usd(ov.nextBillEstimate.point, dp)}</div>
+                <div className="mt-0.5 text-[11px] text-slate-500">
+                  {usd(ov.nextBillEstimate.low, dp)}–{usd(ov.nextBillEstimate.high, dp)} · {ov.nextBillEstimate.basis}
+                </div>
+              </div>
+            ) : (
+              <div className="hidden lg:block" />
+            )}
           </div>
 
-          {ov?.nextBillEstimate && (
-            <div className="card">
-              <div className="card-title">
-                Est. next bill <span className="ml-1 rounded bg-slate-800/70 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-slate-400">estimate</span>
+          {/* Main region: charts grid + bills rail. At ≥xl in "fit" density the
+              charts carry explicit (100dvh-derived) heights so the three rows add
+              up to the viewport with no page scroll; the bills rail STRETCHES to
+              that height (grid align stretch) and scrolls internally. Below xl
+              (and in comfortable density) it's a normal stacking grid that scrolls
+              with the page and each chart keeps its fixed 288px height. */}
+          <div className="grid min-h-0 grid-cols-1 gap-3 xl:grid-cols-[1fr_minmax(300px,360px)]">
+            {/* Charts */}
+            {visibleCharts.length === 0 ? (
+              <div className="card text-sm text-slate-400">
+                All charts are hidden. Enable them in <Link href="/settings" className="text-amber-400">Settings</Link>.
               </div>
-              <div className="stat">~{usd(ov.nextBillEstimate.point, dp)}</div>
-              <div className="mt-1 text-xs text-slate-500">
-                range {usd(ov.nextBillEstimate.low, dp)}–{usd(ov.nextBillEstimate.high, dp)} · {ov.nextBillEstimate.basis} · not a real charge
+            ) : (
+              <div className={`grid min-h-0 grid-cols-1 gap-3 md:grid-cols-2 ${fit ? 'xl:gap-2' : ''}`}>
+                {visibleCharts.map((id) => (
+                  <div key={id} className={fit ? '' : 'min-h-[18rem]'}>
+                    <ConfigurableChart spec={SPEC_BY_ID[id]} rows={ranged} fill={fit} height={288} />
+                  </div>
+                ))}
               </div>
-            </div>
-          )}
+            )}
 
-          {visibleCharts.length === 0 ? (
-            <div className="card text-sm text-slate-400">
-              All charts are hidden. Enable them in <Link href="/settings" className="text-amber-400">Settings</Link>.
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-              {visibleCharts.map((id) => (
-                <ConfigurableChart key={id} spec={SPEC_BY_ID[id]} rows={ranged} />
-              ))}
-            </div>
-          )}
-
-          <div className="card">
-            <h3 className="mb-3 text-base font-semibold text-slate-100">Bills ({bills.length})</h3>
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="text-left text-xs uppercase tracking-wide text-slate-500">
-                    <th className="px-2 py-2">Statement</th>
-                    <th className="px-2 py-2">Service period</th>
-                    <th className="px-2 py-2 text-right">Amount</th>
-                    <th className="px-2 py-2 text-right">PDF</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {bills.map((b) => (
-                    <tr key={b.statementDate} className="border-t border-slate-800/70">
-                      <td className="px-2 py-2 font-medium text-slate-200">{dateLabel(b.statementDate)}</td>
-                      <td className="px-2 py-2 text-slate-400">
-                        {b.periodFrom ? `${dateLabel(b.periodFrom)} – ${dateLabel(b.periodTo)}` : '—'}
-                      </td>
-                      <td className="px-2 py-2 text-right text-slate-200">{usd(b.totalDueAmount, dp)}</td>
-                      <td className="px-2 py-2 text-right">
-                        {b.hasPdf ? (
-                          <a className="text-amber-400 hover:text-amber-300" href={`/api/bills/${b.statementDate}/pdf`} target="_blank" rel="noreferrer">
-                            View
-                          </a>
-                        ) : (
-                          <span className="text-slate-600">—</span>
-                        )}
-                      </td>
+            {/* Bills rail — its own scroll so the page stays put at ≥xl. */}
+            <div className="card flex min-h-0 flex-col !p-0">
+              <div className="flex shrink-0 items-center justify-between border-b border-slate-800/70 px-4 py-3">
+                <h3 className="text-sm font-semibold text-slate-100">Bills ({rangedBills.length})</h3>
+                <span className="text-[11px] text-slate-500">in range</span>
+              </div>
+              <div className="min-h-0 flex-1 overflow-y-auto px-4 py-2">
+                <table className="w-full text-sm">
+                  <thead className="sticky top-0 bg-slate-900/95 backdrop-blur">
+                    <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500">
+                      <th className="py-2 pr-2">Statement</th>
+                      <th className="py-2 pr-2">Period</th>
+                      <th className="py-2 pl-2 text-right">Amount</th>
+                      <th className="py-2 pl-2 text-right">PDF</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {rangedBills.map((b) => (
+                      <tr key={b.statementDate} className="border-t border-slate-800/70">
+                        <td className="py-1.5 pr-2 font-medium text-slate-200">{dateLabel(b.statementDate)}</td>
+                        <td className="py-1.5 pr-2 text-xs text-slate-400">
+                          {b.periodFrom ? `${dateLabel(b.periodFrom)} – ${dateLabel(b.periodTo)}` : '—'}
+                        </td>
+                        <td className="py-1.5 pl-2 text-right text-slate-200">{usd(b.totalDueAmount, dp)}</td>
+                        <td className="py-1.5 pl-2 text-right">
+                          {b.hasPdf ? (
+                            <a className="text-amber-400 hover:text-amber-300" href={`/api/bills/${b.statementDate}/pdf`} target="_blank" rel="noreferrer">
+                              View
+                            </a>
+                          ) : (
+                            <span className="text-slate-600">—</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                    {rangedBills.length === 0 && (
+                      <tr><td className="py-3 text-slate-500" colSpan={4}>No bills in this range.</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+              {/* Range-scoped exports live with the bills they download. */}
+              <div className="flex shrink-0 flex-wrap items-center gap-2 border-t border-slate-800/70 px-4 py-2 text-xs">
+                <span className="text-slate-500">Export range:</span>
+                <a className="text-amber-400 hover:text-amber-300" href={`/api/export?dataset=series${csvScope}`} download>CSV series</a>
+                <span className="text-slate-700">·</span>
+                <a className="text-amber-400 hover:text-amber-300" href={`/api/export?dataset=bills${csvScope}`} download>CSV bills</a>
+                <span className="text-slate-700">·</span>
+                <a className="text-amber-400 hover:text-amber-300" href={`/api/export/pdfs${pdfScope}`} download>PDFs</a>
+              </div>
             </div>
           </div>
         </>
       )}
 
-      <footer className="pt-2 text-center text-xs text-slate-600">
+      {/* Footer only shows when the page can scroll (no point pinning it in fit mode). */}
+      <footer className={`shrink-0 pt-1 text-center text-[11px] text-slate-600 ${fit ? 'xl:hidden' : ''}`}>
         ngrid-dashboard v{process.env.NEXT_PUBLIC_APP_VERSION || 'dev'} · self-hosted · data scraped from your own
         National Grid account · not affiliated with National Grid
       </footer>
