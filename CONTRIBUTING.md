@@ -7,7 +7,7 @@ usage. For *running* the app, see the [README](README.md); this guide is for **c
 ## Read this first — the three golden rules
 
 1. **The bill PDF is the source of truth, not the API.** Several API fields are *plausible but
-   wrong* for analysis ([docs/data-accuracy.md](docs/data-accuracy.md)). Any change that touches
+   wrong* for analysis ([Data Accuracy](https://github.com/delabrcd/ngrid-dashboard/wiki/Data-Accuracy)). Any change that touches
    a number must keep the cross-validation green and be backed by hand-calculated tests.
 2. **Number logic lives in pure, tested functions** — `parsePdf.ts` / `series.ts` /
    `prediction.ts` — so it's unit-testable without a browser or DB. Don't bury arithmetic in a
@@ -15,29 +15,29 @@ usage. For *running* the app, see the [README](README.md); this guide is for **c
 3. **Be a good guest.** The scraper hits a third party with a real account. Reuse the session,
    rate-limit, and never add aggressive polling. Personal use only.
 
-## Documentation index
+## Documentation — the [project wiki](https://github.com/delabrcd/ngrid-dashboard/wiki)
 
-| Doc | What |
+| Page | What |
 |---|---|
-| [docs/architecture.md](docs/architecture.md) | Components, data flow, modules, data model. |
-| [docs/development.md](docs/development.md) | Run it locally, env vars, hit the DB, debug a scrape. |
-| [docs/scraper.md](docs/scraper.md) | B2C login, the "intercept-and-widen" technique, endpoints, PDFs. |
-| [docs/data-accuracy.md](docs/data-accuracy.md) | **The requirements that matter most** — why we trust PDFs and what every numeric change must satisfy. |
-| [docs/testing.md](docs/testing.md) | Hand-calculated unit tests + real-data cross-validation. |
-| [docs/releases-and-ci.md](docs/releases-and-ci.md) | Image tags, release-driven publishing, versioning. |
+| [Architecture](https://github.com/delabrcd/ngrid-dashboard/wiki/Architecture) | Components, data flow, modules, data model. |
+| [Development Setup](https://github.com/delabrcd/ngrid-dashboard/wiki/Development-Setup) | Run it locally, env vars, hit the DB, debug a scrape. |
+| [How the Scraper Works](https://github.com/delabrcd/ngrid-dashboard/wiki/How-the-Scraper-Works) | B2C login, the "intercept-and-widen" technique, endpoints, PDFs. |
+| [Data Accuracy](https://github.com/delabrcd/ngrid-dashboard/wiki/Data-Accuracy) | **The requirements that matter most** — why we trust PDFs and what every numeric change must satisfy. |
+| [Testing](https://github.com/delabrcd/ngrid-dashboard/wiki/Testing) | Hand-calculated unit tests + real-data cross-validation. |
+| [Releases and CI](https://github.com/delabrcd/ngrid-dashboard/wiki/Releases-and-CI) | Image tags, release-driven publishing, versioning. |
 
 ## Workflow
 
 1. Fork (or branch off `main`).
 2. Make your change. Keep number logic pure + tested
-   ([data-accuracy](docs/data-accuracy.md), [testing](docs/testing.md)).
+   ([Data Accuracy](https://github.com/delabrcd/ngrid-dashboard/wiki/Data-Accuracy), [Testing](https://github.com/delabrcd/ngrid-dashboard/wiki/Testing)).
 3. Build and run it: `docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build`.
 4. Run the tests and (for numeric changes) the cross-validation.
 5. Open a PR against `main` with a clear description and the checklist below.
 
 ## PR checklist
 
-- [ ] `docker run --rm ngrid-dashboard-test` passes (see [docs/testing.md](docs/testing.md)).
+- [ ] `docker run --rm ngrid-dashboard-test` passes (see [Testing](https://github.com/delabrcd/ngrid-dashboard/wiki/Testing)).
 - [ ] For anything touching numbers: `GET /api/verify` is green on a real account — summary pasted in the PR.
 - [ ] New pure logic (parsing/math/prediction) has a hand-calculated unit test.
 - [ ] No secrets or personal data committed (`.env`, `data/`, session, PDFs, account numbers, addresses). They're gitignored — keep it that way.
