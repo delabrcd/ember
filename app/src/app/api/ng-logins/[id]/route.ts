@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { decryptSecret } from '@/lib/crypto';
 import { deletePdfsForAccounts, deleteSession } from '@/lib/ngrid/auth';
 import { passwordMatches, planDeletion } from '@/lib/ngrid/loginStatus';
+import { parseIdParam } from '@/lib/route';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -22,8 +23,8 @@ export const runtime = 'nodejs';
 //     their child data) AND remove those accounts' bill PDFs from disk, scoped
 //     strictly to each account's own pdfs/<accountNumber> dir.
 export async function DELETE(req: Request, { params }: { params: { id: string } }) {
-  const id = parseInt(params.id, 10);
-  if (Number.isNaN(id)) return NextResponse.json({ error: 'bad id' }, { status: 400 });
+  const id = parseIdParam(params.id);
+  if (id instanceof Response) return id;
 
   const body = (await req.json().catch(() => null)) as
     | { deleteData?: unknown; password?: unknown }

@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { deriveKey } from '@/lib/crypto';
 import { startReauthPreflight } from '@/lib/ngrid/preflight';
+import { errorResponse, parseIdParam } from '@/lib/route';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -13,8 +14,8 @@ export const runtime = 'nodejs';
 // /preflight/:id + /preflight/:id/otp routes drive it), exactly like Add — no
 // password is sent by the client.
 export async function POST(_req: Request, { params }: { params: { id: string } }) {
-  const id = parseInt(params.id, 10);
-  if (Number.isNaN(id)) return NextResponse.json({ error: 'bad id' }, { status: 400 });
+  const id = parseIdParam(params.id);
+  if (id instanceof Response) return id;
 
   // Without the key we can't decrypt the stored credential, so there's no point
   // launching a login.
@@ -34,6 +35,6 @@ export async function POST(_req: Request, { params }: { params: { id: string } }
     const { id: preflightId } = startReauthPreflight(id);
     return NextResponse.json({ preflightId, status: 'RUNNING' });
   } catch (e) {
-    return NextResponse.json({ error: String((e as Error)?.message || e) }, { status: 500 });
+    return errorResponse(e);
   }
 }
