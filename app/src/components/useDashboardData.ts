@@ -13,6 +13,22 @@ export interface Overview {
   billCount?: number;
   lifetimeSpend?: number;
   nextBillEstimate?: { point: number; low: number; high: number; basis: string } | null;
+  // Seasonal 12-month projection (issue #52): per-month points + an annual total,
+  // both with horizon-widening bands. Climatological projection, not a forecast.
+  seasonProjection?: {
+    months: {
+      ym: number;
+      label: string;
+      projKwh: number | null;
+      projTherms: number | null;
+      projCost: number;
+      low: number;
+      high: number;
+      fallback: boolean;
+    }[];
+    annual: { point: number; low: number; high: number };
+    basis: string;
+  } | null;
   latestBill?: { statementDate: string; totalDueAmount: number | null } | null;
   firstStatement?: string | null;
   schedule?: { predictedNextBillDate: string | null; nextCheckAt: string | null; lastCheckedAt: string | null } | null;
