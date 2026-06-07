@@ -3,6 +3,7 @@ import path from 'path';
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
 import { resolveRequestAccount } from '@/lib/queries';
+import { unknownAccount } from '@/lib/route';
 import { pdfDirForAccount } from '@/lib/ngrid/auth';
 import { formatForUserAgent, tarGz, zip, type ArchiveFile } from '@/lib/archive';
 
@@ -48,7 +49,7 @@ export async function GET(req: Request) {
 
   const resolved = await resolveRequestAccount(req.url);
   if (resolved === 'invalid') {
-    return NextResponse.json({ error: 'unknown accountId' }, { status: 400 });
+    return unknownAccount();
   }
   if (!resolved) {
     return NextResponse.json({ error: 'no account' }, { status: 404 });

@@ -5,6 +5,7 @@ import { startPreflight } from '@/lib/ngrid/preflight';
 import { validateAddLogin } from '@/lib/ngrid/preflightState';
 import { isSecretKeyAvailable } from '@/lib/ngrid/secretKey';
 import { envCredsUsable, isFirstRun } from '@/lib/ngrid/firstRun';
+import { errorResponse } from '@/lib/route';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -76,6 +77,6 @@ export async function POST(req: Request) {
     const { id } = startPreflight(v.value);
     return NextResponse.json({ preflightId: id, status: 'RUNNING' });
   } catch (e) {
-    return NextResponse.json({ error: String((e as Error)?.message || e) }, { status: 500 });
+    return errorResponse(e);
   }
 }

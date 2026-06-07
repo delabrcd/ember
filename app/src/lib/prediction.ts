@@ -99,48 +99,17 @@ export function predictionWindow(statementDates: Date[]): PredictionWindow {
   };
 }
 
-export interface NextCheckOpts {
-  // The full statement history, so the cadence can derive the daily-polling
-  // window from historical variability (the default, strong back-off). When
-  // omitted we fall back to the legacy predicted-3-days watch window so callers
-  // that only know the predicted date keep working.
-  statementDates?: Date[];
-  // Opt back into the old weekly-heartbeat-everywhere behavior (kept for
-  // compatibility / tests). Default false: we use the issue-#27 back-off.
-  legacy?: boolean;
-}
-
-// Decide when to next poll the portal. DEFAULT cadence (strong back-off):
+// Decide when to next poll the portal. Strong back-off (issue #27) derived from
+// the statement history's predicted-bill window:
 //   - before windowStart  -> idle: schedule a single SPARSE safety re-check
 //                            (now + SPARSE_GAP_DAYS), capped at windowStart so
 //                            we never sleep past the window opening.
 //   - inside [windowStart, windowEnd] AND beyond windowEnd (until a new bill
 //     arrives and moves the window) -> daily (now + 1 day).
-// Pure function of (now, window). With no prediction (first run / no history)
-// we fall back to a sensible "check soon" of SPARSE_GAP_DAYS out.
-//
-// `predicted` is kept as the first arg for backward compatibility; pass the
-// statement history via opts to get the windowed back-off. Without it (or with
-// legacy:true) we reproduce the original predicted-3-day / weekly behavior.
-export function computeNextCheck(now: Date, predicted: Date | null, opts?: NextCheckOpts): Date {
-  // Legacy mode (or a caller that only has the predicted date): weekly far out,
-  // daily inside predicted-3d. Preserved for compatibility and existing tests.
-  if (opts?.legacy || !opts?.statementDates) {
-    if (!predicted) return new Date(now.getTime() + (opts?.legacy ? 7 : SPARSE_GAP_DAYS) * DAY);
-    const watchStart = new Date(predicted.getTime() - MIN_WIGGLE_DAYS * DAY);
-    if (now < watchStart) {
-      if (!opts?.legacy) {
-        const sparse = new Date(now.getTime() + SPARSE_GAP_DAYS * DAY);
-        return sparse < watchStart ? sparse : watchStart;
-      }
-      const weekly = new Date(now.getTime() + 7 * DAY);
-      return weekly < watchStart ? weekly : watchStart;
-    }
-    return new Date(now.getTime() + 1 * DAY);
-  }
-
-  // Default back-off: derive the window from history.
-  const { windowStart } = predictionWindow(opts.statementDates);
+// Pure function of (now, statementDates). With no history (first run) we fall
+// back to a sensible "check soon" of SPARSE_GAP_DAYS out.
+export function computeNextCheck(now: Date, statementDates: Date[]): Date {
+  const { windowStart } = predictionWindow(statementDates);
   if (!windowStart) return new Date(now.getTime() + SPARSE_GAP_DAYS * DAY);
   if (now < windowStart) {
     // Idle: one sparse safety re-check, never past the window opening.
