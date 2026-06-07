@@ -7,7 +7,14 @@ import { deriveMonthlySeries, type DegreeDayInput } from '@/lib/series';
 import { sumDegreeDays } from '@/lib/weather/degreeDays';
 import { monthlyTempByYm } from '@/lib/weather/monthlyTemp';
 import { getSetting } from '@/lib/settings';
-import { estimateNextBill } from '@/lib/prediction';
+import {
+  estimateNextBill,
+  estimateNextBillFromDegreeDays,
+  fitUsageVsDegreeDays,
+  predictionWindow,
+} from '@/lib/prediction';
+import { trailing12AllIn } from '@/lib/series';
+import { expectedDegreeDaysForWindow } from '@/lib/weather/expectedDegreeDaysSync';
 import { shapeAccount, type AccountSummary } from '@/lib/accountSwitcher';
 import { ymFromDate as ymOf, isoDate as ymd } from '@/lib/ym';
 import type { Bill } from '@prisma/client';
@@ -138,6 +145,54 @@ export async function getBills(accountId: number) {
   return bills.map(shapeBill);
 }
 
+// Next-bill cost estimate, weather-aware (issue #44). Tries the degree-day
+// regression: fit usage vs HDD/CDD from the series, assemble the predicted bill
+// window's EXPECTED degree-days (forecast + climatological normals — impure,
+// failure-tolerant), then price the projected usage with the same PDF-sourced
+// trailing-12 all-in rate. Falls back CLEANLY to the #9 calendar estimate when
+// history is insufficient, either fit is degenerate, or expected weather is
+// unavailable — so the existing estimate is never regressed. The math is pure
+// (prediction.ts); this wrapper does only the impure data assembly. Nothing is
+// stored; this never feeds /api/verify.
+async function computeNextBillEstimate(
+  accountId: number,
+  series: MonthRow[],
+  account: { latitude: number | null; longitude: number | null } | null,
+  statementDates: Date[]
+) {
+  const fallback = estimateNextBill(series);
+
+  const fits = fitUsageVsDegreeDays(series);
+  // Need at least one usable (non-degenerate) fit to do better than #9.
+  if (!fits.elec.ok && !fits.gas.ok) return fallback;
+
+  const { windowStart, windowEnd } = predictionWindow(statementDates);
+  if (!windowStart || !windowEnd) return fallback;
+
+  const baseSetting = await getSetting('degreeDayBaseF');
+  const parsed = Number.parseFloat(baseSetting ?? '');
+  const baseF = Number.isFinite(parsed) ? parsed : 65;
+
+  const loc =
+    account?.latitude != null && account?.longitude != null
+      ? { latitude: account.latitude, longitude: account.longitude }
+      : null;
+
+  // expectedDegreeDaysForWindow never throws (forecast failure -> normals); a
+  // null means no usable weather at all -> fall back to #9.
+  const expected = await expectedDegreeDaysForWindow(accountId, windowStart, windowEnd, baseF, loc);
+  if (!expected) return fallback;
+
+  const ddEstimate = estimateNextBillFromDegreeDays({
+    elecFit: fits.elec,
+    gasFit: fits.gas,
+    expected,
+    elecRate: trailing12AllIn(series, 'elec'),
+    gasRate: trailing12AllIn(series, 'gas'),
+  });
+  return ddEstimate ?? fallback;
+}
+
 export async function getOverview(accountId: number) {
   const [account, bills, schedule, lastRun, series] = await Promise.all([
     prisma.account.findUnique({ where: { id: accountId } }),
@@ -149,9 +204,16 @@ export async function getOverview(accountId: number) {
   // Lifetime energy spend = sum of each period's actual charges (not statement
   // amounts due, which would double-count any carried-over balances).
   const lifetimeSpend = bills.reduce((s, b) => s + (shapeBill(b).totalDueAmount ?? 0), 0);
-  // Estimated cost of the next bill from recent usage + current rates (pure,
-  // PDF-sourced; an estimate, never stored and never fed to /api/verify).
-  const nextBillEstimate = estimateNextBill(series);
+  // Estimated cost of the next bill (issue #44): weather-aware degree-day
+  // regression over the predicted bill window, with a clean fall-back to the #9
+  // calendar estimate. PDF-sourced rates; an estimate, never stored and never
+  // fed to /api/verify.
+  const nextBillEstimate = await computeNextBillEstimate(
+    accountId,
+    series,
+    account,
+    bills.map((b) => b.statementDate)
+  );
   const latest = bills[0] ? shapeBill(bills[0]) : null;
   return {
     account: account

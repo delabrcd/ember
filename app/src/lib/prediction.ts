@@ -234,3 +234,236 @@ export function estimateNextBill(rows: MonthRow[], opts?: EstimateOpts): NextBil
 
   return { point, low, high, basis };
 }
+
+// ---------------------------------------------------------------------------
+// Degree-day USAGE regression (issue #44)
+//
+// The #9 estimate above projects next-period usage from the calendar (same
+// month last year / trailing average). That ignores *how cold/hot* the coming
+// window will actually be. This block adds a weather-driven projection: fit
+// usage against degree-days from history, then project usage from the EXPECTED
+// degree-days for the predicted bill window (forecast + climatological normals,
+// assembled impurely in the data layer) and price it with the same PDF-sourced
+// trailing-12 all-in rate. Like #9 it is an estimate — never stored, never fed
+// to /api/verify.
+//
+// Models (ordinary least squares, one fit per fuel):
+//   electric: kWh    ≈ baseElec + slopeC·CDD + slopeH·HDD   (two regressors)
+//   gas:      therms ≈ baseGas  + slopeH·HDD                (one regressor)
+// Electric tracks both heating (resistive/heat-pump aux) and cooling (A/C); gas
+// is heating-only here, matching the weather-normalization split in series.ts.
+//
+// Everything in this block is PURE (no DB/network/React) so the arithmetic is
+// unit-tested with hand-calculated slopes/intercepts. The impure expected-
+// degree-day assembly lives in lib/weather/expectedDegreeDays.ts and feeds the
+// pure projector below.
+// ---------------------------------------------------------------------------
+
+// Minimum number of usable (usage + HDD + CDD) rows before we trust a fit.
+// Electric has two regressors + an intercept (3 params); gas has one + intercept
+// (2 params). We require a few observations beyond the parameter count so a fit
+// reflects a real relationship rather than interpolating the points exactly:
+//   - electric: >= 4 rows (3 params + 1)  -> MIN_FIT_ROWS_ELEC
+//   - gas:      >= 3 rows (2 params + 1)  -> MIN_FIT_ROWS_GAS
+export const MIN_FIT_ROWS_ELEC = 4;
+export const MIN_FIT_ROWS_GAS = 3;
+
+// A fit we'd refuse to project from is "degenerate": too few rows, or the
+// degree-day regressor(s) carry near-zero variance so the normal equations are
+// (near-)singular and the slope is meaningless. We treat |det| <= EPS of the
+// normal matrix as non-invertible.
+const FIT_DET_EPS = 1e-9;
+
+// One observation for the fit: usage against the period's degree-days. Built by
+// the caller from MonthRow (kwh/therms + hdd/cdd); kept tiny so the fit is pure.
+export interface FitObservation {
+  usage: number;
+  hdd: number;
+  cdd: number;
+}
+
+// Result of a per-fuel OLS fit. `ok:false` means degenerate -> caller falls back.
+// On success: coefficients, the residual standard deviation (sample, n-params)
+// used to size the projection band, and the observation count behind the fit.
+export type UsageFit =
+  | { ok: false; reason: 'insufficient' | 'degenerate' }
+  | {
+      ok: true;
+      base: number;
+      slopeH: number; // kWh or therms per HDD
+      slopeC: number; // kWh per CDD (0 for the gas one-regressor model)
+      residualStdev: number; // sample stdev of residuals (n - params); 0 if undefinable
+      n: number;
+    };
+
+// Expected degree-days for the predicted bill window, plus how that expectation
+// was sourced, so the caller can caption the basis honestly. `forecastDays` is
+// how many days came from the live forecast; `normalDays` from climatological
+// normals; their sum is the window length.
+export interface ExpectedDegreeDays {
+  hdd: number;
+  cdd: number;
+  forecastDays: number;
+  normalDays: number;
+}
+
+// Mean of a list (0 for empty — callers guard length first).
+const meanOf = (xs: number[]): number => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
+
+// --- ELECTRIC: two-regressor OLS  kWh ≈ b + c·CDD + h·HDD --------------------
+//
+// Solve the 3×3 normal equations XᵀX β = Xᵀy with X columns [1, CDD, HDD]. We
+// center CDD/HDD on their means so the intercept decouples (b = ȳ, and the 2×2
+// system in the slopes uses centered cross-products); this keeps the hand
+// arithmetic tractable and the matrix well-conditioned. Degenerate when the
+// centered 2×2 has a near-zero determinant (no usable degree-day variance).
+export function fitElectric(obs: FitObservation[]): UsageFit {
+  if (obs.length < MIN_FIT_ROWS_ELEC) return { ok: false, reason: 'insufficient' };
+  const n = obs.length;
+  const ybar = meanOf(obs.map((o) => o.usage));
+  const cbar = meanOf(obs.map((o) => o.cdd));
+  const hbar = meanOf(obs.map((o) => o.hdd));
+
+  // Centered sums of squares / cross-products.
+  let Scc = 0, Shh = 0, Sch = 0, Scy = 0, Shy = 0;
+  for (const o of obs) {
+    const dc = o.cdd - cbar;
+    const dh = o.hdd - hbar;
+    const dy = o.usage - ybar;
+    Scc += dc * dc;
+    Shh += dh * dh;
+    Sch += dc * dh;
+    Scy += dc * dy;
+    Shy += dh * dy;
+  }
+  const det = Scc * Shh - Sch * Sch;
+  if (Math.abs(det) <= FIT_DET_EPS) return { ok: false, reason: 'degenerate' };
+
+  // Cramer's rule on the centered 2×2: [Scc Sch; Sch Shh][slopeC; slopeH] = [Scy; Shy].
+  const slopeC = (Scy * Shh - Shy * Sch) / det;
+  const slopeH = (Shy * Scc - Scy * Sch) / det;
+  const base = ybar - slopeC * cbar - slopeH * hbar;
+
+  const residualStdev = residualSpread(
+    obs.map((o) => o.usage - (base + slopeC * o.cdd + slopeH * o.hdd)),
+    3
+  );
+  return { ok: true, base, slopeH, slopeC, residualStdev, n };
+}
+
+// --- GAS: one-regressor OLS  therms ≈ b + h·HDD -----------------------------
+//
+// Simple linear regression of therms on HDD. Degenerate when HDD has near-zero
+// variance (Shh ≈ 0). slopeC is fixed at 0 (gas has no cooling term).
+export function fitGas(obs: FitObservation[]): UsageFit {
+  if (obs.length < MIN_FIT_ROWS_GAS) return { ok: false, reason: 'insufficient' };
+  const n = obs.length;
+  const ybar = meanOf(obs.map((o) => o.usage));
+  const hbar = meanOf(obs.map((o) => o.hdd));
+  let Shh = 0, Shy = 0;
+  for (const o of obs) {
+    const dh = o.hdd - hbar;
+    Shh += dh * dh;
+    Shy += dh * (o.usage - ybar);
+  }
+  if (Math.abs(Shh) <= FIT_DET_EPS) return { ok: false, reason: 'degenerate' };
+  const slopeH = Shy / Shh;
+  const base = ybar - slopeH * hbar;
+  const residualStdev = residualSpread(obs.map((o) => o.usage - (base + slopeH * o.hdd)), 2);
+  return { ok: true, base, slopeH, slopeC: 0, residualStdev, n };
+}
+
+// Sample stdev of regression residuals with `params` degrees of freedom removed
+// (residual standard error). Returns 0 when n <= params (band undefinable).
+function residualSpread(residuals: number[], params: number): number {
+  const dof = residuals.length - params;
+  if (dof <= 0) return 0;
+  const ss = residuals.reduce((s, r) => s + r * r, 0);
+  return Math.sqrt(ss / dof);
+}
+
+// Build the per-fuel observation list from the series: rows that carry BOTH the
+// fuel's usage and degree-days. Electric uses HDD+CDD; gas uses HDD (cdd kept 0
+// for the gas model). PURE.
+export function fitObservations(rows: MonthRow[], fuel: 'elec' | 'gas'): FitObservation[] {
+  const useKey: 'kwh' | 'therms' = fuel === 'elec' ? 'kwh' : 'therms';
+  const out: FitObservation[] = [];
+  for (const r of rows) {
+    const usage = r[useKey];
+    if (usage == null || r.hdd == null) continue;
+    if (fuel === 'elec' && r.cdd == null) continue;
+    out.push({ usage, hdd: r.hdd, cdd: r.cdd ?? 0 });
+  }
+  return out;
+}
+
+// Convenience wrapper: fit both fuels from the series at once. PURE.
+export function fitUsageVsDegreeDays(rows: MonthRow[]): { elec: UsageFit; gas: UsageFit } {
+  return {
+    elec: fitElectric(fitObservations(rows, 'elec')),
+    gas: fitGas(fitObservations(rows, 'gas')),
+  };
+}
+
+// Project ONE fuel's usage from its fit + the window's expected degree-days, and
+// return a point and a ±k·residualStdev usage band (floored at 0). Returns null
+// when the fit is unusable so the caller can drop that fuel. PURE.
+function projectUsageFromFit(
+  fit: UsageFit,
+  expected: ExpectedDegreeDays,
+  k: number
+): { point: number; half: number } | null {
+  if (!fit.ok) return null;
+  const point = fit.base + fit.slopeC * expected.cdd + fit.slopeH * expected.hdd;
+  return { point: Math.max(0, point), half: k * fit.residualStdev };
+}
+
+// Price projected usage with the trailing-12 all-in $/unit and combine the per-
+// fuel bands. PURE — no DB, no rates lookup (rates passed in by the caller).
+export interface DegreeDayEstimateInput {
+  elecFit: UsageFit;
+  gasFit: UsageFit;
+  expected: ExpectedDegreeDays;
+  elecRate: number | null; // trailing12AllIn(rows, 'elec')
+  gasRate: number | null; // trailing12AllIn(rows, 'gas')
+  bandStdevs?: number; // k (default 1)
+}
+
+// Project the next bill's COST from the degree-day fits. Mirrors estimateNextBill's
+// shape ({point, low, high, basis}) so it slots into the same UI. Returns null
+// when neither fuel can be both fit AND priced — the caller then falls back to
+// the #9 estimate. PURE.
+export function estimateNextBillFromDegreeDays(inp: DegreeDayEstimateInput): NextBillEstimate | null {
+  const k = inp.bandStdevs ?? DEFAULT_BAND_STDEVS;
+  const elec = inp.elecRate != null ? projectUsageFromFit(inp.elecFit, inp.expected, k) : null;
+  const gas = inp.gasRate != null ? projectUsageFromFit(inp.gasFit, inp.expected, k) : null;
+
+  const elecCost = elec ? { point: elec.point * inp.elecRate!, half: elec.half * inp.elecRate! } : null;
+  const gasCost = gas ? { point: gas.point * inp.gasRate!, half: gas.half * inp.gasRate! } : null;
+  if (elecCost == null && gasCost == null) return null;
+
+  const point = (elecCost?.point ?? 0) + (gasCost?.point ?? 0);
+  // Combine the per-fuel residual bands in quadrature (independent residuals);
+  // floor low at 0. With both fits residual-flat this collapses to ±0 -> we keep
+  // a small documented floor so the range is never a degenerate single point.
+  const half = Math.sqrt((elecCost?.half ?? 0) ** 2 + (gasCost?.half ?? 0) ** 2);
+  const bandedHalf = half > 0 ? half : DEFAULT_BAND_PCT * point;
+  const low = Math.max(0, point - bandedHalf);
+  const high = point + bandedHalf;
+
+  // Honest basis caption: which fuels were degree-day fit, and how the window's
+  // expected degree-days were sourced (forecast days + normal days).
+  const fuels: string[] = [];
+  if (elecCost != null) fuels.push('electric HDD+CDD fit');
+  if (gasCost != null) fuels.push('gas HDD fit');
+  const fc = inp.expected.forecastDays;
+  const nm = inp.expected.normalDays;
+  const windowNote =
+    fc > 0
+      ? `forecast for ${fc} day${fc === 1 ? '' : 's'} + normals for ${nm} day${nm === 1 ? '' : 's'}`
+      : `${nm}-day window from climatological normals`;
+  const bandNote = half > 0 ? '±1σ regression residual' : `±${Math.round(DEFAULT_BAND_PCT * 100)}%`;
+  const basis = `${windowNote}; ${fuels.join(' + ')}; current 12-mo all-in rates; ${bandNote}`;
+
+  return { point, low, high, basis };
+}

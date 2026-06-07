@@ -128,3 +128,37 @@ export async function fetchDailyTemps(
   const json = (await res.json()) as ArchiveResponse;
   return parseArchiveDaily(json);
 }
+
+const FORECAST_URL = 'https://api.open-meteo.com/v1/forecast';
+
+// Max days the Open-Meteo forecast endpoint serves ahead (free tier).
+export const FORECAST_HORIZON_DAYS = 16;
+
+// Fetch DAILY forecast temps for [start, end] (inclusive, YYYY-MM-DD) at a
+// location, for the degree-day projection's expected-weather window (issue #44).
+// Mirrors fetchDailyTemps but hits the forecast endpoint (same parallel-array
+// `daily` shape, so parseArchiveDaily reuses cleanly). IMPURE (one HTTP GET).
+// The endpoint clamps `end_date` to its own horizon; callers should request at
+// most FORECAST_HORIZON_DAYS ahead and treat any returned days as the forecast
+// portion. Throws on a non-OK response — the caller (expectedDegreeDays) catches
+// and falls back to normals.
+export async function fetchForecastDailyTemps(
+  loc: LatLon,
+  start: string,
+  end: string,
+  unit: 'F' | 'C' = 'F'
+): Promise<DailyTemp[]> {
+  const url = new URL(FORECAST_URL);
+  url.searchParams.set('latitude', String(loc.latitude));
+  url.searchParams.set('longitude', String(loc.longitude));
+  url.searchParams.set('start_date', start);
+  url.searchParams.set('end_date', end);
+  url.searchParams.set('daily', 'temperature_2m_mean,temperature_2m_max,temperature_2m_min');
+  url.searchParams.set('temperature_unit', unit === 'C' ? 'celsius' : 'fahrenheit');
+  url.searchParams.set('timezone', 'auto');
+
+  const res = await fetch(url, { headers: { accept: 'application/json' } });
+  if (!res.ok) throw new Error(`open-meteo forecast failed: ${res.status} ${res.statusText}`);
+  const json = (await res.json()) as ArchiveResponse;
+  return parseArchiveDaily(json);
+}
