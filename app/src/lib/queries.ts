@@ -10,6 +10,7 @@ import { getSetting } from '@/lib/settings';
 import { estimateNextBill } from '@/lib/prediction';
 import { shapeAccount, type AccountSummary } from '@/lib/accountSwitcher';
 import { ymFromDate as ymOf, isoDate as ymd } from '@/lib/ym';
+import type { Bill } from '@prisma/client';
 
 // First/last day of the calendar month a statement falls in (UTC), used as the
 // degree-day window fallback when a bill is missing periodFrom/periodTo.
@@ -17,6 +18,19 @@ const monthStart = (d: Date) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMo
 const monthEnd = (d: Date) => new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0));
 
 export type { MonthRow };
+
+// Single home for the API-facing Bill shape: the period energy charge rule and
+// ISO-date conversion, deduplicated across getBills / getOverview.
+function shapeBill(b: Bill) {
+  return {
+    statementDate: ymd(b.statementDate),
+    periodFrom: b.periodFrom ? ymd(b.periodFrom) : null,
+    periodTo: b.periodTo ? ymd(b.periodTo) : null,
+    totalDueAmount: b.currentCharges ?? b.totalDueAmount, // period energy charges
+    amountDue: b.totalDueAmount, // statement amount due (with any carryover)
+    hasPdf: !!b.pdfPath,
+  };
+}
 
 export async function getDefaultAccount() {
   return prisma.account.findFirst({ orderBy: { id: 'asc' } });
@@ -121,14 +135,7 @@ export async function getBills(accountId: number) {
     where: { accountId },
     orderBy: { statementDate: 'desc' },
   });
-  return bills.map((b) => ({
-    statementDate: ymd(b.statementDate),
-    periodFrom: b.periodFrom ? ymd(b.periodFrom) : null,
-    periodTo: b.periodTo ? ymd(b.periodTo) : null,
-    totalDueAmount: b.currentCharges ?? b.totalDueAmount, // period energy charges
-    amountDue: b.totalDueAmount, // statement amount due (with any carryover)
-    hasPdf: !!b.pdfPath,
-  }));
+  return bills.map(shapeBill);
 }
 
 export async function getOverview(accountId: number) {
@@ -141,11 +148,11 @@ export async function getOverview(accountId: number) {
   ]);
   // Lifetime energy spend = sum of each period's actual charges (not statement
   // amounts due, which would double-count any carried-over balances).
-  const lifetimeSpend = bills.reduce((s, b) => s + (b.currentCharges ?? b.totalDueAmount ?? 0), 0);
+  const lifetimeSpend = bills.reduce((s, b) => s + (shapeBill(b).totalDueAmount ?? 0), 0);
   // Estimated cost of the next bill from recent usage + current rates (pure,
   // PDF-sourced; an estimate, never stored and never fed to /api/verify).
   const nextBillEstimate = estimateNextBill(series);
-  const latest = bills[0];
+  const latest = bills[0] ? shapeBill(bills[0]) : null;
   return {
     account: account
       ? {
@@ -161,10 +168,10 @@ export async function getOverview(accountId: number) {
     nextBillEstimate,
     latestBill: latest
       ? {
-          statementDate: ymd(latest.statementDate),
-          totalDueAmount: latest.currentCharges ?? latest.totalDueAmount,
-          periodFrom: latest.periodFrom ? ymd(latest.periodFrom) : null,
-          periodTo: latest.periodTo ? ymd(latest.periodTo) : null,
+          statementDate: latest.statementDate,
+          totalDueAmount: latest.totalDueAmount,
+          periodFrom: latest.periodFrom,
+          periodTo: latest.periodTo,
         }
       : null,
     firstStatement: bills.length ? ymd(bills[bills.length - 1].statementDate) : null,
