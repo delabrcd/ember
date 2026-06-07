@@ -405,69 +405,6 @@ export function fitUsageVsDegreeDays(rows: MonthRow[]): { elec: UsageFit; gas: U
   };
 }
 
-// Project ONE fuel's usage from its fit + the window's expected degree-days, and
-// return a point and a ±k·residualStdev usage band (floored at 0). Returns null
-// when the fit is unusable so the caller can drop that fuel. PURE.
-function projectUsageFromFit(
-  fit: UsageFit,
-  expected: ExpectedDegreeDays,
-  k: number
-): { point: number; half: number } | null {
-  if (!fit.ok) return null;
-  const point = fit.base + fit.slopeC * expected.cdd + fit.slopeH * expected.hdd;
-  return { point: Math.max(0, point), half: k * fit.residualStdev };
-}
-
-// Price projected usage with the trailing-12 all-in $/unit and combine the per-
-// fuel bands. PURE — no DB, no rates lookup (rates passed in by the caller).
-export interface DegreeDayEstimateInput {
-  elecFit: UsageFit;
-  gasFit: UsageFit;
-  expected: ExpectedDegreeDays;
-  elecRate: number | null; // trailing12AllIn(rows, 'elec')
-  gasRate: number | null; // trailing12AllIn(rows, 'gas')
-  bandStdevs?: number; // k (default 1)
-}
-
-// Project the next bill's COST from the degree-day fits. Mirrors estimateNextBill's
-// shape ({point, low, high, basis}) so it slots into the same UI. Returns null
-// when neither fuel can be both fit AND priced — the caller then falls back to
-// the #9 estimate. PURE.
-export function estimateNextBillFromDegreeDays(inp: DegreeDayEstimateInput): NextBillEstimate | null {
-  const k = inp.bandStdevs ?? DEFAULT_BAND_STDEVS;
-  const elec = inp.elecRate != null ? projectUsageFromFit(inp.elecFit, inp.expected, k) : null;
-  const gas = inp.gasRate != null ? projectUsageFromFit(inp.gasFit, inp.expected, k) : null;
-
-  const elecCost = elec ? { point: elec.point * inp.elecRate!, half: elec.half * inp.elecRate! } : null;
-  const gasCost = gas ? { point: gas.point * inp.gasRate!, half: gas.half * inp.gasRate! } : null;
-  if (elecCost == null && gasCost == null) return null;
-
-  const point = (elecCost?.point ?? 0) + (gasCost?.point ?? 0);
-  // Combine the per-fuel residual bands in quadrature (independent residuals);
-  // floor low at 0. With both fits residual-flat this collapses to ±0 -> we keep
-  // a small documented floor so the range is never a degenerate single point.
-  const half = Math.sqrt((elecCost?.half ?? 0) ** 2 + (gasCost?.half ?? 0) ** 2);
-  const bandedHalf = half > 0 ? half : DEFAULT_BAND_PCT * point;
-  const low = Math.max(0, point - bandedHalf);
-  const high = point + bandedHalf;
-
-  // Honest basis caption: which fuels were degree-day fit, and how the window's
-  // expected degree-days were sourced (forecast days + normal days).
-  const fuels: string[] = [];
-  if (elecCost != null) fuels.push('electric HDD+CDD fit');
-  if (gasCost != null) fuels.push('gas HDD fit');
-  const fc = inp.expected.forecastDays;
-  const nm = inp.expected.normalDays;
-  const windowNote =
-    fc > 0
-      ? `forecast for ${fc} day${fc === 1 ? '' : 's'} + normals for ${nm} day${nm === 1 ? '' : 's'}`
-      : `${nm}-day window from climatological normals`;
-  const bandNote = half > 0 ? '±1σ regression residual' : `±${Math.round(DEFAULT_BAND_PCT * 100)}%`;
-  const basis = `${windowNote}; ${fuels.join(' + ')}; current 12-mo all-in rates; ${bandNote}`;
-
-  return { point, low, high, basis };
-}
-
 // ---------------------------------------------------------------------------
 // Seasonal 12-month projection (issue #52)
 //
