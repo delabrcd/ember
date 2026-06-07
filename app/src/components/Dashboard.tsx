@@ -4,7 +4,8 @@ import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import { SPEC_BY_ID, type MonthRow } from '@/lib/chartSpec';
 import { trailing12AllIn } from '@/lib/series';
-import { clampPage, paginate, usePrefs } from '@/lib/prefs';
+import { clampPage, paginate } from '@/lib/cockpit';
+import { usePrefs } from '@/lib/prefs';
 import {
   filterByYm,
   filterBillsByYm,

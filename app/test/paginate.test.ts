@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { clampPage, paginate } from '../src/lib/prefs';
+import { clampPage, paginate } from '../src/lib/cockpit';
 import { estimateTooltip } from '../src/lib/format';
 
 // paginate splits the visible charts into fixed-size pages for the cockpit's
