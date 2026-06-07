@@ -70,21 +70,50 @@ describe('mergeRange (hand-calculated)', () => {
   });
 });
 
-// mergePrefs carries the showProjection display pref (issue #69) through a
-// localStorage round-trip: it defaults on for new/returning users who never saw
-// the toggle, but an explicit `false` must survive (the `??` must not clobber it).
-describe('mergePrefs showProjection (hand-calculated)', () => {
-  it('defaults showProjection to true when nothing is saved', () => {
-    expect(mergePrefs(null).showProjection).toBe(true);
-    expect(mergePrefs({}).showProjection).toBe(true);
-    expect(DEFAULT_PREFS.showProjection).toBe(true);
+// mergePrefs carries the two projection display prefs (issue #71, splitting the
+// single #69 toggle) through a localStorage round-trip: both default on for
+// new/returning users, an explicit `false` must survive each (the `??` must not
+// clobber it), and a saved LEGACY `showProjection` seeds both new keys so an
+// existing user who hid the projection keeps it hidden everywhere.
+describe('mergePrefs projection toggles (hand-calculated)', () => {
+  it('defaults both projection toggles to true when nothing is saved', () => {
+    expect(mergePrefs(null).showProjectionOnCharts).toBe(true);
+    expect(mergePrefs(null).showProjectionCard).toBe(true);
+    expect(mergePrefs({}).showProjectionOnCharts).toBe(true);
+    expect(mergePrefs({}).showProjectionCard).toBe(true);
+    expect(DEFAULT_PREFS.showProjectionOnCharts).toBe(true);
+    expect(DEFAULT_PREFS.showProjectionCard).toBe(true);
   });
 
-  it('preserves an explicit false through a round-trip (no ?? clobber)', () => {
-    expect(mergePrefs({ showProjection: false }).showProjection).toBe(false);
+  it('preserves an explicit false for each toggle (no ?? clobber)', () => {
+    expect(mergePrefs({ showProjectionOnCharts: false }).showProjectionOnCharts).toBe(false);
+    // The other key is untouched and falls back to its default.
+    expect(mergePrefs({ showProjectionOnCharts: false }).showProjectionCard).toBe(true);
+    expect(mergePrefs({ showProjectionCard: false }).showProjectionCard).toBe(false);
+    expect(mergePrefs({ showProjectionCard: false }).showProjectionOnCharts).toBe(true);
   });
 
-  it('preserves an explicit true', () => {
-    expect(mergePrefs({ showProjection: true }).showProjection).toBe(true);
+  it('preserves an explicit true for each toggle', () => {
+    expect(mergePrefs({ showProjectionOnCharts: true }).showProjectionOnCharts).toBe(true);
+    expect(mergePrefs({ showProjectionCard: true }).showProjectionCard).toBe(true);
+  });
+
+  it('migrates a legacy showProjection=false into BOTH new toggles', () => {
+    const m = mergePrefs({ showProjection: false });
+    expect(m.showProjectionOnCharts).toBe(false);
+    expect(m.showProjectionCard).toBe(false);
+  });
+
+  it('migrates a legacy showProjection=true into BOTH new toggles', () => {
+    const m = mergePrefs({ showProjection: true });
+    expect(m.showProjectionOnCharts).toBe(true);
+    expect(m.showProjectionCard).toBe(true);
+  });
+
+  it('lets a new key override the legacy value when both are present', () => {
+    // A user mid-migration who explicitly set one new toggle: it wins over legacy.
+    const m = mergePrefs({ showProjection: false, showProjectionCard: true });
+    expect(m.showProjectionOnCharts).toBe(false); // from legacy
+    expect(m.showProjectionCard).toBe(true); // explicit new key wins
   });
 });

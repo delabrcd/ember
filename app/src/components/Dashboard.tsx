@@ -94,12 +94,14 @@ export function Dashboard() {
   // dashed line connects to the solid history. It deliberately ignores the date
   // range (a forward projection is always shown in full). Charts that don't
   // declare a proj* series drop these rows via their own filter.
-  // The showProjection display pref (issue #69) gates the whole feature: when off,
-  // `season` is null, which empties forwardRows/withForward (no dashed series on
-  // the cost/usage charts) AND hides the "Proj. next 12 mo" card (it's rendered
-  // from `season ? (...)`).
-  const season = prefs.showProjection ? (ov?.seasonProjection ?? null) : null;
-  const forwardRows: MonthRow[] = season ? seasonForwardRows(season) : [];
+  // The projection display prefs (issue #71) gate the feature in two independent
+  // halves: `seasonCharts` drives the dashed forward series + per-chart spec
+  // filtering, while `seasonCard` drives the "Proj. next 12 mo" summary card.
+  // Either being null means that half is hidden (the `?? null` also covers the
+  // case where the server simply has no projection to show).
+  const seasonCharts = prefs.showProjectionOnCharts ? (ov?.seasonProjection ?? null) : null;
+  const seasonCard = prefs.showProjectionCard ? (ov?.seasonProjection ?? null) : null;
+  const forwardRows: MonthRow[] = seasonCharts ? seasonForwardRows(seasonCharts) : [];
   const withForward = (base: MonthRow[]): MonthRow[] => {
     if (!forwardRows.length) return base;
     const first = forwardRows[0];
@@ -114,6 +116,14 @@ export function Dashboard() {
   // Only the cost + usage charts carry the forward projected series.
   const PROJECTED_CHARTS = new Set(['cost', 'usage']);
   const chartRows = (id: string): MonthRow[] => (PROJECTED_CHARTS.has(id) ? withForward(ranged) : ranged);
+  // When charts-projection is off, strip the proj* series from the cost/usage
+  // specs so their legend entries and config checkboxes disappear too (issue #71)
+  // — not just the data. The spec is declarative, so we filter a shallow copy.
+  const specFor = (id: string) => {
+    const s = SPEC_BY_ID[id];
+    if (seasonCharts || !PROJECTED_CHARTS.has(id)) return s;
+    return { ...s, series: s.series.filter((ser) => !ser.key.startsWith('proj')) };
+  };
 
   // The export links scope to BOTH the account and the on-screen date range so a
   // download matches what's visible. CSV exports take ym integers (from/to);
@@ -307,8 +317,15 @@ export function Dashboard() {
               reclaim vertical space for the now-taller two-row chart grid below;
               the FILL_BODY_CLASSES height constant is tuned to this chrome.
               Comfortable density stays roomier. */}
+          {/* lg column count tracks the number of cards actually rendered (issue
+              #71): 4 fixed + the optional est-next and proj cards. We map to an
+              explicit literal so the class string is visible to Tailwind's JIT. */}
           <div
-            className={`grid shrink-0 grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6 ${
+            className={`grid shrink-0 grid-cols-2 gap-2 sm:grid-cols-3 ${
+              { 4: 'lg:grid-cols-4', 5: 'lg:grid-cols-5', 6: 'lg:grid-cols-6' }[
+                4 + (ov?.nextBillEstimate ? 1 : 0) + (seasonCard ? 1 : 0)
+              ]
+            } ${
               fit
                 ? 'xl:[&_.card]:!p-2 xl:[&_.stat]:!text-lg xl:[&_.stat]:!leading-tight xl:[&_.card-title]:!text-[11px] xl:[&_.sub]:!mt-0'
                 : ''
@@ -357,35 +374,31 @@ export function Dashboard() {
                   {usd(ov.nextBillEstimate.low, dp)}–{usd(ov.nextBillEstimate.high, dp)}
                 </div>
               </div>
-            ) : (
-              <div className="hidden lg:block" />
-            )}
+            ) : null}
             {/* Annual-total readout (issue #52): the sum of the next 12 projected
                 bill periods, with its combined band. Clearly labelled a
                 climatological PROJECTION, not a forecast — the verbose basis lives
                 behind the ⓘ tooltip so the word "projection" appears once. */}
-            {season ? (
+            {seasonCard ? (
               <div className="card relative !p-3">
                 <div className="card-title flex items-center gap-1 text-xs">
                   Proj. next 12 mo
                   <span
                     tabIndex={0}
                     role="img"
-                    aria-label={`Climatological projection (degree-day normals × current all-in rates) for the next 12 bill periods — ${season.basis}. Not a forecast, not a real charge.`}
-                    title={`Climatological projection (degree-day normals × current all-in rates) for the next 12 bill periods — ${season.basis}. Not a forecast, not a real charge.`}
+                    aria-label={`Climatological projection (degree-day normals × current all-in rates) for the next 12 bill periods — ${seasonCard.basis}. Not a forecast, not a real charge.`}
+                    title={`Climatological projection (degree-day normals × current all-in rates) for the next 12 bill periods — ${seasonCard.basis}. Not a forecast, not a real charge.`}
                     className="inline-flex h-4 w-4 cursor-help items-center justify-center rounded-full border border-slate-600/70 text-[10px] font-semibold text-slate-400 transition hover:border-slate-400 hover:text-slate-200 focus:outline-none focus:ring-1 focus:ring-violet-500/60"
                   >
                     i
                   </span>
                 </div>
-                <div className="stat text-2xl">~{usd(season.annual.point, 0)}</div>
+                <div className="stat text-2xl">~{usd(seasonCard.annual.point, 0)}</div>
                 <div className="sub mt-0.5 text-[11px] text-slate-500">
-                  {usd(season.annual.low, 0)}–{usd(season.annual.high, 0)} · projection
+                  {usd(seasonCard.annual.low, 0)}–{usd(seasonCard.annual.high, 0)} · projection
                 </div>
               </div>
-            ) : (
-              <div className="hidden lg:block" />
-            )}
+            ) : null}
           </div>
 
           {/* Main region: charts grid + bills rail. At ≥xl in "fit" density the
@@ -410,7 +423,7 @@ export function Dashboard() {
                 <div className="grid min-h-0 flex-1 grid-cols-2 gap-2">
                   {pagedCharts.map((id) => (
                     <div key={id}>
-                      <ConfigurableChart spec={SPEC_BY_ID[id]} rows={chartRows(id)} fill height={288} />
+                      <ConfigurableChart spec={specFor(id)} rows={chartRows(id)} fill height={288} />
                     </div>
                   ))}
                 </div>
@@ -422,7 +435,7 @@ export function Dashboard() {
               <div className={`grid min-h-0 grid-cols-1 gap-3 md:grid-cols-2 ${fit ? 'xl:gap-2' : ''}`}>
                 {visibleCharts.map((id) => (
                   <div key={id} className={fit ? '' : 'min-h-[18rem]'}>
-                    <ConfigurableChart spec={SPEC_BY_ID[id]} rows={chartRows(id)} fill={fit} height={288} />
+                    <ConfigurableChart spec={specFor(id)} rows={chartRows(id)} fill={fit} height={288} />
                   </div>
                 ))}
               </div>

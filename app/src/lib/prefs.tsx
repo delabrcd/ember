@@ -25,10 +25,13 @@ export interface Prefs {
   range: RangePref;
   currencyDecimals: number;
   density: Density;
-  // Show the seasonal 12-month forward projection (issue #52) — the dashed
-  // forward series on the cost & usage charts and the "Proj. next 12 mo" card.
-  // Default on (current behavior); issue #69 lets the operator hide it.
-  showProjection: boolean;
+  // Show the seasonal 12-month forward projection (issue #52). Issue #69 added a
+  // single hide toggle; #71 splits it into two independent controls so the dashed
+  // forward series on the cost & usage charts and the "Proj. next 12 mo" summary
+  // card can be shown/hidden separately. Both default on (current behavior). A
+  // saved legacy `showProjection` is migrated into both in mergePrefs().
+  showProjectionOnCharts: boolean;
+  showProjectionCard: boolean;
   order: string[];
   charts: Record<string, ChartConfig>;
   // The account the dashboard is scoped to. null = the default account (and the
@@ -51,7 +54,8 @@ export const DEFAULT_PREFS: Prefs = {
   range: DEFAULT_RANGE,
   currencyDecimals: 2,
   density: 'fit',
-  showProjection: true,
+  showProjectionOnCharts: true,
+  showProjectionCard: true,
   selectedAccountId: null,
   order: CHART_SPECS.map((s) => s.id),
   charts: {
@@ -66,18 +70,25 @@ export const DEFAULT_PREFS: Prefs = {
 
 const KEY = 'ngrid-prefs-v1';
 
-export function mergePrefs(saved: (Partial<Prefs> & { rangeMonths?: number }) | null): Prefs {
+export function mergePrefs(
+  saved: (Partial<Prefs> & { rangeMonths?: number; showProjection?: boolean }) | null
+): Prefs {
   if (!saved) return DEFAULT_PREFS;
   const charts: Record<string, ChartConfig> = {};
   for (const id of DEFAULT_PREFS.order) {
     charts[id] = { ...DEFAULT_PREFS.charts[id], ...(saved.charts?.[id] || {}) };
   }
+  // Back-compat (#71): the old single `showProjection` toggle now seeds BOTH new
+  // toggles, so an existing user who turned the projection off keeps it off
+  // everywhere. The per-key `??` (not ||) preserves an explicit `false`; only
+  // null/undefined fall through to the legacy value, then to the default.
+  const legacyProjection = saved.showProjection ?? DEFAULT_PREFS.showProjectionOnCharts;
   return {
     range: mergeRange(saved),
     currencyDecimals: saved.currencyDecimals ?? DEFAULT_PREFS.currencyDecimals,
     density: saved.density === 'comfortable' || saved.density === 'fit' ? saved.density : DEFAULT_PREFS.density,
-    // ?? (not ||) so an explicit `false` survives a round-trip; only null/undefined fall through.
-    showProjection: saved.showProjection ?? DEFAULT_PREFS.showProjection,
+    showProjectionOnCharts: saved.showProjectionOnCharts ?? legacyProjection,
+    showProjectionCard: saved.showProjectionCard ?? legacyProjection,
     selectedAccountId: saved.selectedAccountId ?? DEFAULT_PREFS.selectedAccountId,
     order: mergeOrder(saved.order, DEFAULT_PREFS.order),
     charts,
