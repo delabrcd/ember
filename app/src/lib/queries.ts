@@ -196,9 +196,9 @@ export async function getOverview(accountId: number) {
   // Lifetime energy spend = sum of each period's actual charges (not statement
   // amounts due, which would double-count any carried-over balances).
   const lifetimeSpend = bills.reduce((s, b) => s + (shapeBill(b).totalDueAmount ?? 0), 0);
-  // Estimated cost of the next bill. Prefer the seasonal V3 + bias-corrected model
-  // (issue #67): weather-normal usage × per-component fixed+variable rates +
-  // trailing bias correction, which roughly halves the calendar method's error on
+  // Estimated cost of the next bill. Prefer the seasonal Kalman-filter model
+  // (issue #67): weather-normal usage × per-component Kalman-filtered
+  // fixed+variable rates, which roughly halves the calendar method's error on
   // the real account. It needs the predicted next-bill window's degree-days
   // (forecast + normals, assembled impurely here) and ~18 usable bills; when those
   // aren't available it falls back to the plain calendar estimate (issue #9). Both

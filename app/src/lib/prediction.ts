@@ -608,51 +608,56 @@ export function seasonForwardRows(projection: SeasonProjection): MonthRow[] {
 }
 
 // ---------------------------------------------------------------------------
-// Seasonal next-bill estimate (issue #67) — V3 + trailing bias correction
+// Seasonal next-bill estimate (issue #67) — Kalman-filtered component rates
 //
 // A faithful TypeScript port of the proven Python POC (ngrid-poc-67). It beats
 // the calendar #9 estimate by ~2x on the real account (POC back-test: MAPE
-// 15.4%→7.8%, MAE $31→$16) using only production-realizable inputs. Three parts:
+// 15.4%→6.9%, MAE $31→$14.9) using only production-realizable inputs. Two parts:
 //
 //   1. WEATHER-AWARE USAGE. Per-fuel OLS of usage vs degree-days (the #44 fit,
 //      reused here), projected onto the predicted next-bill window's degree-days
 //      (forecast + climatological normals, assembled impurely and passed in via
 //      opts.target). This is the same projection projectSeason() makes for its
-//      first forward month.
-//   2. PER-COMPONENT RATE = fixed $/day + variable $/unit, fit SEPARATELY for
-//      each of the four components (electric supply, electric delivery, gas
-//      supply, gas delivery) by a 2-parameter OLS  amount ≈ fixed·days + rate·
-//      usage on the most recent `levelMonths` bills (all seasons). This is the
-//      structural fix: it correctly prices near-zero-usage summer gas delivery
-//      as mostly its fixed customer charge, where a flat $/therm fails. NO
-//      seasonal multiplier (the POC proved it over-corrects). Degenerate fits
-//      (negative fixed or rate) fall back to a mean $/unit, exactly like the POC.
-//   3. TRAILING BIAS CORRECTION. predicted = raw_model(next) + mean of the last
-//      `biasK` residuals, where each residual is (actual_i − raw_model trained
-//      ONLY on bills before i). Pure walk-forward, no leakage. Removes the
-//      residual structural under-bias (rate trend).
+//      first forward month. UNCHANGED from V3.
+//   2. PER-COMPONENT RATE via a KALMAN FILTER (see kalmanComponentRate). For each
+//      of the four components (electric supply, electric delivery, gas supply,
+//      gas delivery) the latent state [fixed $/day, variable $/unit] is a random
+//      walk; each historical bill is a linear observation
+//      amount ≈ fixed·days + rate·usage and the filter tracks the DRIFTING rate
+//      level, returning a one-step-ahead projection for the next period. This is
+//      the structural fix (it prices near-zero-usage summer gas delivery as
+//      mostly its fixed customer charge, where a flat $/therm fails) AND removes
+//      both of V3's hacks: there is NO recent-window length and NO manual
+//      trailing bias term — the filter yields ≈0 bias on its own (FINDINGS).
+//      Degenerate fits fall back to a mean $/unit, exactly like the POC.
 //
 // The bill total is the sum of the four component predictions (each fixed·days +
-// rate·usage) plus the bias term — the POC verified the four components sum to
-// currentCharges. Everything here is PURE: the impure target-window degree-day
-// assembly (forecast + normals) and the rate inputs are passed in by the caller.
+// rate·usage) — the POC verified the four components sum to currentCharges.
+// Everything here is PURE: the impure target-window degree-day assembly
+// (forecast + normals) and the rate inputs are passed in by the caller.
 //
-// For the WALK-FORWARD residuals we price each historical bill from its OWN
-// actual period degree-days (already on the MonthRow as hdd/cdd) and its own
-// days — the POC showed actual-weather and normal-weather back-tests give
-// essentially the same error (the "ceiling" row in FINDINGS), so this keeps the
-// function self-contained without recomputing per-window normals.
+// The CONFIDENCE BAND is sized from the spread of WALK-FORWARD residuals
+// (actual_i − model trained ONLY on bills before i), pricing each historical
+// bill from its OWN actual period degree-days/days — the POC showed actual- and
+// normal-weather back-tests give essentially the same error (the "ceiling" row
+// in FINDINGS), so this stays self-contained without recomputing per-window
+// normals. (No bias is added back; only the spread sizes the band.)
 //
 // Falls back to estimateNextBill (#9) — the caller does this — when there isn't
 // enough data: fewer than MIN_SEASONAL_BILLS usable bills, the four components /
 // degree-days are missing, or no target-window degree-days were supplied.
 // ---------------------------------------------------------------------------
 
-// Default recent-rate-level window (months/bills) for the component rate fits.
-// The POC swept 4/6/8/10/12/16 and found 6 the sweet spot (4 noisy, 12+ stale).
-export const DEFAULT_LEVEL_MONTHS = 6;
-// Trailing window for the bias correction (POC make_chart.py uses K=6).
-export const DEFAULT_BIAS_K = 6;
+// Number of leading usable bills used to seed the Kalman filter's initial state
+// (OLS on the first ~4 bills -> x0). Mirrors the POC's _init_ols(n=4).
+export const KALMAN_INIT_BILLS = 4;
+// Kalman tuning constants (POC `kalman.py`, FINDINGS recommendation). q is the
+// per-step process drift as a FRACTION of each state's magnitude; r is the
+// observation-noise scale as a FRACTION of the component's mean amount. The
+// back-test plateau is broad (q∈[0.10–0.25], r∈[0.06–0.15] all ~MAE $15); we
+// take the mid-plateau q=0.15, r=0.10.
+export const KALMAN_Q_FRAC = 0.15;
+export const KALMAN_R_FRAC = 0.1;
 // Minimum usable bills before we trust the seasonal model; below this the caller
 // falls back to #9. The POC's walk-forward used min_train = 18.
 export const MIN_SEASONAL_BILLS = 18;
@@ -699,25 +704,28 @@ function ols2(x0: number[], x1: number[], y: number[]): { b0: number; b1: number
   return { b0, b1 };
 }
 
-// Fit one cost component's price as fixed $/day + variable $/unit, on the most
-// recent `levelMonths` bills that carry the component, its usage AND a period
-// length (days). Mirrors the POC's component_rate_v3 (level_months=6):
-//   amount ≈ fixedPerDay·days + rate·usage   (2-param OLS, no intercept)
-// Guard against a degenerate fit (negative fixed or rate, or a singular system)
-// by falling back to a mean $/unit with the residual spread as the fixed floor —
-// exactly the POC's fallback. Rows missing `days` are skipped (the fixed term is
-// meaningless without a period length). Returns null when fewer than 3 usable
-// bills remain, so the caller can bail to #9.
-export function fitComponentRate(
-  rows: MonthRow[],
-  pick: ComponentPick,
-  levelMonths = DEFAULT_LEVEL_MONTHS
-): ComponentRate | null {
-  const usable = rows.filter(
+// The component's usable bills (carrying the component, its usage AND a period
+// length) in chronological order. Rows missing `days` are skipped (the fixed
+// term is meaningless without a period length).
+function componentUsableRows(rows: MonthRow[], pick: ComponentPick): MonthRow[] {
+  return rows.filter(
     (r) => r[pick.usage] != null && r[pick.comp] != null && r.days != null && r.days > 0
   );
-  if (usable.length < 3) return null;
-  const sub = usable.slice(-levelMonths);
+}
+
+// Fit one cost component's price as fixed $/day + variable $/unit by a 2-param
+// no-intercept OLS over the given usable rows:
+//   amount ≈ fixedPerDay·days + rate·usage
+// Guard against a degenerate fit (negative fixed or rate, or a singular system)
+// by falling back to a mean $/unit with the leftover as the fixed floor —
+// exactly the POC's fallback. Returns null when fewer than 3 usable bills are
+// supplied. This is the Kalman filter's INITIAL-state seed (POC `_init_ols`)
+// and the per-component degenerate fallback.
+export function fitComponentRate(
+  rows: MonthRow[],
+  pick: ComponentPick
+): ComponentRate | null {
+  const sub = componentUsableRows(rows, pick);
   if (sub.length < 3) return null;
 
   const days = sub.map((r) => r.days as number);
@@ -739,6 +747,104 @@ export function fitComponentRate(
   return { fixedPerDay: Math.max(0, fixedPerDay), rate: Math.max(0, rate) };
 }
 
+// ---------------------------------------------------------------------------
+// Kalman-filter component rate (issue #67, follow-up — BEST model)
+//
+// Per cost component the latent state x = [fixedPerDay, ratePerUnit] evolves as
+// a RANDOM WALK (F = I): the underlying fixed customer charge and variable
+// $/unit drift slowly over time. Each historical bill (chronological) is a
+// linear observation
+//   amount = days·fixedPerDay + usage·ratePerUnit + noise
+// i.e. a time-varying observation row H_t = [days_t, usage_t] with scalar
+// measurement z = the component's amount. We run the standard KF predict/update
+// per bill, then take ONE final predict step (x_pred = F·x) and return the
+// projected (fixedPerDay, ratePerUnit) for the NEXT period, clamped ≥ 0.
+//
+// This replaces V3's recent-6-month window + manual trailing bias correction
+// with one principled estimator: the filter tracks the drifting rate level and
+// yields ≈0 bias on its own (POC back-test: MAE $14.9 / 6.9% vs V3+bias $16.4 /
+// 7.8%, and removes BOTH hacks). The trend (local-linear) variant back-tested
+// WORSE and is intentionally NOT ported.
+//
+// Init / tuning (ported exactly from `kalman_rate`):
+//   x0 = OLS on the first ~4 usable bills (reuse fitComponentRate).
+//   P0 = 4 · diag((0.5·max(0.1,|f0|))², (0.5·max(1e-3,|r0|))²)
+//   Q  = diag((q·max(0.1,|f0|))², (q·max(1e-3,|r0|))²)   (drift ∝ magnitude)
+//   R  = (r · max(5, mean(amount over training)))²
+// with q = KALMAN_Q_FRAC (0.15), r = KALMAN_R_FRAC (0.10). With fewer than 4
+// usable bills we fall back to the initial OLS (as the POC does). It's a 2×2 /
+// 2-vector filter, implemented with plain number arrays (no dependency).
+// ---------------------------------------------------------------------------
+
+// Small fixed-size types for the 2-state filter. Vectors are [a,b]; 2×2 matrices
+// are [[a,b],[c,d]].
+type Vec2 = [number, number];
+type Mat2 = [[number, number], [number, number]];
+
+export function kalmanComponentRate(
+  rows: MonthRow[],
+  pick: ComponentPick,
+  qFrac = KALMAN_Q_FRAC,
+  rFrac = KALMAN_R_FRAC
+): ComponentRate | null {
+  const usable = componentUsableRows(rows, pick); // already chronological
+  // Seed from OLS on the first ~4 usable bills (POC _init_ols head(max(4,3))).
+  const init = fitComponentRate(usable.slice(0, Math.max(KALMAN_INIT_BILLS, 3)), pick);
+  if (init == null) return null;
+  // Too short for the filter: fall back to the initial OLS, as the POC does.
+  if (usable.length < KALMAN_INIT_BILLS) return init;
+
+  const f0 = init.fixedPerDay;
+  const r0 = init.rate;
+  const amounts = usable.map((r) => r[pick.comp] as number);
+  const meanAmt = Math.max(5, amounts.reduce((a, b) => a + b, 0) / amounts.length);
+  const R = (rFrac * meanAmt) ** 2; // observation variance ($²)
+  // Per-step process drift as a fraction of each state's magnitude.
+  const qf = (qFrac * Math.max(0.1, Math.abs(f0))) ** 2;
+  const qr = (qFrac * Math.max(1e-3, Math.abs(r0))) ** 2;
+
+  // F = I (random walk), Q = diag(qf, qr).
+  let x: Vec2 = [f0, r0];
+  let P: Mat2 = [
+    [(0.5 * Math.max(0.1, Math.abs(f0))) ** 2 * 4, 0],
+    [0, (0.5 * Math.max(1e-3, Math.abs(r0))) ** 2 * 4],
+  ];
+
+  for (const row of usable) {
+    const d = row.days as number;
+    const u = row[pick.usage] as number;
+    const z = row[pick.comp] as number;
+
+    // Predict: x = F·x (identity), P = F·P·Fᵀ + Q = P + Q.
+    P = [
+      [P[0][0] + qf, P[0][1]],
+      [P[1][0], P[1][1] + qr],
+    ];
+    // Update with H = [d, u], scalar measurement z.
+    // S = H·P·Hᵀ + R.
+    const PHt: Vec2 = [P[0][0] * d + P[0][1] * u, P[1][0] * d + P[1][1] * u];
+    const S = d * PHt[0] + u * PHt[1] + R;
+    // K = P·Hᵀ / S.
+    const K: Vec2 = [PHt[0] / S, PHt[1] / S];
+    // Innovation y = z − H·x.
+    const innov = z - (d * x[0] + u * x[1]);
+    x = [x[0] + K[0] * innov, x[1] + K[1] * innov];
+    // P = (I − K·H)·P.
+    const a = 1 - K[0] * d;
+    const b = -K[0] * u;
+    const c = -K[1] * d;
+    const e = 1 - K[1] * u;
+    P = [
+      [a * P[0][0] + b * P[1][0], a * P[0][1] + b * P[1][1]],
+      [c * P[0][0] + e * P[1][0], c * P[0][1] + e * P[1][1]],
+    ];
+  }
+
+  // One final predict step for the NEXT period (x_pred = F·x = x, since F = I),
+  // clamped ≥ 0.
+  return { fixedPerDay: Math.max(0, x[0]), rate: Math.max(0, x[1]) };
+}
+
 // Project per-fuel usage for a target window from the #44 degree-day fit, applied
 // to the window's degree-days. Returns null when the fuel's fit is unusable.
 function projectUsageForWindow(
@@ -749,15 +855,14 @@ function projectUsageForWindow(
   return Math.max(0, fit.base + fit.slopeC * target.cdd + fit.slopeH * target.hdd);
 }
 
-// The RAW (pre-bias) seasonal bill for a target window: weather-aware usage ×
-// per-component fixed/day + variable rates, summed over the four components.
+// The seasonal bill for a target window: weather-aware usage × per-component
+// Kalman-filtered fixed/day + variable rates, summed over the four components.
 // Returns null when usage can't be projected for either fuel or any component
-// rate can't be fit. PURE.
+// rate can't be estimated. PURE.
 function rawSeasonalBill(
   trainRows: MonthRow[],
   target: ExpectedDegreeDays,
-  targetDays: number,
-  levelMonths: number
+  targetDays: number
 ): number | null {
   const fits = fitUsageVsDegreeDays(trainRows);
   const kwh = projectUsageForWindow(fits.elec, target);
@@ -766,7 +871,7 @@ function rawSeasonalBill(
 
   let total = 0;
   for (const pick of COMPONENT_PICKS) {
-    const cr = fitComponentRate(trainRows, pick, levelMonths);
+    const cr = kalmanComponentRate(trainRows, pick);
     if (cr == null) return null;
     const usageVal = pick.usage === 'kwh' ? kwh : therms;
     total += cr.fixedPerDay * targetDays + cr.rate * usageVal;
@@ -801,19 +906,14 @@ export interface SeasonalEstimateOpts {
   // Length of the predicted next-bill window in days. Defaults to the median
   // statement interval the caller already knows (~30 when unknown).
   targetDays?: number;
-  levelMonths?: number; // recent-rate window for the component fits (default 6)
-  biasK?: number; // trailing residuals to average for the bias term (default 6)
   bandStdevs?: number; // k: band half-width in stdevs of the residuals (default 1)
 }
 
-// Walk-forward residuals (actual − raw_model trained only on prior bills), in the
+// Walk-forward residuals (actual − model trained only on prior bills), in the
 // usable bills' chronological order. Each residual prices the bill from its OWN
 // actual period degree-days/days (already on the row). Returns the residual list;
-// the caller takes its trailing mean (bias) and stdev (band). PURE.
-export function trailingResiduals(
-  rows: MonthRow[],
-  levelMonths = DEFAULT_LEVEL_MONTHS
-): number[] {
+// the caller takes its stdev to size the band. PURE.
+export function trailingResiduals(rows: MonthRow[]): number[] {
   const usable = rows.filter(isSeasonalUsable);
   const residuals: number[] = [];
   for (let i = MIN_SEASONAL_BILLS; i < usable.length; i++) {
@@ -821,8 +921,7 @@ export function trailingResiduals(
     const raw = rawSeasonalBill(
       usable.slice(0, i),
       { hdd: tg.hdd as number, cdd: tg.cdd as number, forecastDays: 0, normalDays: tg.days as number },
-      tg.days as number,
-      levelMonths
+      tg.days as number
     );
     if (raw == null) continue;
     residuals.push((tg.billTotal as number) - raw);
@@ -831,16 +930,14 @@ export function trailingResiduals(
 }
 
 // The #67 seasonal next-bill estimate: weather-normal usage × per-component
-// fixed+variable rates (last `levelMonths` bills) + trailing bias correction.
-// Same { point, low, high, basis } shape as estimateNextBill. Returns null when
-// there isn't enough data or no target-window degree-days were supplied — the
-// caller then falls back to estimateNextBill (#9). PURE.
+// Kalman-filtered fixed+variable rates. Same { point, low, high, basis } shape
+// as estimateNextBill. Returns null when there isn't enough data or no
+// target-window degree-days were supplied — the caller then falls back to
+// estimateNextBill (#9). PURE.
 export function estimateNextBillSeasonal(
   rows: MonthRow[],
   opts?: SeasonalEstimateOpts
 ): NextBillEstimate | null {
-  const levelMonths = opts?.levelMonths ?? DEFAULT_LEVEL_MONTHS;
-  const biasK = opts?.biasK ?? DEFAULT_BIAS_K;
   const k = opts?.bandStdevs ?? DEFAULT_BAND_STDEVS;
   const target = opts?.target;
   if (!target) return null; // no weather-aware window -> #9 fallback
@@ -852,21 +949,16 @@ export function estimateNextBillSeasonal(
     usable.map((r) => new Date(Date.UTC(Math.floor(r.ym / 100), (r.ym % 100) - 1, 1)))
   ).medianDays);
 
-  // Raw model trained on ALL usable bills.
-  const raw = rawSeasonalBill(usable, target, targetDays, levelMonths);
-  if (raw == null) return null;
+  // Point estimate: model trained on ALL usable bills. The Kalman filter yields
+  // ≈0 bias on its own, so there is no bias correction to add (FINDINGS).
+  const point = rawSeasonalBill(usable, target, targetDays);
+  if (point == null) return null;
 
-  // Trailing bias correction: mean of the last biasK walk-forward residuals.
-  const residuals = trailingResiduals(rows, levelMonths);
-  const tail = residuals.slice(-biasK);
-  const bias = tail.length ? tail.reduce((a, b) => a + b, 0) / tail.length : 0;
-
-  const point = raw + bias;
-
-  // Band from the spread of the trailing residuals (±k·σ); fall back to the
+  // Band from the spread of the walk-forward residuals (±k·σ); fall back to the
   // spread of recent period costs, then ±15% — the same ladder #9 uses.
   let half: number;
   let bandNote: string;
+  const residuals = trailingResiduals(rows);
   const residStdev = sampleStdev(residuals);
   if (residStdev != null) {
     half = k * residStdev;
@@ -888,7 +980,7 @@ export function estimateNextBillSeasonal(
 
   const low = Math.max(0, point - half);
   const high = point + half;
-  const basis = `weather-normal usage; per-component fixed+variable rates (last ${levelMonths} bills); bias-corrected; ${bandNote}`;
+  const basis = `weather-normal usage; per-component Kalman-filtered fixed+variable rates; ${bandNote}`;
 
   return { point, low, high, basis };
 }

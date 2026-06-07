@@ -7,6 +7,7 @@ import {
   estimateNextBill,
   estimateNextBillSeasonal,
   fitComponentRate,
+  kalmanComponentRate,
   trailingResiduals,
   type ComponentPick,
   type ExpectedDegreeDays,
@@ -64,23 +65,6 @@ describe('fitComponentRate — 2-param fixed/day + variable/unit decomposition (
     expect(cr!.fixedPerDay).toBeCloseTo(0, 6);
   });
 
-  it('only fits the most recent levelMonths bills', () => {
-    // Six rows: the first three encode amount = 1·days + 1·kwh, the last three
-    // encode amount = 5·days + 2·kwh. With levelMonths=3 only the last three count.
-    const pick: ComponentPick = { usage: 'kwh', comp: 'elecSupply' };
-    const rows: MonthRow[] = [
-      mk({ ym: 202401, kwh: 100, days: 30, elecSupply: 30 + 100 }),
-      mk({ ym: 202402, kwh: 200, days: 30, elecSupply: 30 + 200 }),
-      mk({ ym: 202403, kwh: 300, days: 31, elecSupply: 31 + 300 }),
-      mk({ ym: 202404, kwh: 100, days: 30, elecSupply: 5 * 30 + 2 * 100 }),
-      mk({ ym: 202405, kwh: 200, days: 30, elecSupply: 5 * 30 + 2 * 200 }),
-      mk({ ym: 202406, kwh: 300, days: 31, elecSupply: 5 * 31 + 2 * 300 }),
-    ];
-    const cr = fitComponentRate(rows, pick, 3);
-    expect(cr!.fixedPerDay).toBeCloseTo(5, 6);
-    expect(cr!.rate).toBeCloseTo(2, 6);
-  });
-
   it('returns null with fewer than three usable bills', () => {
     const pick: ComponentPick = { usage: 'kwh', comp: 'elecSupply' };
     const rows: MonthRow[] = [
@@ -106,8 +90,69 @@ describe('fitComponentRate — 2-param fixed/day + variable/unit decomposition (
   });
 });
 
+describe('kalmanComponentRate — random-walk filtered fixed/day + variable/unit (hand-calculated)', () => {
+  const pick: ComponentPick = { usage: 'therms', comp: 'gasDelivery' };
+
+  it('stays at the true state when every bill is exactly consistent with it', () => {
+    // Eight bills all on amount = 2·days + 0.5·therms (days 30). The OLS init on
+    // the first four recovers (2, 0.5) exactly; the filter, fed observations
+    // perfectly consistent with that state, neither drifts nor is corrected —
+    // it returns the true (fixed, rate) to machine precision.
+    const therms = [10, 0, 20, 5, 15, 8, 12, 18];
+    const rows: MonthRow[] = therms.map((t, i) =>
+      mk({ ym: 202401 + i, therms: t, days: 30, gasDelivery: 2 * 30 + 0.5 * t })
+    );
+    const cr = kalmanComponentRate(rows, pick);
+    expect(cr).not.toBeNull();
+    expect(cr!.fixedPerDay).toBeCloseTo(2, 6);
+    expect(cr!.rate).toBeCloseTo(0.5, 6);
+  });
+
+  it('tracks a drifting rate, pulling the estimate toward the newer observations', () => {
+    // First four bills price at rate 0.5/therm, the next four at 1.0/therm (a
+    // step up). The init OLS seeds rate=0.5; consuming the higher-rate bills the
+    // filter pulls the estimate UP toward 1.0 but, with finite process noise,
+    // stops short of it — strictly between the old and new rate.
+    const rows: MonthRow[] = [];
+    [10, 20, 5, 15].forEach((t, i) =>
+      rows.push(mk({ ym: 202401 + i, therms: t, days: 30, gasDelivery: 2 * 30 + 0.5 * t }))
+    );
+    [10, 20, 5, 15].forEach((t, i) =>
+      rows.push(mk({ ym: 202405 + i, therms: t, days: 30, gasDelivery: 2 * 30 + 1.0 * t }))
+    );
+    const cr = kalmanComponentRate(rows, pick)!;
+    expect(cr.rate).toBeGreaterThan(0.5);
+    expect(cr.rate).toBeLessThan(1.0);
+  });
+
+  it('falls back to the initial OLS (here a mean $/unit) on a degenerate fit', () => {
+    // Three bills (< KALMAN_INIT_BILLS) on a NEGATIVE usage slope -> the OLS init
+    // is degenerate (rate < 0) so fitComponentRate returns the mean-$/unit
+    // fallback, and the filter doesn't run (too few bills). Matches the POC's
+    // _init_ols-only path for short components. (therms,amount): (10,90),(20,60),
+    // (30,30) at days 30 -> rate = ΣAmt/ΣUse = 180/60 = 3, fixed = 0.
+    const rows: MonthRow[] = [
+      mk({ ym: 202401, therms: 10, days: 30, gasDelivery: 90 }),
+      mk({ ym: 202402, therms: 20, days: 30, gasDelivery: 60 }),
+      mk({ ym: 202403, therms: 30, days: 30, gasDelivery: 30 }),
+    ];
+    const cr = kalmanComponentRate(rows, pick);
+    expect(cr).not.toBeNull();
+    expect(cr!.rate).toBeCloseTo(3.0, 6);
+    expect(cr!.fixedPerDay).toBeCloseTo(0, 6);
+  });
+
+  it('returns null with fewer than three usable bills', () => {
+    const rows: MonthRow[] = [
+      mk({ ym: 202401, therms: 10, days: 30, gasDelivery: 90 }),
+      mk({ ym: 202402, therms: 20, days: 30, gasDelivery: 60 }),
+    ];
+    expect(kalmanComponentRate(rows, pick)).toBeNull();
+  });
+});
+
 // ---------------------------------------------------------------------------
-// A controlled 24-bill synthetic account for the full-model + bias tests.
+// A controlled 24-bill synthetic account for the full-model + band tests.
 //
 // Electric usage lies EXACTLY on the plane  kwh = 100 + 3·CDD + 2·HDD  on the
 // orthogonal (CDD,HDD) grid (0,0),(0,10),(10,0),(10,10) -> kwh 100/120/130/150.
@@ -183,24 +228,27 @@ describe('estimateNextBillSeasonal — full model (hand-calculated)', () => {
   //   raw    = 114 + 0.15·150 + 0.60·60 = 114 + 22.5 + 36 = 172.5
   const target: ExpectedDegreeDays = { hdd: 10, cdd: 10, forecastDays: 0, normalDays: 30 };
 
-  it('prices weather-normal usage with per-component rates and adds the trailing bias', () => {
-    // bias = mean of the last 6 residuals [3,4,5,6,7,8] = 33/6 = 5.5
-    // point = raw(172.5) + bias(5.5) = 178
+  it('prices weather-normal usage with the Kalman component rates and NO bias term', () => {
+    // Every bill lies EXACTLY on its component's fixed·days + rate·usage model, so
+    // each component's OLS init is exact and the Kalman filter — fed observations
+    // perfectly consistent with that state — stays there. The point is therefore
+    // the raw bill 172.5 with no bias correction added (the Kalman path drops it).
     const est = estimateNextBillSeasonal(rows, { target, targetDays: 30 });
     expect(est).not.toBeNull();
-    expect(est!.point).toBeCloseTo(178, 6);
+    expect(est!.point).toBeCloseTo(172.5, 4);
   });
 
-  it('bands by ±1σ of the trailing residuals', () => {
-    // σ of [3,4,5,6,7,8] (sample, n-1): mean 5.5, SS 17.5, var 3.5, σ = √3.5 ≈ 1.870829
-    // low = 178 − σ ≈ 176.129171 ; high = 178 + σ ≈ 179.870829
+  it('bands by ±1σ of the walk-forward residuals', () => {
+    // Residuals are the per-bill offsets δ = [3,4,5,6,7,8] (the Kalman model
+    // reproduces each exact raw bill, so actual − model = δ).
+    // σ (sample, n-1): mean 5.5, SS 17.5, var 3.5, σ = √3.5 ≈ 1.870829
     const est = estimateNextBillSeasonal(rows, { target, targetDays: 30 })!;
     const sigma = Math.sqrt(3.5);
     expect(est.high - est.point).toBeCloseTo(sigma, 6);
-    expect(est.low).toBeCloseTo(178 - sigma, 6);
-    expect(est.high).toBeCloseTo(178 + sigma, 6);
-    expect(est.basis).toContain('per-component fixed+variable rates');
-    expect(est.basis).toContain('bias-corrected');
+    expect(est.low).toBeCloseTo(est.point - sigma, 6);
+    expect(est.high).toBeCloseTo(est.point + sigma, 6);
+    expect(est.basis).toContain('Kalman-filtered fixed+variable rates');
+    expect(est.basis).toContain('back-test residuals');
   });
 });
 
