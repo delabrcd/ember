@@ -39,6 +39,8 @@ COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/public ./public
 COPY --from=builder /app/package.json ./package.json
+# prisma/ carries schema.prisma only — the single source of truth, applied at boot
+# via `prisma db push` (see docker-entrypoint.sh). There are no migration files.
 COPY --from=builder /app/prisma ./prisma
 COPY --from=builder /app/docker-entrypoint.sh ./docker-entrypoint.sh
 RUN chmod +x ./docker-entrypoint.sh && mkdir -p /data/pdfs /data/session

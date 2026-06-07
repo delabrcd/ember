@@ -9,9 +9,9 @@ import { isSchedulerEnabled } from '@/lib/settings';
 
 // Process-level guard so the env→NgLogin cutover bootstrap only does its DB query
 // once per process (it's a no-op after the first import, so re-checking every
-// hourly tick would be wasted work). It MUST still run on the FIRST tick after
-// boot — that is the reliable trigger, because Next's instrumentation `register()`
-// hook does NOT fire under `npx next start` in the built image.
+// hourly tick would be wasted work). The FIRST tick after boot is the bootstrap's
+// sole trigger in the production image (Next's instrumentation `register()` hook
+// does NOT fire under `npx next start`, so this path must own the cutover).
 let bootstrapRan = false;
 
 export async function tickOnce(): Promise<{ ran: boolean; reason: string }> {

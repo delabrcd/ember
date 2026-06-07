@@ -11,10 +11,9 @@
 //     (CI runs vitest in a Docker stage with NO `prisma generate`).
 //   - `bootstrapEnvLogin()` is the impure runner (DB + crypto). It NEVER throws.
 //     It is invoked from the cron-tick path (lib/scheduler.ts `tickOnce`, hit by
-//     the entrypoint's background loop), which is the RELIABLE trigger — Next's
-//     instrumentation `register()` hook does NOT fire under `npx next start` in
-//     the built image. The instrumentation hook (src/instrumentation.ts) is kept
-//     as a harmless belt-and-braces call for `next dev` / other runtimes.
+//     the entrypoint's background loop), which is the sole trigger in the built
+//     image — Next's instrumentation `register()` hook does NOT fire under
+//     `npx next start`, so the cron tick owns the cutover.
 //
 // Security: the password is never logged or returned. The decrypt round-trip is
 // verified BEFORE writing, so we never persist a credential we can't decrypt.
