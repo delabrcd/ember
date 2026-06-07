@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { tickOnce } from '@/lib/scheduler';
+import { errorResponse } from '@/lib/route';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -16,6 +17,6 @@ export async function POST(req: Request) {
     const result = await tickOnce();
     return NextResponse.json(result);
   } catch (e) {
-    return NextResponse.json({ error: String((e as Error)?.message || e) }, { status: 500 });
+    return errorResponse(e);
   }
 }

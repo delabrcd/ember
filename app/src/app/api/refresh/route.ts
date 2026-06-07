@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { runScrape, ScrapeBusyError, ScrapeThrottledError } from '@/lib/ngrid/run';
+import { errorResponse } from '@/lib/route';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -14,6 +15,6 @@ export async function POST() {
   } catch (e) {
     if (e instanceof ScrapeBusyError) return NextResponse.json({ error: 'busy' }, { status: 409 });
     if (e instanceof ScrapeThrottledError) return NextResponse.json({ error: 'throttled' }, { status: 429 });
-    return NextResponse.json({ error: String((e as Error)?.message || e) }, { status: 500 });
+    return errorResponse(e);
   }
 }

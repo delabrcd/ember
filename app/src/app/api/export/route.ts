@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getBills, getMonthlySeries, resolveRequestAccount } from '@/lib/queries';
+import { unknownAccount } from '@/lib/route';
 import { billsToCsv, seriesToCsv } from '@/lib/csv';
 import { filterByYm, filterBillsByYm } from '@/lib/range';
 
@@ -34,7 +35,7 @@ export async function GET(req: Request) {
   const range = { fromYm, toYm };
 
   const resolved = await resolveRequestAccount(req.url);
-  if (resolved === 'invalid') return NextResponse.json({ error: 'unknown accountId' }, { status: 400 });
+  if (resolved === 'invalid') return unknownAccount();
   const acct = resolved;
   let csv: string;
   if (dataset === 'series') {
