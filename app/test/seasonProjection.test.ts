@@ -4,7 +4,12 @@
 // rate, and widens each month's band with the horizon. We construct tiny rows that
 // produce a KNOWN fit and assert the projected usage/cost/band exactly.
 import { describe, expect, it } from 'vitest';
-import { projectSeason, seasonForwardRows, type ExpectedDegreeDays } from '../src/lib/prediction';
+import {
+  MIN_SEASONAL_BILLS,
+  projectSeason,
+  seasonForwardRows,
+  type ExpectedDegreeDays,
+} from '../src/lib/prediction';
 import type { MonthRow } from '../src/lib/chartSpec';
 
 // Minimal MonthRow builder — only the fields the projector + trailing12AllIn read.
@@ -13,7 +18,8 @@ const mk = (p: Partial<MonthRow> & { ym: number }): MonthRow => ({
   label: '',
   kwh: p.kwh ?? null,
   therms: p.therms ?? null,
-  elecSupply: null, gasSupply: null, elecDelivery: null, gasDelivery: null,
+  elecSupply: p.elecSupply ?? null, gasSupply: p.gasSupply ?? null,
+  elecDelivery: p.elecDelivery ?? null, gasDelivery: p.gasDelivery ?? null,
   elecBill: p.elecBill ?? null, gasBill: p.gasBill ?? null,
   elecRateSupply: null, gasRateSupply: null, elecRateAllIn: null, gasRateAllIn: null,
   avgTemp: null, billTotal: p.billTotal ?? null, days: p.days ?? null,
@@ -139,6 +145,124 @@ describe('projectSeason — same-month-last-year fallback (hand-calculated)', ()
     const dec2024 = p.months.find((m) => m.ym === 202412)!;
     expect(dec2024.projKwh).toBeCloseTo(200, 6);
     expect(dec2024.fallback).toBe(true);
+  });
+});
+
+describe('projectSeason — per-component Kalman pricing (issue #72, hand-calculated)', () => {
+  // Build >= MIN_SEASONAL_BILLS bills whose four cost components are PERFECTLY
+  // linear in (days, usage) with CONSTANT fixed/day + rate, so the Kalman filter
+  // (seeded by OLS on the first bills, random-walk state) recovers the exact
+  // rates and never moves off them (every innovation is 0). That makes projCost
+  // exactly hand-computable independent of the Kalman tuning.
+  //
+  // Usage is driven by degree-days with simple, exact relationships:
+  //   kwh    = 100 + 3·CDD + 1·HDD
+  //   therms = 2·HDD                (base 0 -> a HDD-0 month projects ~0 therms)
+  //
+  // Component prices (fixed $/day, variable $/unit):
+  //   elecSupply   : 0.10 /day, 0.08 /kWh
+  //   elecDelivery : 0.20 /day, 0.05 /kWh
+  //   gasSupply    : 0.15 /day, 0.40 /therm
+  //   gasDelivery  : 0.50 /day, 0.30 /therm
+  // -> elec fixed/day = 0.30, elec var = 0.13 ; gas fixed/day = 0.65, gas var = 0.70.
+  const ES_F = 0.1, ES_R = 0.08, ED_F = 0.2, ED_R = 0.05;
+  const GS_F = 0.15, GS_R = 0.4, GD_F = 0.5, GD_R = 0.3;
+
+  // 24 bills (>= 18) over two years; vary days/HDD/CDD so the per-component OLS
+  // and the degree-day fits are well-conditioned (non-singular).
+  const N = 24;
+  const built: MonthRow[] = Array.from({ length: N }, (_, i) => {
+    const ym = 202401 + (i < 12 ? i : 100 + (i - 12)); // 202401..202412, 202501..202512
+    const hdd = (i % 6) * 10;        // 0,10,20,30,40,50,0,...
+    const cdd = ((i + 3) % 6) * 5;   // 15,20,25,0,5,10,...
+    const days = 28 + (i % 4);       // 28,29,30,31,28,...
+    const kwh = 100 + 3 * cdd + 1 * hdd;
+    const therms = 2 * hdd;
+    const elecSupply = ES_F * days + ES_R * kwh;
+    const elecDelivery = ED_F * days + ED_R * kwh;
+    const gasSupply = GS_F * days + GS_R * therms;
+    const gasDelivery = GD_F * days + GD_R * therms;
+    return mk({
+      ym, kwh, therms, hdd, cdd, days,
+      elecSupply, elecDelivery, gasSupply, gasDelivery,
+      elecBill: elecSupply + elecDelivery, gasBill: gasSupply + gasDelivery,
+      billTotal: elecSupply + elecDelivery + gasSupply + gasDelivery,
+    });
+  });
+
+  // median of days over the 24 rows (values 28,29,30,31 repeating six times each):
+  // sorted middle pair is 29 & 30 -> median 29.5. Used for the fixed term.
+  const DAYS = 29.5;
+
+  // Latest usage row is 202512 -> projected months 202601..202612.
+  const projYms = Array.from({ length: 12 }, (_, i) => 202601 + i);
+
+  it('prices a near-zero-usage month at ~the fixed charge, not ~$0 (the core fix)', () => {
+    // A SUMMER month: HDD 0, CDD 25 (cooling but no heating -> ~0 therms).
+    //   kwh    = 100 + 3·25 + 0 = 175
+    //   therms = 2·0 = 0
+    // Flat rate (the FALLBACK) on a 0-therm gas month gives gasCost ~ $0; the
+    // component model instead charges the gas FIXED delivery+supply over the days.
+    const normals = new Map<number, ExpectedDegreeDays>(
+      projYms.map((ym) => [ym, { hdd: 0, cdd: 25, forecastDays: 0, normalDays: 30 }])
+    );
+    const proj = projectSeason(built, normals, { elec: null, gas: null });
+    expect(proj.basis).toContain('per-component Kalman fixed+variable rates');
+
+    const m = proj.months[0];
+    // therms projects to 0 -> gas cost is purely the fixed charge:
+    //   gasCost = (GS_F + GD_F)·DAYS + (GS_R + GD_R)·0 = 0.65·29.5 = 19.175
+    const gasFixed = (GS_F + GD_F) * DAYS;
+    expect(m.projTherms).toBeCloseTo(0, 6);
+    expect(gasFixed).toBeCloseTo(19.175, 6);
+    //   elecCost = (ES_F + ED_F)·DAYS + (ES_R + ED_R)·175
+    //            = 0.30·29.5 + 0.13·175 = 8.85 + 22.75 = 31.6
+    const elecCost = (ES_F + ED_F) * DAYS + (ES_R + ED_R) * 175;
+    expect(m.projKwh).toBeCloseTo(175, 6);
+    expect(elecCost).toBeCloseTo(31.6, 6);
+    // projCost = 31.6 + 19.175 = 50.775 (gas is NOT ~$0 — it's its fixed charge).
+    expect(m.projCost).toBeCloseTo(50.775, 4);
+    // And gas alone (projCost - elecCost) equals the fixed gas charge.
+    expect(m.projCost - elecCost).toBeCloseTo(19.175, 4);
+  });
+
+  it('prices a heating month with the full fixed + variable component charge', () => {
+    // WINTER month: HDD 40, CDD 0.
+    //   kwh    = 100 + 0 + 40 = 140 ; therms = 2·40 = 80
+    const normals = new Map<number, ExpectedDegreeDays>(
+      projYms.map((ym) => [ym, { hdd: 40, cdd: 0, forecastDays: 0, normalDays: 30 }])
+    );
+    const proj = projectSeason(built, normals, { elec: null, gas: null });
+    const m = proj.months[0];
+    expect(m.projKwh).toBeCloseTo(140, 6);
+    expect(m.projTherms).toBeCloseTo(80, 6);
+    // elecCost = 0.30·29.5 + 0.13·140 = 8.85 + 18.2 = 27.05
+    // gasCost  = 0.65·29.5 + 0.70·80  = 19.175 + 56 = 75.175
+    // projCost = 102.225
+    expect(m.projCost).toBeCloseTo(102.225, 4);
+  });
+});
+
+describe('projectSeason — flat-rate fallback when history is too short', () => {
+  it('uses flat all-in pricing (not component) below MIN_SEASONAL_BILLS', () => {
+    // Only 4 bills, well under MIN_SEASONAL_BILLS: even with full component data
+    // the model must fall back to the flat `rates` path (the prior behavior).
+    expect(MIN_SEASONAL_BILLS).toBeGreaterThan(4);
+    const rows: MonthRow[] = [202401, 202402, 202403, 202404].map((ym, i) =>
+      mk({
+        ym, kwh: 100, therms: 10, hdd: i * 5, cdd: 5, days: 30,
+        elecSupply: 6, elecDelivery: 4, gasSupply: 3, gasDelivery: 7,
+        elecBill: 10, gasBill: 10, billTotal: 20,
+      })
+    );
+    // Empty normals -> same-month-last-year fallback path; latest usage 202404 ->
+    // 202405..202504. Only 202404's prior-year (none) exists, so months drop to 0,
+    // but the basis must still say flat all-in rates (NOT per-component Kalman).
+    const proj = projectSeason(rows, new Map(), { elec: 0.1, gas: 1.0 });
+    expect(proj.basis).toContain('current 12-mo all-in rates');
+    expect(proj.basis).not.toContain('per-component Kalman');
+    // 202404 -> 202304 missing -> first month drops both fuels to 0 (flat path).
+    expect(proj.months[0].projCost).toBe(0);
   });
 });
 

@@ -179,6 +179,9 @@ async function computeSeasonProjection(
   const baseF = Number.isFinite(parsed) ? parsed : 65;
 
   const normalsByMonth = await seasonNormalsByMonth(accountId, lastUsage.ym, baseF);
+  // projectSeason prefers the #67 per-component Kalman fixed+variable rate model
+  // (computed internally from the series) and falls back to these flat all-in
+  // rates only for sparse-history / new accounts.
   return projectSeason(series, normalsByMonth, {
     elec: trailing12AllIn(series, 'elec'),
     gas: trailing12AllIn(series, 'gas'),

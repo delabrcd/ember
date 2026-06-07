@@ -449,7 +449,7 @@ export interface SeasonMonth {
   label: string; // 'YYYY-MM'
   projKwh: number | null; // projected electric usage (null when electric can't be projected)
   projTherms: number | null; // projected gas usage (null when gas can't be projected)
-  projCost: number; // projected period energy cost ($), priced at all-in rates
+  projCost: number; // projected period energy cost ($), priced at per-component Kalman fixed+variable rates (flat all-in rates on the sparse-history fallback)
   low: number; // lower band (floored at 0)
   high: number; // upper band
   fallback: boolean; // true when ANY fuel used same-month-last-year instead of the fit
@@ -508,6 +508,39 @@ export function projectSeason(
   if (!lastUsage) return empty;
 
   const fits = fitUsageVsDegreeDays(rows);
+
+  // ---- Pricing mode (issue #72) -------------------------------------------
+  // Prefer the #67 per-component Kalman fixed+variable rate model: price each
+  // forward month as (Σ fixedPerDay)·days + (Σ rate)·usage per fuel, so a
+  // near-zero-usage summer gas month costs ≈ its fixed delivery charge instead
+  // of ~$0. The Kalman state is a random walk (no drift), so its filtered
+  // estimate is the best forecast for ALL 12 forward months — compute the four
+  // component rates ONCE here and reuse them every month. When there isn't
+  // enough history (fewer than MIN_SEASONAL_BILLS usable component bills, or any
+  // of the four rates can't be estimated) we fall back to the flat all-in
+  // `rates` pricing for sparse-history / new accounts.
+  const [es, ed, gs, gd] = COMPONENT_PICKS.map((p) => kalmanComponentRate(rows, p));
+  const usableBills = COMPONENT_PICKS.reduce(
+    (m, p) => Math.max(m, componentUsableRows(rows, p).length),
+    0
+  );
+  const useComponents =
+    usableBills >= MIN_SEASONAL_BILLS && es != null && ed != null && gs != null && gd != null;
+  // Per-fuel variable $/unit (supply + delivery) used both to price usage and to
+  // convert the usage-residual band half-width to $ in component mode.
+  const elecVarRate = useComponents ? es!.rate + ed!.rate : 0;
+  const gasVarRate = useComponents ? gs!.rate + gd!.rate : 0;
+
+  // Period length for the fixed term: median of the historical non-null days
+  // (fallback 30), computed once before the loop.
+  const median = (xs: number[]): number => {
+    const s = [...xs].sort((a, b) => a - b);
+    const mid = Math.floor(s.length / 2);
+    return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+  };
+  const dayVals = rows.map((r) => r.days).filter((d): d is number => d != null);
+  const days = dayVals.length ? median(dayVals) : 30;
+
   const months: SeasonMonth[] = [];
   let anyFit = false;
   let anyFallback = false;
@@ -516,18 +549,39 @@ export function projectSeason(
     const ym = ymAddMonths(lastUsage.ym, h);
     const normals = normalsByMonth.get(ym);
 
-    const elec = rates.elec != null ? projectFuelMonth(rows, ym, 'elec', fits.elec, normals, k) : null;
-    const gas = rates.gas != null ? projectFuelMonth(rows, ym, 'gas', fits.gas, normals, k) : null;
+    // In component mode the usage projection itself never needs `rates`, so we
+    // always attempt both fuels; in flat mode we keep the old guard that a fuel
+    // is only projected when it has a flat rate.
+    const elec =
+      useComponents || rates.elec != null
+        ? projectFuelMonth(rows, ym, 'elec', fits.elec, normals, k)
+        : null;
+    const gas =
+      useComponents || rates.gas != null
+        ? projectFuelMonth(rows, ym, 'gas', fits.gas, normals, k)
+        : null;
 
-    const elecCost = elec ? elec.usage * rates.elec! : 0;
-    const gasCost = gas ? gas.usage * rates.gas! : 0;
+    let elecCost: number;
+    let gasCost: number;
+    if (useComponents) {
+      // Fixed charge accrues even at ~0 usage; variable charge scales with use.
+      elecCost = elec ? (es!.fixedPerDay + ed!.fixedPerDay) * days + elecVarRate * elec.usage : 0;
+      gasCost = gas ? (gs!.fixedPerDay + gd!.fixedPerDay) * days + gasVarRate * gas.usage : 0;
+    } else {
+      elecCost = elec ? elec.usage * rates.elec! : 0;
+      gasCost = gas ? gas.usage * rates.gas! : 0;
+    }
     const projCost = elecCost + gasCost;
 
     // Per-fuel base band in $; widen by sqrt(h) for the horizon, combine in
-    // quadrature across fuels.
+    // quadrature across fuels. The usage residual carries no fixed-charge
+    // uncertainty, so in component mode it converts to $ via the per-fuel
+    // VARIABLE rate; in flat mode via the flat all-in rate (unchanged).
     const grow = Math.sqrt(h);
-    const elecHalf = elec ? elec.baseHalf * (rates.elec ?? 0) * grow : 0;
-    const gasHalf = gas ? gas.baseHalf * (rates.gas ?? 0) * grow : 0;
+    const elecRate$ = useComponents ? elecVarRate : rates.elec ?? 0;
+    const gasRate$ = useComponents ? gasVarRate : rates.gas ?? 0;
+    const elecHalf = elec ? elec.baseHalf * elecRate$ * grow : 0;
+    const gasHalf = gas ? gas.baseHalf * gasRate$ * grow : 0;
     let half = Math.sqrt(elecHalf ** 2 + gasHalf ** 2);
     if (half <= 0) half = DEFAULT_BAND_PCT * projCost; // ±15% floor when residual-flat
 
@@ -556,11 +610,14 @@ export function projectSeason(
   let annualHalf = Math.sqrt(annualHalfSq);
   if (annualHalf <= 0) annualHalf = DEFAULT_BAND_PCT * point;
 
+  const rateNote = useComponents
+    ? 'per-component Kalman fixed+variable rates'
+    : 'current 12-mo all-in rates';
   const basis = anyFit
-    ? `12-month climatological projection from degree-day normals; current 12-mo all-in rates${
+    ? `12-month climatological projection from degree-day normals; ${rateNote}${
         anyFallback ? '; some months fell back to same-month-last-year usage' : ''
       }`
-    : 'same-month-last-year usage at current 12-mo all-in rates (climatological fallback)';
+    : `same-month-last-year usage at ${rateNote} (climatological fallback)`;
 
   return {
     months,
