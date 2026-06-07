@@ -9,9 +9,7 @@ import { monthlyTempByYm } from '@/lib/weather/monthlyTemp';
 import { getSetting } from '@/lib/settings';
 import { estimateNextBill } from '@/lib/prediction';
 import { shapeAccount, type AccountSummary } from '@/lib/accountSwitcher';
-
-const ymOf = (d: Date) => d.getUTCFullYear() * 100 + (d.getUTCMonth() + 1);
-const ymd = (d: Date) => d.toISOString().slice(0, 10);
+import { ymFromDate as ymOf, isoDate as ymd } from '@/lib/ym';
 
 // First/last day of the calendar month a statement falls in (UTC), used as the
 // degree-day window fallback when a bill is missing periodFrom/periodTo.
@@ -124,9 +122,9 @@ export async function getBills(accountId: number) {
     orderBy: { statementDate: 'desc' },
   });
   return bills.map((b) => ({
-    statementDate: b.statementDate.toISOString().slice(0, 10),
-    periodFrom: b.periodFrom?.toISOString().slice(0, 10) ?? null,
-    periodTo: b.periodTo?.toISOString().slice(0, 10) ?? null,
+    statementDate: ymd(b.statementDate),
+    periodFrom: b.periodFrom ? ymd(b.periodFrom) : null,
+    periodTo: b.periodTo ? ymd(b.periodTo) : null,
     totalDueAmount: b.currentCharges ?? b.totalDueAmount, // period energy charges
     amountDue: b.totalDueAmount, // statement amount due (with any carryover)
     hasPdf: !!b.pdfPath,
@@ -163,16 +161,16 @@ export async function getOverview(accountId: number) {
     nextBillEstimate,
     latestBill: latest
       ? {
-          statementDate: latest.statementDate.toISOString().slice(0, 10),
+          statementDate: ymd(latest.statementDate),
           totalDueAmount: latest.currentCharges ?? latest.totalDueAmount,
-          periodFrom: latest.periodFrom?.toISOString().slice(0, 10) ?? null,
-          periodTo: latest.periodTo?.toISOString().slice(0, 10) ?? null,
+          periodFrom: latest.periodFrom ? ymd(latest.periodFrom) : null,
+          periodTo: latest.periodTo ? ymd(latest.periodTo) : null,
         }
       : null,
-    firstStatement: bills.length ? bills[bills.length - 1].statementDate.toISOString().slice(0, 10) : null,
+    firstStatement: bills.length ? ymd(bills[bills.length - 1].statementDate) : null,
     schedule: schedule
       ? {
-          predictedNextBillDate: schedule.predictedNextBillDate?.toISOString().slice(0, 10) ?? null,
+          predictedNextBillDate: schedule.predictedNextBillDate ? ymd(schedule.predictedNextBillDate) : null,
           nextCheckAt: schedule.nextCheckAt?.toISOString() ?? null,
           lastCheckedAt: schedule.lastCheckedAt?.toISOString() ?? null,
         }

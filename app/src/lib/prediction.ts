@@ -4,6 +4,7 @@
 
 import type { MonthRow } from './chartSpec';
 import { trailing12AllIn } from './series';
+import { ymAddMonths } from './ym';
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -196,11 +197,7 @@ const DEFAULT_BAND_STDEVS = 1;
 const DEFAULT_BAND_PCT = 0.15; // ±15% fallback when stdev isn't computable
 
 // Calendar month after `ym` (yyyymm), rolling Dec -> Jan of the next year.
-function nextYm(ym: number): number {
-  const y = Math.floor(ym / 100);
-  const m = ym % 100;
-  return m >= 12 ? (y + 1) * 100 + 1 : y * 100 + (m + 1);
-}
+const nextYm = (ym: number): number => ymAddMonths(ym, 1);
 
 // Sample standard deviation (n-1). Returns null for fewer than two values.
 function sampleStdev(xs: number[]): number | null {

@@ -6,6 +6,7 @@
 import fs from 'fs';
 import { prisma } from '@/lib/db';
 import { extractPdfText, parseBillDetail } from './parsePdf';
+import { ymFromDate, isoDate } from '@/lib/ym';
 
 export interface Check {
   name: string;
@@ -35,8 +36,8 @@ export async function verifyAll(): Promise<VerifyReport> {
   const reports: BillReport[] = [];
 
   for (const b of bills) {
-    const sd = b.statementDate.toISOString().slice(0, 10);
-    const ym = b.statementDate.getUTCFullYear() * 100 + (b.statementDate.getUTCMonth() + 1);
+    const sd = isoDate(b.statementDate);
+    const ym = ymFromDate(b.statementDate);
     const checks: Check[] = [];
     const push = (name: string, ok: boolean, detail?: string) => checks.push({ name, ok, detail });
 

@@ -8,6 +8,8 @@
 // resolveRange normalises a RangePref into concrete inclusive `ym` bounds so a
 // caller can filter either shape with a single comparison.
 
+import { ymFromDate, ymFromParts, ymAddMonths } from './ym';
+
 export type RangePreset = 'all' | 'ytd' | '12mo' | '24mo' | '36mo' | 'custom';
 
 export interface RangePref {
@@ -39,7 +41,9 @@ const MONTHS_BY_PRESET: Record<string, number> = { '12mo': 12, '24mo': 24, '36mo
 
 // ── ym <-> (year, month) helpers ────────────────────────────────────────────
 
-export const ymOfDate = (d: Date): number => d.getUTCFullYear() * 100 + (d.getUTCMonth() + 1);
+// Date → ym (YYYYMM). Re-exported from lib/ym under range's existing name so its
+// importers (SettingsView, Dashboard) keep working unchanged.
+export const ymOfDate = ymFromDate;
 
 // Parse a YYYY-MM-DD (or YYYY-MM) string to a YYYYMM integer. Returns null for
 // anything unparseable so callers can treat bad input as "no bound".
@@ -68,15 +72,9 @@ export function ymToLastYmd(ym: number | null | undefined): string {
 
 // Subtract `n - 1` months from a ym so that a window of `n` months *ending* at
 // `ym` includes `ym` itself (a 12-month window ending 202412 starts 202401).
-export function ymMinusMonths(ym: number, n: number): number {
-  const year = Math.floor(ym / 100);
-  const month = ym % 100;
-  // Convert to a 0-based absolute month index, shift, convert back.
-  const idx = year * 12 + (month - 1) - n;
-  const y = Math.floor(idx / 12);
-  const mo = (idx % 12 + 12) % 12;
-  return y * 100 + (mo + 1);
-}
+// Thin wrapper over the canonical ymAddMonths (lib/ym) — kept under this name so
+// range's importers and tests are unchanged.
+export const ymMinusMonths = (ym: number, n: number): number => ymAddMonths(ym, -n);
 
 // ── visual month/year picker helpers (issue #39) ────────────────────────────
 // Pure building blocks for the RangeControl popover (12-month grid, year nav,
@@ -85,8 +83,9 @@ export function ymMinusMonths(ym: number, n: number): number {
 
 const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'] as const;
 
-// Compose a ym integer from a year and a 1-based month. PURE.
-export const ymOf = (year: number, month: number): number => year * 100 + month;
+// Compose a ym integer from a year and a 1-based month. PURE. Re-exported from
+// lib/ym under range's existing name (distinct from the canonical ymFromParts).
+export const ymOf = ymFromParts;
 
 // Split a ym back into { year, month } (month 1-based). PURE.
 export function ymParts(ym: number): { year: number; month: number } {

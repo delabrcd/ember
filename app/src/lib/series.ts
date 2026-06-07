@@ -2,6 +2,7 @@
 // tested with hand-calculated inputs. queries.ts feeds it DB rows; the dashboard
 // uses trailing12AllIn for the headline rate cards.
 import type { MonthRow } from './chartSpec';
+import { ymLabel } from './ym';
 
 export interface UsageInput { periodYearMonth: number; usageType: string; quantity: number }
 export interface CostInput { periodYearMonth: number; fuelType: string; kind: string; amount: number }
@@ -19,7 +20,6 @@ export interface SeriesInput {
   degreeDays?: DegreeDayInput[];
 }
 
-const labelFor = (ym: number) => `${Math.floor(ym / 100)}-${String(ym % 100).padStart(2, '0')}`;
 const div = (a: number | null, b: number | null) => (a != null && b != null && b > 0 ? a / b : null);
 const sum = (a: number | null, b: number | null) => (a == null && b == null ? null : (a ?? 0) + (b ?? 0));
 
@@ -29,7 +29,7 @@ export function deriveMonthlySeries(input: SeriesInput): MonthRow[] {
     let r = months.get(ym);
     if (!r) {
       r = {
-        ym, label: labelFor(ym),
+        ym, label: ymLabel(ym),
         kwh: null, therms: null,
         elecSupply: null, gasSupply: null, elecDelivery: null, gasDelivery: null,
         elecBill: null, gasBill: null,
