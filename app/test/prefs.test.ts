@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mergeOrder, mergeRange } from '../src/lib/prefs';
+import { mergeOrder, mergeRange } from '../src/lib/cockpit';
 
 // mergeOrder keeps the user's saved chart order but appends charts that were
 // added to the app AFTER they last saved their prefs (the bug that hid the
