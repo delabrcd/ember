@@ -1,8 +1,8 @@
 'use client';
 
 import Link from 'next/link';
-import { useCallback, useEffect, useState } from 'react';
-import { SPEC_BY_ID, type MonthRow } from '@/lib/chartSpec';
+import { useEffect, useState } from 'react';
+import { SPEC_BY_ID } from '@/lib/chartSpec';
 import { trailing12AllIn } from '@/lib/series';
 import { clampPage, paginate } from '@/lib/cockpit';
 import { usePrefs } from '@/lib/prefs';
@@ -14,19 +14,15 @@ import {
   ymToYmd,
   ymToLastYmd,
 } from '@/lib/range';
-import {
-  buildAccountGroups,
-  hasMultipleAccounts,
-  resolveSelectedAccountId,
-  type AccountSummary,
-} from '@/lib/accountSwitcher';
+import { buildAccountGroups, hasMultipleAccounts } from '@/lib/accountSwitcher';
 import { ConfigurableChart } from './ConfigurableChart';
 import { AccountSwitcher } from './AccountSwitcher';
 import { RefreshButton } from './RefreshButton';
-import { ScrapeProgressBanner, useScrapeProgress } from './ScrapeProgress';
-import type { RunStatus, ProgressRun } from '@/lib/ngrid/progress';
+import { ScrapeProgressBanner } from './ScrapeProgress';
 import { RangeControl } from './RangeControl';
 import { NgLoginsSection } from './NgLoginsSection';
+import { CockpitPager } from './CockpitPager';
+import { useDashboardData } from './useDashboardData';
 import { dateLabel, estimateTooltip, num, rate, relativeFromNow, usd } from '@/lib/format';
 
 // Up to four charts per page in the paginated "fit" cockpit (issue #38), laid out
@@ -49,130 +45,28 @@ function useIsXl(): boolean {
   return isXl;
 }
 
-interface Overview {
-  empty?: boolean;
-  account?: { accountNumber: string; serviceAddress?: string | null; region?: string | null; companyCode?: string | null; fuelTypes?: string[] } | null;
-  billCount?: number;
-  lifetimeSpend?: number;
-  nextBillEstimate?: { point: number; low: number; high: number; basis: string } | null;
-  latestBill?: { statementDate: string; totalDueAmount: number | null } | null;
-  firstStatement?: string | null;
-  schedule?: { predictedNextBillDate: string | null; nextCheckAt: string | null; lastCheckedAt: string | null } | null;
-  lastRun?: { id: number; status: RunStatus; trigger: string; startedAt: string; finishedAt: string | null; message: string | null } | null;
-}
-interface Bill {
-  statementDate: string;
-  periodFrom: string | null;
-  periodTo: string | null;
-  totalDueAmount: number | null;
-  hasPdf: boolean;
-}
-
 export function Dashboard() {
-  const { prefs, patch, setRange, loaded } = usePrefs();
-  const [ov, setOv] = useState<Overview | null>(null);
-  const [rows, setRows] = useState<MonthRow[]>([]);
-  const [bills, setBills] = useState<Bill[]>([]);
-  const [accounts, setAccounts] = useState<AccountSummary[]>([]);
-  const [loading, setLoading] = useState(true);
-  // Logins flagged needs_reauth: scraping for them is paused until the operator
-  // re-authenticates (in Settings). Existing data keeps showing regardless.
-  const [reauthLogins, setReauthLogins] = useState<{ id: number; label: string }[]>([]);
-  // First-run setup: a brand-new install with no data and no credential to scrape
-  // with. Shows the guided setup state instead of the empty dashboard. null until
-  // /api/ng-logins answers, so we don't flash the wrong state on load.
-  const [needsSetup, setNeedsSetup] = useState<boolean | null>(null);
-  // Becomes true once a login has been added during setup, so we can prompt for
-  // the initial scrape ("Check for new bills") right there.
-  const [hasLogin, setHasLogin] = useState(false);
-
-  // The selected account, validated against the live list (a stale persisted id
-  // is ignored). null = the default account, which the routes already resolve.
-  const selectedAccountId = resolveSelectedAccountId(accounts, prefs.selectedAccountId);
-  // Scope every data fetch to the selection; no param = default-account behaviour.
-  const scope = selectedAccountId != null ? `?accountId=${selectedAccountId}` : '';
-
-  // The account list is independent of the selection, so fetch it once.
-  useEffect(() => {
-    fetch('/api/accounts', { cache: 'no-store' })
-      .then((r) => r.json())
-      .then((a) => setAccounts(a.accounts || []))
-      .catch(() => setAccounts([]));
-  }, []);
-
-  // Pull the NG-login state: surfaces any login that needs re-authentication (so
-  // the operator knows scraping is paused for it) AND the first-run `needsSetup`
-  // flag. Re-fetched after a login is added during setup so the UI advances.
-  const loadLogins = useCallback(async () => {
-    try {
-      const j: {
-        needsSetup?: boolean;
-        logins?: { id: number; label: string; status: string | null }[];
-      } = await fetch('/api/ng-logins', { cache: 'no-store' }).then((r) => r.json());
-      const logins = j.logins || [];
-      setReauthLogins(
-        logins.filter((l) => l.status === 'needs_reauth').map((l) => ({ id: l.id, label: l.label }))
-      );
-      setNeedsSetup(Boolean(j.needsSetup));
-      setHasLogin(logins.length > 0);
-    } catch {
-      setReauthLogins([]);
-      setNeedsSetup(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    loadLogins();
-  }, [loadLogins]);
-
-  const load = useCallback(async () => {
-    const [o, s, b] = await Promise.all([
-      fetch(`/api/overview${scope}`, { cache: 'no-store' }).then((r) => r.json()),
-      fetch(`/api/series${scope}`, { cache: 'no-store' }).then((r) => r.json()),
-      fetch(`/api/bills${scope}`, { cache: 'no-store' }).then((r) => r.json()),
-    ]);
-    setOv(o);
-    setRows(s.rows || []);
-    setBills(b.bills || []);
-    setLoading(false);
-  }, [scope]);
-
-  // Re-fetch on mount and whenever the selected account changes. Wait until prefs
-  // have loaded so the first fetch already reflects a persisted selection rather
-  // than firing for the default and then again for the restored account.
-  useEffect(() => {
-    if (loaded) load();
-  }, [load, loaded]);
-
-  // Live scrape-progress indicator (issue #40). Tracks the in-flight run — either
-  // one the page loaded mid-scrape (overview's `lastRun`, RUNNING) or one the
-  // Refresh button just started — and shows the animated banner below the header.
-  // On SUCCESS we refresh dashboard data + login state so the new bills appear.
-  const initialRun: ProgressRun | null = ov?.lastRun
-    ? { id: ov.lastRun.id, status: ov.lastRun.status, message: ov.lastRun.message }
-    : null;
+  const { prefs, patch, setRange } = usePrefs();
+  // All data-loading (the three fetch lifecycles + scrape-progress polling) lives
+  // in this hook; the component stays a thin orchestration shell over the result.
   const {
-    run: progressRun,
-    track: trackRun,
-    dismiss: dismissProgress,
-  } = useScrapeProgress(initialRun, () => {
-    load();
-    loadLogins();
-  });
-  const scraping = progressRun?.status === 'RUNNING';
-
-  // Retry from the error banner: kick a fresh scrape and adopt it. Mirrors the
-  // Refresh button's POST so the banner can recover without a page reload.
-  const retryScrape = useCallback(async () => {
-    try {
-      const res = await fetch('/api/refresh', { method: 'POST' });
-      if (!res.ok) return;
-      const { runId } = await res.json();
-      if (runId) trackRun(runId);
-    } catch {
-      /* leave the error banner in place */
-    }
-  }, [trackRun]);
+    ov,
+    rows,
+    bills,
+    accounts,
+    loading,
+    reauthLogins,
+    needsSetup,
+    hasLogin,
+    selectedAccountId,
+    progressRun,
+    scraping,
+    trackRun,
+    dismissProgress,
+    retryScrape,
+    load,
+    loadLogins,
+  } = useDashboardData();
 
   const groups = buildAccountGroups(accounts);
   const showSwitcher = hasMultipleAccounts(accounts);
@@ -465,39 +359,7 @@ export function Dashboard() {
                   ))}
                 </div>
                 {showPager && (
-                  <div className="flex shrink-0 items-center justify-center gap-3 pt-0.5">
-                    <button
-                      type="button"
-                      aria-label="Previous charts"
-                      onClick={() => setPage((p) => clampPage(p - 1, pageCount))}
-                      className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-slate-700/70 bg-slate-800/40 text-slate-300 transition hover:bg-slate-700 hover:text-white"
-                    >
-                      <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="m15 18-6-6 6-6" />
-                      </svg>
-                    </button>
-                    <div className="flex items-center gap-1.5" aria-hidden>
-                      {chartPages.map((_, i) => (
-                        <span
-                          key={i}
-                          className={`h-1.5 w-1.5 rounded-full transition ${i === activePage ? 'bg-amber-400' : 'bg-slate-600'}`}
-                        />
-                      ))}
-                    </div>
-                    <span className="min-w-[3rem] text-center text-xs tabular-nums text-slate-400">
-                      {activePage + 1} / {pageCount}
-                    </span>
-                    <button
-                      type="button"
-                      aria-label="Next charts"
-                      onClick={() => setPage((p) => clampPage(p + 1, pageCount))}
-                      className="inline-flex h-7 w-7 items-center justify-center rounded-lg border border-slate-700/70 bg-slate-800/40 text-slate-300 transition hover:bg-slate-700 hover:text-white"
-                    >
-                      <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="m9 18 6-6-6-6" />
-                      </svg>
-                    </button>
-                  </div>
+                  <CockpitPager pageCount={pageCount} activePage={activePage} setPage={setPage} />
                 )}
               </div>
             ) : (
