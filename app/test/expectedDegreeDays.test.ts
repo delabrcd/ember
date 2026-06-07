@@ -1,9 +1,9 @@
 // Hand-calculated unit tests for the PURE pieces of the expected-degree-day
-// assembly (issue #44). The fetch/DB wrapper (expectedDegreeDaysForWindow) is
-// intentionally NOT exercised here — these tests never touch the network. They
-// prove the assembly math and that the forecast/normals split is data-only, so
-// the impure wrapper can hand it a (possibly empty) forecast and normals and
-// always get a finite result.
+// assembly (used by the #52 seasonal projection). The fetch/DB wrapper
+// (seasonNormalsByMonth) is intentionally NOT exercised here — these tests never
+// touch the network. They prove the assembly math and that the forecast/normals
+// split is data-only, so the impure wrapper can hand it a (possibly empty)
+// forecast and normals and always get a finite result.
 import { describe, expect, it } from 'vitest';
 import {
   assembleExpectedDegreeDays,

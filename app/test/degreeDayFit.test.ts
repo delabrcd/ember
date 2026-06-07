@@ -1,9 +1,8 @@
-// Hand-calculated unit tests for the degree-day usage regression + projection
-// (issue #44). All PURE: no DB, no network, no React. The forecast/normals
-// assembly is exercised by expectedDegreeDays.test.ts.
+// Hand-calculated unit tests for the degree-day usage regression (the OLS fits
+// that feed the #52 seasonal projection). All PURE: no DB, no network, no React.
+// The forecast/normals assembly is exercised by expectedDegreeDays.test.ts.
 import { describe, expect, it } from 'vitest';
 import {
-  estimateNextBillFromDegreeDays,
   fitElectric,
   fitGas,
   fitObservations,
@@ -11,7 +10,6 @@ import {
   MIN_FIT_ROWS_ELEC,
   MIN_FIT_ROWS_GAS,
   type FitObservation,
-  type UsageFit,
 } from '../src/lib/prediction';
 import type { MonthRow } from '../src/lib/chartSpec';
 
@@ -122,93 +120,5 @@ describe('fitObservations / fitUsageVsDegreeDays (row plumbing)', () => {
     const fits = fitUsageVsDegreeDays([]);
     expect(fits.elec).toEqual({ ok: false, reason: 'insufficient' });
     expect(fits.gas).toEqual({ ok: false, reason: 'insufficient' });
-  });
-});
-
-describe('estimateNextBillFromDegreeDays — projection + pricing (hand-calculated)', () => {
-  const elecFit: UsageFit = { ok: true, base: 100, slopeC: 3, slopeH: 2, residualStdev: 10, n: 12 };
-  const gasFit: UsageFit = { ok: true, base: 10, slopeC: 0, slopeH: 2, residualStdev: 5, n: 12 };
-
-  it('projects usage from expected DD, prices at all-in rates, bands in quadrature', () => {
-    // expected HDD 30, CDD 20.
-    //   elec usage = 100 + 3*20 + 2*30 = 220 ; cost = 220 * 0.20 = 44 ; half = 1*10*0.20 = 2
-    //   gas  usage = 10 + 2*30 = 70 ; cost = 70 * 1.00 = 70 ; half = 1*5*1.00 = 5
-    //   point = 44 + 70 = 114 ; half = sqrt(2^2 + 5^2) = sqrt(29) = 5.3852
-    //   low = 114 - 5.3852 = 108.6148 ; high = 119.3852
-    const est = estimateNextBillFromDegreeDays({
-      elecFit,
-      gasFit,
-      expected: { hdd: 30, cdd: 20, forecastDays: 11, normalDays: 19 },
-      elecRate: 0.2,
-      gasRate: 1.0,
-    });
-    expect(est).not.toBeNull();
-    expect(est!.point).toBeCloseTo(114, 9);
-    expect(est!.low).toBeCloseTo(108.6148, 4);
-    expect(est!.high).toBeCloseTo(119.3852, 4);
-    expect(est!.basis).toContain('forecast for 11 days + normals for 19 days');
-    expect(est!.basis).toContain('electric HDD+CDD fit');
-    expect(est!.basis).toContain('gas HDD fit');
-    expect(est!.basis).toContain('±1σ regression residual');
-  });
-
-  it('floors a negative projected usage at 0', () => {
-    // A warm window with a heavy positive HDD slope but tiny base could project
-    // negative; we floor usage at 0 so cost never goes negative.
-    const coldFit: UsageFit = { ok: true, base: -50, slopeC: 0, slopeH: 1, residualStdev: 0, n: 12 };
-    const est = estimateNextBillFromDegreeDays({
-      elecFit: { ok: false, reason: 'degenerate' },
-      gasFit: coldFit,
-      expected: { hdd: 10, cdd: 0, forecastDays: 0, normalDays: 30 }, // 10*1 - 50 = -40 -> 0
-      elecRate: null,
-      gasRate: 1.0,
-    });
-    expect(est).not.toBeNull();
-    expect(est!.point).toBeCloseTo(0, 9);
-    // No forecast days -> "normals-only" caption.
-    expect(est!.basis).toContain('30-day window from climatological normals');
-  });
-
-  it('drops a fuel it cannot fit or price, keeping the other', () => {
-    const est = estimateNextBillFromDegreeDays({
-      elecFit, // ok
-      gasFit, // ok but no rate
-      expected: { hdd: 30, cdd: 20, forecastDays: 0, normalDays: 30 },
-      elecRate: 0.2,
-      gasRate: null, // can't price gas -> electric only
-    });
-    expect(est).not.toBeNull();
-    expect(est!.point).toBeCloseTo(44, 9); // electric only
-    expect(est!.basis).toContain('electric HDD+CDD fit');
-    expect(est!.basis).not.toContain('gas HDD fit');
-  });
-
-  it('returns null when neither fuel can be both fit and priced', () => {
-    const est = estimateNextBillFromDegreeDays({
-      elecFit: { ok: false, reason: 'insufficient' },
-      gasFit, // ok but no rate
-      expected: { hdd: 30, cdd: 20, forecastDays: 0, normalDays: 30 },
-      elecRate: 0.2, // elec priced but not fit
-      gasRate: null, // gas fit but not priced
-    });
-    expect(est).toBeNull();
-  });
-
-  it('uses the ±15% fallback band when both residual spreads are 0', () => {
-    // Perfect fits (residualStdev 0) would collapse the band to a single point;
-    // we floor it to ±15% so the range stays meaningful.
-    const flat: UsageFit = { ok: true, base: 100, slopeC: 0, slopeH: 0, residualStdev: 0, n: 12 };
-    const est = estimateNextBillFromDegreeDays({
-      elecFit: flat, // usage 100, cost 100*0.2 = 20
-      gasFit: { ok: false, reason: 'degenerate' },
-      expected: { hdd: 0, cdd: 0, forecastDays: 0, normalDays: 30 },
-      elecRate: 0.2,
-      gasRate: null,
-    });
-    expect(est).not.toBeNull();
-    expect(est!.point).toBeCloseTo(20, 9);
-    expect(est!.low).toBeCloseTo(17, 9); // 20 - 0.15*20
-    expect(est!.high).toBeCloseTo(23, 9);
-    expect(est!.basis).toContain('±15%');
   });
 });
