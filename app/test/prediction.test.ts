@@ -66,26 +66,6 @@ describe('predictNextBill (hand-calculated)', () => {
   });
 });
 
-describe('computeNextCheck (hand-calculated)', () => {
-  it('weekly heartbeat far from the prediction', () => {
-    // watchStart = 06-10 - 3d = 06-07; now+7d = 05-08 < watchStart -> 05-08
-    expect(iso(computeNextCheck(D('2026-05-01'), D('2026-06-10')))).toBe('2026-05-08');
-  });
-  it('snaps to the watch-window start when within a week of it', () => {
-    // watchStart 06-07; now 06-05, now+7d = 06-12 > watchStart -> watchStart 06-07
-    expect(iso(computeNextCheck(D('2026-06-05'), D('2026-06-10')))).toBe('2026-06-07');
-  });
-  it('daily once inside the watch window', () => {
-    // watchStart 06-07; now 06-08 >= watchStart -> now + 1 day
-    const now = D('2026-06-08');
-    expect(computeNextCheck(now, D('2026-06-10')).getTime()).toBe(now.getTime() + DAY);
-  });
-  it('weekly when there is no prediction', () => {
-    const now = D('2026-06-08');
-    expect(computeNextCheck(now, null).getTime()).toBe(now.getTime() + 7 * DAY);
-  });
-});
-
 describe('intervalSpreadDays (hand-calculated)', () => {
   it('is 0 for a perfectly regular biller', () => {
     // gaps all 30 -> MAD 0
@@ -135,29 +115,28 @@ describe('predictionWindow (hand-calculated)', () => {
 describe('computeNextCheck back-off (issue #27, hand-calculated)', () => {
   // Regular biller: gaps all 30 -> predicted 05-01, spread 0 -> window [04-28, 05-04].
   const history = [D('2026-01-01'), D('2026-01-31'), D('2026-03-02'), D('2026-04-01')];
-  const predicted = D('2026-05-01');
 
   it('far before the window: single sparse re-check SPARSE_GAP_DAYS (7d) out', () => {
     // now 04-01, windowStart 04-28; now+7d = 04-08 < windowStart -> 04-08
-    expect(iso(computeNextCheck(D('2026-04-01'), predicted, { statementDates: history }))).toBe('2026-04-08');
+    expect(iso(computeNextCheck(D('2026-04-01'), history))).toBe('2026-04-08');
   });
   it('just before the window: snaps to windowStart (does not overshoot it)', () => {
     // now 04-25, windowStart 04-28; now+7d = 05-02 > windowStart -> windowStart 04-28
-    expect(iso(computeNextCheck(D('2026-04-25'), predicted, { statementDates: history }))).toBe('2026-04-28');
+    expect(iso(computeNextCheck(D('2026-04-25'), history))).toBe('2026-04-28');
   });
   it('inside the window: daily', () => {
     // now 04-29 >= windowStart 04-28 -> now + 1 day
     const now = D('2026-04-29');
-    expect(computeNextCheck(now, predicted, { statementDates: history }).getTime()).toBe(now.getTime() + DAY);
+    expect(computeNextCheck(now, history).getTime()).toBe(now.getTime() + DAY);
   });
   it('past the window with no new bill yet: still daily', () => {
     // now 05-10 > windowEnd 05-04, but no newer bill landed (history unchanged) -> daily
     const now = D('2026-05-10');
-    expect(computeNextCheck(now, predicted, { statementDates: history }).getTime()).toBe(now.getTime() + DAY);
+    expect(computeNextCheck(now, history).getTime()).toBe(now.getTime() + DAY);
   });
   it('first run / no history: checks soon (SPARSE_GAP_DAYS out)', () => {
     const now = D('2026-05-01');
-    expect(computeNextCheck(now, null, { statementDates: [] }).getTime()).toBe(now.getTime() + SPARSE_GAP_DAYS * DAY);
+    expect(computeNextCheck(now, []).getTime()).toBe(now.getTime() + SPARSE_GAP_DAYS * DAY);
   });
 });
 

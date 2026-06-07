@@ -33,7 +33,7 @@ async function updateSchedule(accountId: number): Promise<void> {
   // date, then daily inside a window sized from historical gap variability.
   // We persist only predicted + nextCheckAt (no schema change); the window is
   // recomputed from statement history each run.
-  const nextCheckAt = computeNextCheck(now, predicted, { statementDates });
+  const nextCheckAt = computeNextCheck(now, statementDates);
   await prisma.scheduleState.upsert({
     where: { accountId },
     create: { accountId, predictedNextBillDate: predicted, nextCheckAt, lastCheckedAt: now },
