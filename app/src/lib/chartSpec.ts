@@ -26,6 +26,14 @@ export interface MonthRow {
   cdd: number | null;
   kwhPerDegreeDay: number | null;
   thermsPerHdd: number | null;
+  // Forward 12-month seasonal projection (issue #52). These are populated ONLY on
+  // appended FUTURE rows (and the latest historical row, as the anchor so the
+  // dashed line connects to the solid history) — null on every other historical
+  // row. A climatological PROJECTION (degree-day normals × all-in rates), never a
+  // forecast and never persisted. See lib/prediction.ts projectSeason().
+  projCost?: number | null; // projected period energy cost ($)
+  projKwh?: number | null; // projected electric usage (kWh)
+  projTherms?: number | null; // projected gas usage (therms)
 }
 
 export type SeriesKey = Exclude<keyof MonthRow, 'ym' | 'label'>;
@@ -57,6 +65,8 @@ const TEMP = '#fb7185';
 const TOTAL = '#e2e8f0';
 const HDD = '#fb7185';
 const CDD = '#38bdf8';
+const PROJ = '#a78bfa'; // forward seasonal projection (issue #52) — dashed, violet
+const PROJ_SOFT = '#c4b5fd';
 
 const money = (v: number) => `$${v}`;
 const money2 = (v: number) => `$${(+v).toFixed(2)}`;
@@ -72,8 +82,11 @@ export const CHART_SPECS: ChartSpec[] = [
     series: [
       { key: 'kwh', label: 'kWh', color: ELEC, role: 'bar', axis: 'left' },
       { key: 'therms', label: 'therms', color: GAS, role: 'bar', axis: 'right' },
+      // Forward 12-month climatological projection (issue #52) — dashed, not a forecast.
+      { key: 'projKwh', label: 'Proj. kWh (next 12 mo)', color: PROJ, role: 'line', axis: 'left', dash: true },
+      { key: 'projTherms', label: 'Proj. therms (next 12 mo)', color: PROJ_SOFT, role: 'line', axis: 'right', dash: true },
     ],
-    filter: (r) => r.kwh != null || r.therms != null,
+    filter: (r) => r.kwh != null || r.therms != null || r.projKwh != null || r.projTherms != null,
   },
   {
     id: 'cost',
@@ -85,9 +98,11 @@ export const CHART_SPECS: ChartSpec[] = [
       { key: 'gasSupply', label: 'Gas supply', color: GAS, role: 'bar', axis: 'left' },
       { key: 'gasDelivery', label: 'Gas delivery', color: GAS_SOFT, role: 'bar', axis: 'left' },
       { key: 'billTotal', label: 'Total bill', color: TOTAL, role: 'line', axis: 'left' },
+      // Forward 12-month climatological projection (issue #52) — dashed, not a forecast.
+      { key: 'projCost', label: 'Projected (next 12 mo)', color: PROJ, role: 'line', axis: 'left', dash: true },
     ],
     leftFmt: money,
-    filter: (r) => r.elecSupply != null || r.gasSupply != null || r.billTotal != null,
+    filter: (r) => r.elecSupply != null || r.gasSupply != null || r.billTotal != null || r.projCost != null,
   },
   {
     id: 'rates',

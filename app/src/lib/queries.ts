@@ -12,9 +12,14 @@ import {
   estimateNextBillFromDegreeDays,
   fitUsageVsDegreeDays,
   predictionWindow,
+  projectSeason,
+  type SeasonProjection,
 } from '@/lib/prediction';
 import { trailing12AllIn } from '@/lib/series';
-import { expectedDegreeDaysForWindow } from '@/lib/weather/expectedDegreeDaysSync';
+import {
+  expectedDegreeDaysForWindow,
+  seasonNormalsByMonth,
+} from '@/lib/weather/expectedDegreeDaysSync';
 import { shapeAccount, type AccountSummary } from '@/lib/accountSwitcher';
 import { ymFromDate as ymOf, isoDate as ymd } from '@/lib/ym';
 import type { Bill } from '@prisma/client';
@@ -193,6 +198,31 @@ async function computeNextBillEstimate(
   return ddEstimate ?? fallback;
 }
 
+// Seasonal 12-month projection (issue #52). Impure assembly only: build each
+// future calendar month's NORMAL degree-days from cached daily history
+// (failure-tolerant — never throws, empty map -> projectSeason falls back to
+// same-month-last-year), then hand the pure projector the series, the normals
+// lookup and the SAME PDF-sourced trailing-12 all-in rates the headline cards and
+// #44 use (currentCharges basis, NOT the API amount due). Nothing is stored; this
+// never feeds /api/verify. Returns null only when there's no usage to anchor on.
+async function computeSeasonProjection(
+  accountId: number,
+  series: MonthRow[]
+): Promise<SeasonProjection | null> {
+  const lastUsage = [...series].reverse().find((r) => r.kwh != null || r.therms != null);
+  if (!lastUsage) return null;
+
+  const baseSetting = await getSetting('degreeDayBaseF');
+  const parsed = Number.parseFloat(baseSetting ?? '');
+  const baseF = Number.isFinite(parsed) ? parsed : 65;
+
+  const normalsByMonth = await seasonNormalsByMonth(accountId, lastUsage.ym, baseF);
+  return projectSeason(series, normalsByMonth, {
+    elec: trailing12AllIn(series, 'elec'),
+    gas: trailing12AllIn(series, 'gas'),
+  });
+}
+
 export async function getOverview(accountId: number) {
   const [account, bills, schedule, lastRun, series] = await Promise.all([
     prisma.account.findUnique({ where: { id: accountId } }),
@@ -214,6 +244,10 @@ export async function getOverview(accountId: number) {
     account,
     bills.map((b) => b.statementDate)
   );
+  // Seasonal 12-month projection (issue #52): per-month projected cost + an annual
+  // total, both with horizon-widening bands. Climatological PROJECTION (degree-day
+  // normals × all-in rates), never a forecast; never stored.
+  const seasonProjection = await computeSeasonProjection(accountId, series);
   const latest = bills[0] ? shapeBill(bills[0]) : null;
   return {
     account: account
@@ -228,6 +262,7 @@ export async function getOverview(accountId: number) {
     billCount: bills.length,
     lifetimeSpend,
     nextBillEstimate,
+    seasonProjection,
     latestBill: latest
       ? {
           statementDate: latest.statementDate,

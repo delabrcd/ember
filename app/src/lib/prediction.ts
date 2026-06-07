@@ -4,7 +4,7 @@
 
 import type { MonthRow } from './chartSpec';
 import { trailing12AllIn } from './series';
-import { ymAddMonths } from './ym';
+import { ymAddMonths, ymLabel } from './ym';
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -466,4 +466,205 @@ export function estimateNextBillFromDegreeDays(inp: DegreeDayEstimateInput): Nex
   const basis = `${windowNote}; ${fuels.join(' + ')}; current 12-mo all-in rates; ${bandNote}`;
 
   return { point, low, high, basis };
+}
+
+// ---------------------------------------------------------------------------
+// Seasonal 12-month projection (issue #52)
+//
+// Where #44 projects ONE upcoming bill from the predicted window's weather, this
+// projects the next TWELVE calendar months — a full year out — purely from the
+// climatological NORMALS (no forecast: a year ahead there is none). For each of
+// the 12 months after the latest row we:
+//   1. take that month's expected NORMAL HDD/CDD (assembled impurely in the data
+//      layer from cached day-of-year normals and passed in as a lookup), then
+//   2. project per-fuel usage from the #44 OLS fit (electric HDD+CDD, gas HDD),
+//   3. price it with trailing12AllIn() — the same PDF-sourced (currentCharges)
+//      all-in $/unit the headline cards and #44 use, NOT the API amount due, and
+//   4. band each month, WIDENING the band with the horizon (see below).
+// We also return the 12-month annual total with a combined band.
+//
+// FALLBACK (per fuel, per month): when a fuel's fit isn't usable (degenerate /
+// insufficient) OR that month has no normals, we fall back to the SAME CALENDAR
+// MONTH ONE YEAR AGO's usage (priced at current rates) for that fuel and flag the
+// month `fallback: true`. A month with neither a usable fit-projection nor a
+// same-month-last-year value for either fuel still produces a point (0 for the
+// missing fuel) but is flagged as a fallback.
+//
+// BAND-WIDENING RULE (documented + tested):
+//   monthHalf(h) = k · residualStdev · sqrt(h)          (h = 1-based horizon)
+// The 1-month-out projection gets the base ±k·σ regression band; each further
+// month out compounds projection error roughly like an independent step, so the
+// band variance grows ~linearly with the horizon and the half-width ~sqrt(h)
+// (random-walk / sqrt-of-time growth). A year out (h=12) the band is sqrt(12) ≈
+// 3.46× the one-month band — honestly signalling that a climatological projection
+// degrades with distance. The annual band combines the 12 monthly halves in
+// quadrature (independent monthly residuals), with the same ±15% floor #44 uses
+// when every contributing residual spread is 0.
+//
+// Everything here is PURE (no DB/network/React): the normals lookup and rates are
+// passed in. The impure normals assembly lives in lib/weather/expectedDegreeDays
+// Sync.ts and feeds this projector.
+// ---------------------------------------------------------------------------
+
+// One projected future bill period.
+export interface SeasonMonth {
+  ym: number; // YYYYMM of the projected calendar month
+  label: string; // 'YYYY-MM'
+  projKwh: number | null; // projected electric usage (null when electric can't be projected)
+  projTherms: number | null; // projected gas usage (null when gas can't be projected)
+  projCost: number; // projected period energy cost ($), priced at all-in rates
+  low: number; // lower band (floored at 0)
+  high: number; // upper band
+  fallback: boolean; // true when ANY fuel used same-month-last-year instead of the fit
+}
+
+export interface SeasonProjection {
+  months: SeasonMonth[];
+  annual: { point: number; low: number; high: number }; // sum of the 12 points, banded in quadrature
+  basis: string; // human-readable note on how the season was projected
+}
+
+export interface SeasonOpts {
+  bandStdevs?: number; // k: base half-width in stdevs (default 1)
+  horizonK?: number; // unused scalar hook; kept for symmetry, default 1
+}
+
+// Same calendar month one year before `ym` (subtract 12 months).
+const sameMonthLastYearYm = (ym: number): number => ymAddMonths(ym, -12);
+
+// Project one fuel's usage for a future month: prefer the fit + that month's
+// normal degree-days; fall back to the same-month-last-year usage when the fit is
+// unusable OR the month has no normals. Returns the projected usage, its band
+// half-width contribution (before horizon widening), and which basis was used —
+// or null when neither path can produce a value for this fuel/month. PURE.
+function projectFuelMonth(
+  rows: MonthRow[],
+  ym: number,
+  fuel: 'elec' | 'gas',
+  fit: UsageFit,
+  normals: ExpectedDegreeDays | undefined,
+  k: number
+): { usage: number; baseHalf: number; usedFallback: boolean } | null {
+  const useKey: 'kwh' | 'therms' = fuel === 'elec' ? 'kwh' : 'therms';
+  if (fit.ok && normals) {
+    const usage = Math.max(0, fit.base + fit.slopeC * normals.cdd + fit.slopeH * normals.hdd);
+    return { usage, baseHalf: k * fit.residualStdev, usedFallback: false };
+  }
+  // Fallback: same calendar month last year's usage for this fuel.
+  const ly = rows.find((r) => r.ym === sameMonthLastYearYm(ym) && r[useKey] != null);
+  if (ly) return { usage: ly[useKey] as number, baseHalf: 0, usedFallback: true };
+  return null;
+}
+
+export function projectSeason(
+  rows: MonthRow[],
+  normalsByMonth: Map<number, ExpectedDegreeDays>,
+  rates: { elec: number | null; gas: number | null },
+  opts?: SeasonOpts
+): SeasonProjection {
+  const k = opts?.bandStdevs ?? DEFAULT_BAND_STDEVS;
+  const empty: SeasonProjection = { months: [], annual: { point: 0, low: 0, high: 0 }, basis: 'no data' };
+
+  // Anchor on the latest row that actually carries usage; project the 12 calendar
+  // months after it.
+  const lastUsage = [...rows].reverse().find((r) => r.kwh != null || r.therms != null);
+  if (!lastUsage) return empty;
+
+  const fits = fitUsageVsDegreeDays(rows);
+  const months: SeasonMonth[] = [];
+  let anyFit = false;
+  let anyFallback = false;
+
+  for (let h = 1; h <= 12; h++) {
+    const ym = ymAddMonths(lastUsage.ym, h);
+    const normals = normalsByMonth.get(ym);
+
+    const elec = rates.elec != null ? projectFuelMonth(rows, ym, 'elec', fits.elec, normals, k) : null;
+    const gas = rates.gas != null ? projectFuelMonth(rows, ym, 'gas', fits.gas, normals, k) : null;
+
+    const elecCost = elec ? elec.usage * rates.elec! : 0;
+    const gasCost = gas ? gas.usage * rates.gas! : 0;
+    const projCost = elecCost + gasCost;
+
+    // Per-fuel base band in $; widen by sqrt(h) for the horizon, combine in
+    // quadrature across fuels.
+    const grow = Math.sqrt(h);
+    const elecHalf = elec ? elec.baseHalf * (rates.elec ?? 0) * grow : 0;
+    const gasHalf = gas ? gas.baseHalf * (rates.gas ?? 0) * grow : 0;
+    let half = Math.sqrt(elecHalf ** 2 + gasHalf ** 2);
+    if (half <= 0) half = DEFAULT_BAND_PCT * projCost; // ±15% floor when residual-flat
+
+    const usedFallback = Boolean(elec?.usedFallback || gas?.usedFallback);
+    if (elec && !elec.usedFallback) anyFit = true;
+    if (gas && !gas.usedFallback) anyFit = true;
+    if (usedFallback) anyFallback = true;
+
+    months.push({
+      ym,
+      label: ymLabel(ym),
+      projKwh: elec ? elec.usage : null,
+      projTherms: gas ? gas.usage : null,
+      projCost,
+      low: Math.max(0, projCost - half),
+      high: projCost + half,
+      fallback: usedFallback,
+    });
+  }
+
+  const point = months.reduce((s, m) => s + m.projCost, 0);
+  // Annual band: combine the 12 monthly half-widths in quadrature (independent
+  // monthly residuals); fall back to ±15% of the annual point if every month
+  // collapsed to the residual-flat floor would still be 0.
+  const annualHalfSq = months.reduce((s, m) => s + ((m.high - m.projCost) ** 2), 0);
+  let annualHalf = Math.sqrt(annualHalfSq);
+  if (annualHalf <= 0) annualHalf = DEFAULT_BAND_PCT * point;
+
+  const basis = anyFit
+    ? `12-month climatological projection from degree-day normals; current 12-mo all-in rates${
+        anyFallback ? '; some months fell back to same-month-last-year usage' : ''
+      }`
+    : 'same-month-last-year usage at current 12-mo all-in rates (climatological fallback)';
+
+  return {
+    months,
+    annual: { point, low: Math.max(0, point - annualHalf), high: point + annualHalf },
+    basis,
+  };
+}
+
+// Turn a SeasonProjection into FUTURE MonthRows the declarative cost/usage charts
+// can render as a forward dashed series, appended after the historical rows. Each
+// forward row carries ONLY the projection fields (projCost/projKwh/projTherms);
+// every historical chart field is null so it draws nothing on the solid series.
+//
+// To make the dashed line visually CONNECT to the solid history, we also stamp
+// the anchor's projCost onto the latest historical row (mutating a shallow copy
+// is avoided — the caller passes the real series and we return only the new rows;
+// the caller stamps the anchor). Returns [] when there's nothing to project. PURE.
+export function seasonForwardRows(projection: SeasonProjection): MonthRow[] {
+  return projection.months.map((m) => ({
+    ym: m.ym,
+    label: m.label,
+    kwh: null,
+    therms: null,
+    elecSupply: null,
+    gasSupply: null,
+    elecDelivery: null,
+    gasDelivery: null,
+    elecBill: null,
+    gasBill: null,
+    elecRateSupply: null,
+    gasRateSupply: null,
+    elecRateAllIn: null,
+    gasRateAllIn: null,
+    avgTemp: null,
+    billTotal: null,
+    hdd: null,
+    cdd: null,
+    kwhPerDegreeDay: null,
+    thermsPerHdd: null,
+    projCost: m.projCost,
+    projKwh: m.projKwh,
+    projTherms: m.projTherms,
+  }));
 }
