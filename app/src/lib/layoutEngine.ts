@@ -100,18 +100,33 @@ export interface DefaultLayoutInput {
 
 // Row heights (in grid units) for each widget kind. The grid uses a FINE row
 // unit so the stat band and charts get proportional heights from one uniform
-// rowHeight: a stat card needs ~2 units (title + big number + sub line ≈ 80px at
-// the fit rowHeight), a chart ~7 units (a comfortably tall plot). At lg the
-// cockpit is one stat band + two chart rows; computeFitRowHeight sizes a unit so
-// that whole stack fits the viewport with no page scroll.
-const STAT_ROWS = 2;
+// rowHeight. The operator feedback (issue #73 iteration) is that several stat
+// cards (carbon, vs-last-year, budget) were CLIPPED at the old 2-row default:
+//   • the carbon card has a title + a big number + a THREE-fact sub line
+//     ("≈ N gal gas · N tree-yrs · estimate") that wraps,
+//   • vs-last-year shows two fuel deltas plus a sub line,
+//   • budget has a title + headline + a progress BAR + a status sub line.
+// At the fit rowHeight a single grid row is ~36–44px, so 2 rows (~80px) clipped
+// the bar/wrapped sub lines. We bump a stat card to STAT_ROWS = 3 (~120px) so the
+// tallest card (budget: ~16px title + ~30px stat + ~10px bar + ~16px sub +
+// padding ≈ 96px) fits with headroom, and widen the per-widget default to w=3 so
+// the three-fact carbon sub line and the two-fuel YoY row don't wrap awkwardly.
+// A chart stays ~7 units (a comfortably tall plot).
+const STAT_ROWS = 3;
 const CHART_ROWS = 7;
 
 // Total grid rows at lg in the DEFAULT layout: one stat band + two chart rows.
-// The fit math divides the available height by THIS so the default cockpit is
-// exactly no-scroll. (A customized layout can be taller and will scroll — fit is
-// a guarantee for the default arrangement, see WidgetLayout.)
+// This is the per-PAGE row budget the fit math sizes a row against so ONE page
+// (stat band + two chart rows) fills the viewport with no scroll; anything past
+// it spills onto page 2 via the pager (the no-scroll-paginate change, issue #73
+// iteration). When the stat strip is PINNED it lives outside the paged area, so
+// the per-page budget drops to just the two chart rows — see WidgetLayout.
 export const DEFAULT_FIT_ROWS = STAT_ROWS + 2 * CHART_ROWS;
+
+// The per-page row budget for the PAGED area below a PINNED stat strip: two chart
+// rows (the stat band is pinned above and not paged). The fit math uses this when
+// the strip is pinned so a page of charts still fills the viewport.
+export const PINNED_PAGE_ROWS = 2 * CHART_ROWS;
 
 // Lay a list of ids into a band of equal-width cells that wrap across `cols`,
 // each `w` wide and `h` tall, starting at row `y0`. Returns the placements and
@@ -371,4 +386,138 @@ export function computeFitRowHeight(opts: {
 export function placementRows(placements: Placement[] | undefined): number {
   if (!placements || placements.length === 0) return 1;
   return Math.max(1, ...placements.map((p) => p.y + p.h));
+}
+
+// ---------------------------------------------------------------------------
+// PAGINATION — the "phone home screen" no-scroll fit (issue #73 iteration).
+// ---------------------------------------------------------------------------
+//
+// The operator's rule: at the fit breakpoint the dashboard must NEVER scroll;
+// any overflow is reached via PAGES (prev/next + dots), like a phone home
+// screen — fill page 1, spill to page 2, etc. So instead of letting the grid
+// region scroll, we:
+//   1. decide how many grid ROWS fit one viewport page (`rowsPerPage`),
+//   2. size the rowHeight so exactly that many rows FILL the page (no scroll),
+//   3. partition the placements into pages by their row band (page = floor(y /
+//      rowsPerPage)), clamping any tile so it sits WHOLLY within one page,
+//   4. render only the active page (WidgetLayout translates a one-page-tall
+//      clip container by -activePage * pageHeight).
+// All the arithmetic is here, PURE + hand-calc unit-tested; WidgetLayout only
+// wires the measured viewport/chrome to it and renders the active page + pager.
+
+// How many whole grid rows fit in the available band, given a row height and the
+// inter-row margin. RGL stacks a page of `n` rows as n*rowHeight + (n+1)*margin
+// (a margin above the first row, below the last, and between each — we fold the
+// container padding into the margin, the same assumption computeFitRowHeight
+// makes). Solving n*rh + (n+1)*m ≤ available for n:
+//   n ≤ (available − m) / (rh + m)
+// We floor to whole rows and clamp to ≥1 so a tiny viewport still yields one row
+// per page (it just shows a single squashed row rather than zero). PURE.
+export function computeRowsPerPage(opts: {
+  available: number; // viewportHeight − chrome − pinnedStripHeight (px)
+  rowHeight: number; // px per grid row
+  marginY: number; // px gap; (n+1) of them per page
+}): number {
+  const { available, marginY } = opts;
+  const rowHeight = Math.max(MIN_ROW_HEIGHT, opts.rowHeight);
+  const n = Math.floor((available - marginY) / (rowHeight + marginY));
+  return Math.max(1, n);
+}
+
+// Given a fixed per-page row budget (`rowsPerPage`) and the available band, size
+// the rowHeight so those rows EXACTLY fill the page → the active page is full-
+// height with no scroll (the no-scroll guarantee, now per page rather than for
+// the whole layout). This is computeFitRowHeight specialized to "the rows of one
+// page", so the two stay in lock-step. PURE.
+export function computePagedRowHeight(opts: {
+  available: number; // the band one page fills (px)
+  rowsPerPage: number;
+  marginY: number;
+}): number {
+  return computeFitRowHeight({
+    viewportHeight: opts.available,
+    measuredChrome: 0,
+    rows: opts.rowsPerPage,
+    marginY: opts.marginY,
+  });
+}
+
+// The pixel height of one page = rowsPerPage rows + their (rows+1) margins. This
+// is the translate step WidgetLayout shifts the clip container by per page, and
+// equals the available band when computePagedRowHeight sized the row. PURE.
+export function pageHeightPx(opts: { rowsPerPage: number; rowHeight: number; marginY: number }): number {
+  const rows = Math.max(1, Math.floor(opts.rowsPerPage));
+  return rows * opts.rowHeight + (rows + 1) * opts.marginY;
+}
+
+// How many pages a set of placements spans, given the per-page row budget: the
+// last occupied row band + 1. Empty layout = a single (empty) page so the grid
+// always renders something. PURE.
+export function pageCount(placements: Placement[] | undefined, rowsPerPage: number): number {
+  const rpp = Math.max(1, Math.floor(rowsPerPage));
+  if (!placements || placements.length === 0) return 1;
+  const lastBottom = Math.max(0, ...placements.map((p) => p.y + p.h));
+  // A tile occupying rows [y, y+h) ends at row (y+h-1); its page is that row's
+  // band. ceil(lastBottom / rpp) is the page count (a tile ending exactly on a
+  // band boundary doesn't start a new page).
+  return Math.max(1, Math.ceil(lastBottom / rpp));
+}
+
+// Repair placements so NO tile straddles a page boundary (the phone-home-screen
+// rule: a tile sits wholly within one page's row band). For each tile we find
+// the page its TOP row lands on (floor(y / rpp)); if the tile would spill past
+// that page's last row, we PUSH it down to the top of the next page (re-banding
+// it) — and a tile taller than a whole page is CLAMPED to the page height so it
+// can still fit. We process in (y, x) order and track each page-band's next free
+// row so re-banded tiles stack instead of overlapping. This runs at generation
+// AND on a saved-blob repair, so a customized layout still paginates cleanly.
+// PURE — hand-calc unit-tested.
+export function clampToPages(placements: Placement[], rowsPerPage: number): Placement[] {
+  const rpp = Math.max(1, Math.floor(rowsPerPage));
+  // Sort by row then column so earlier-in-reading-order tiles are re-banded
+  // first; we copy so we never mutate the caller's array. We do NOT serialize
+  // side-by-side tiles — a tile that already fits its band keeps its (x, y);
+  // RGL's vertical compaction owns intra-page packing. We only move STRADDLERS.
+  const sorted = [...placements].sort((a, b) => a.y - b.y || a.x - b.x);
+  // For tiles we PUSH onto a later page, track the next free top row of that
+  // band SO re-banded tiles don't pile on the same row; tiles that fit in place
+  // never consult/advance this (they keep their column position untouched).
+  const pushedNextRow = new Map<number, number>();
+  const out: Placement[] = [];
+  for (const p of sorted) {
+    // A tile can be at most a whole page tall (so it fits within one band).
+    const h = Math.min(p.h, rpp);
+    const page = Math.floor(p.y / rpp);
+    const fitsInBand = p.y + h <= (page + 1) * rpp;
+    if (fitsInBand) {
+      // Already wholly within its page band: leave it where it is.
+      out.push({ ...p, h });
+      continue;
+    }
+    // Straddler: push to the next page's band, at that band's next free row so
+    // multiple pushed tiles stack rather than overlap. (RGL compaction tidies
+    // any remaining same-column overlap on the next render, which re-saves.)
+    const next = page + 1;
+    const top = Math.max(next * rpp, pushedNextRow.get(next) ?? next * rpp);
+    pushedNextRow.set(next, top + h);
+    out.push({ ...p, y: top, h });
+  }
+  return out;
+}
+
+// Partition placements into pages by their (clamped) row band: page index =
+// floor(y / rowsPerPage). Returns a dense array of `pageCount` pages (each an
+// array of that page's placements, possibly empty). The caller clamps tiles
+// FIRST (clampToPages) so no tile straddles a boundary; here we just bucket by
+// band. PURE — hand-calc unit-tested.
+export function paginatePlacements(placements: Placement[], rowsPerPage: number): Placement[][] {
+  const rpp = Math.max(1, Math.floor(rowsPerPage));
+  const clamped = clampToPages(placements, rpp);
+  const count = pageCount(clamped, rpp);
+  const pages: Placement[][] = Array.from({ length: count }, () => []);
+  for (const p of clamped) {
+    const page = Math.floor(p.y / rpp);
+    (pages[page] ?? pages[count - 1]).push(p);
+  }
+  return pages;
 }

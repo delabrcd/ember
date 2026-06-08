@@ -134,8 +134,13 @@ function statWidget(spec: StatSpec): WidgetDef {
     // Stat widgets read the `ov` bag off the host directly (Phase A); routing
     // them through the dataset layer is a later, opt-in change. No deps yet.
     dataDeps: [],
-    // A KPI card is short and narrow (≈1.5 of 12 cols → use 2; 2 rows = STAT_ROWS).
-    defaultSize: { w: 2, h: 2, minW: 1, minH: 1 },
+    // A KPI card (issue #73 iteration: fix the clipped carbon / vs-last-year /
+    // budget cards). 3 of 12 cols wide so the three-fact carbon sub line
+    // ("≈ N gal gas · N tree-yrs · estimate") and the two-fuel YoY row fit on one
+    // line, and 3 rows tall (= STAT_ROWS, ~120px at the fit rowHeight) so the
+    // budget card's title + headline + progress bar + status line aren't clipped.
+    // minH=2 keeps the shortest usable card; minW=2 keeps the sub line legible.
+    defaultSize: { w: 3, h: 3, minW: 2, minH: 2 },
     render: (host) => {
       const d = host.statData;
       if (spec.kind === 'simple') return <StatCard model={spec.select(d)} />;

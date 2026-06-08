@@ -52,7 +52,19 @@ export interface DashboardLayout {
   // PHASE E owns this — see DashboardPlacements above. Optional + opaque in Phase
   // D: carried through merges untouched, never generated, never read.
   layouts?: DashboardPlacements;
+  // PINNED STAT STRIP toggle (issue #73 iteration). When true (the DEFAULT,
+  // today's behaviour) the stat cards render in a FIXED band at the top of the
+  // fit cockpit — always visible, NOT paginated — and only the chart/panel tiles
+  // page below it. When false the stat cards become ordinary tiles that paginate
+  // with everything else (the full "phone home screen" feel). Rides this same
+  // server blob (NO schema change); the Customize-mode toggle flips it.
+  pinnedStatStrip: boolean;
 }
+
+// The default for the pinned-stat-strip toggle: ON, reproducing today's
+// always-visible stat strip. A saved blob without the field falls through to
+// this (the per-key `??` discipline), so an existing user is unchanged.
+export const DEFAULT_PINNED_STAT_STRIP = true;
 
 // Produce EXACTLY today's default dashboard: CHART_SPECS order, the per-chart
 // default configs from DEFAULT_PREFS.charts (all charts visible), no placements.
@@ -68,7 +80,7 @@ export function defaultDashboardLayout(): DashboardLayout {
     const base = DEFAULT_CHART_CONFIG[id];
     widgetConfig[id] = { ...base, hidden: [...base.hidden] };
   }
-  return { version: DASHBOARD_LAYOUT_VERSION, order, widgetConfig };
+  return { version: DASHBOARD_LAYOUT_VERSION, order, widgetConfig, pinnedStatStrip: DEFAULT_PINNED_STAT_STRIP };
 }
 
 // A constant default (the common read path returns this when nothing is saved).
@@ -112,7 +124,13 @@ export function mergeDashboardLayout(saved: unknown): DashboardLayout {
       ? (s.layouts as DashboardPlacements)
       : undefined;
 
-  return layouts ? { version: DASHBOARD_LAYOUT_VERSION, order, widgetConfig, layouts } : { version: DASHBOARD_LAYOUT_VERSION, order, widgetConfig };
+  // Pinned-stat-strip toggle (issue #73 iteration): keep an explicit boolean,
+  // else fall through to the default (the per-key `??` defends an explicit
+  // `false`, never a truthiness test).
+  const pinnedStatStrip = typeof s.pinnedStatStrip === 'boolean' ? s.pinnedStatStrip : DEFAULT_PINNED_STAT_STRIP;
+
+  const base: DashboardLayout = { version: DASHBOARD_LAYOUT_VERSION, order, widgetConfig, pinnedStatStrip };
+  return layouts ? { ...base, layouts } : base;
 }
 
 // Repair ONE chart's config against its default. Each field validated to the

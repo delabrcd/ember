@@ -65,7 +65,7 @@ export function Dashboard() {
   // Phase E (#73) adds the per-breakpoint `layouts` placements to the same blob.
   // While it's loading we render a skeleton for the grid (see below) so there's
   // NO first-paint flash of the default snapping to the saved layout.
-  const { layout, layoutLoading, updateChart: updateLayoutChart, setPlacements } = dashboardLayout;
+  const { layout, layoutLoading, updateChart: updateLayoutChart, setPlacements, setPinnedStatStrip } = dashboardLayout;
 
   const groups = buildAccountGroups(accounts);
   const showSwitcher = hasMultipleAccounts(accounts);
@@ -365,10 +365,12 @@ export function Dashboard() {
 
   // Cockpit shell. At ≥xl in "fit" density the page is pinned to the viewport
   // (overflow-hidden) and the WidgetLayout grid fills the space under the fixed
-  // chrome so the PAGE never scrolls — the no-scroll fit is now COMPUTED from the
-  // measured chrome height (WidgetLayout's ResizeObserver), not the old constant.
-  // Below xl (and in comfortable density) the page scrolls normally.
-  const lockViewport = fit && !customizing; // customizing always lets the page scroll so the palette + grid are reachable
+  // chrome so the PAGE never scrolls — the no-scroll PAGINATED fit (issue #73
+  // iteration): view mode shows one page with a pager; customize mode scrolls the
+  // grid CANVAS internally (flex-1 overflow-y-auto inside WidgetLayout) so every
+  // page's widgets stay reachable while the page itself stays pinned. Both modes
+  // pin at xl; below xl (and in comfortable density) the page scrolls normally.
+  const lockViewport = fit;
   return (
     <div
       className={`mx-auto flex w-full max-w-[1800px] flex-col gap-3 px-3 py-3 sm:px-5 sm:py-4 ${
@@ -510,9 +512,24 @@ export function Dashboard() {
             grid) so it's part of the measured fixed region. */}
         {customizing && !empty && layout && (
           <div className="space-y-2">
-            <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-200/90">
-              Customize mode — drag to move, drag a corner to resize, × to remove. Changes save automatically. Press
-              <strong className="mx-1">Done</strong> when finished.
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-200/90">
+              <span>
+                Customize mode — drag to move, drag a corner to resize, × to remove. Changes save automatically. Press
+                <strong className="mx-1">Done</strong> when finished.
+              </span>
+              {/* Pinned stat strip toggle (issue #73 iteration). ON (default)
+                  keeps the stat cards in a fixed band at the top, always visible;
+                  OFF turns them into ordinary tiles that paginate with everything
+                  else. Persists on the server layout blob. */}
+              <label className="inline-flex cursor-pointer items-center gap-2 rounded-lg border border-amber-500/30 bg-slate-900/50 px-2 py-1">
+                <input
+                  type="checkbox"
+                  checked={layout.pinnedStatStrip}
+                  onChange={(e) => setPinnedStatStrip(e.target.checked)}
+                  className="h-3.5 w-3.5 accent-amber-400"
+                />
+                <span className="text-amber-200/90">Pin stat strip</span>
+              </label>
             </div>
             <WidgetPalette groups={paletteGroups} onAdd={addWidget} />
           </div>
@@ -565,6 +582,7 @@ export function Dashboard() {
           onPlacementsChange={setPlacements}
           fit={fit}
           customizing={customizing}
+          pinnedStatStrip={layout.pinnedStatStrip}
           host={widgetHost}
           onRemoveWidget={removeWidget}
         />

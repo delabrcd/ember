@@ -46,6 +46,9 @@ export interface DashboardLayoutState {
   // a drag doesn't fire a request per pixel. The placements live on the same blob
   // as order/config (RFC §3.4), so this writes the whole DashboardLayout back.
   setPlacements: (layouts: Placements) => void;
+  // Flip the pinned-stat-strip toggle (issue #73 iteration). Rides the same blob;
+  // optimistic local update + PUT, like updateChart/reorder.
+  setPinnedStatStrip: (pinned: boolean) => void;
 }
 
 // Read the legacy v1 localStorage prefs blob for the one-time import. Returns
@@ -187,6 +190,15 @@ export function useDashboardLayout(selectedAccountId: number | null, ready: bool
     [persist]
   );
 
+  const setPinnedStatStrip = useCallback(
+    (pinned: boolean) => {
+      const cur = layoutRef.current;
+      if (!cur) return;
+      persist({ ...cur, pinnedStatStrip: pinned });
+    },
+    [persist]
+  );
+
   // Placement edits (Phase E, #73). A drag/resize fires RGL's onLayoutChange
   // many times in quick succession, so we update local state IMMEDIATELY
   // (optimistic, keeps the grid responsive) but DEBOUNCE the PUT — only the last
@@ -218,5 +230,5 @@ export function useDashboardLayout(selectedAccountId: number | null, ready: bool
     };
   }, [scope]);
 
-  return { layout, layoutLoading, setLayout, updateChart, reorder, setPlacements };
+  return { layout, layoutLoading, setLayout, updateChart, reorder, setPlacements, setPinnedStatStrip };
 }

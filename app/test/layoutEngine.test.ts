@@ -2,10 +2,17 @@ import { describe, expect, it } from 'vitest';
 import {
   COLS,
   DEFAULT_FIT_ROWS,
+  PINNED_PAGE_ROWS,
   MIN_ROW_HEIGHT,
+  clampToPages,
   computeFitRowHeight,
+  computePagedRowHeight,
+  computeRowsPerPage,
   generateDefaultPlacements,
   mergePlacements,
+  pageCount,
+  pageHeightPx,
+  paginatePlacements,
   placementRows,
   type Placement,
   type Placements,
@@ -41,15 +48,24 @@ describe('computeFitRowHeight (hand-calculated)', () => {
     expect(300 + gridHeight).toBeCloseTo(900, 5);
   });
 
-  it('at the fit targets (1366×768, 1280×800) yields a positive, sane rowHeight', () => {
-    // A realistic chrome (~220px: header + range strip + padding) at the default
-    // cockpit row count. Both laptop sizes must give a workable (> floor) height.
+  it('at the fit targets (1366×768, 1280×800) a page fills the band with a sane row', () => {
+    // The runtime two-step (issue #73 iteration): from the available band below
+    // the chrome (+ pinned strip), compute how many rows FIT at the nominal
+    // height (rowsPerPage, capped at the design budget), then size the row so
+    // those rows fill the band exactly. The result is always a sane row (≥ floor)
+    // that fills the page → no scroll. We don't FORCE the full budget on a short
+    // laptop; rowsPerPage shrinks so a chart row stays readable.
     for (const vh of [768, 800]) {
-      const rh = computeFitRowHeight({ viewportHeight: vh, measuredChrome: 220, rows: DEFAULT_FIT_ROWS, marginY: 8 });
-      expect(rh).toBeGreaterThan(MIN_ROW_HEIGHT);
-      // And it still fits exactly.
-      const gridHeight = DEFAULT_FIT_ROWS * rh + (DEFAULT_FIT_ROWS + 1) * 8;
-      expect(220 + gridHeight).toBeCloseTo(vh, 5);
+      const available = vh - 220 - 120 - 44; // chrome + pinned strip + pager allowance
+      const fitted = computeRowsPerPage({ available, rowHeight: 40, marginY: 8 });
+      const rowsPerPage = Math.max(1, Math.min(fitted, PINNED_PAGE_ROWS));
+      const rh = computePagedRowHeight({ available, rowsPerPage, marginY: 8 });
+      // A readable row (≥ floor) and the page fills its band exactly.
+      expect(rh).toBeGreaterThanOrEqual(MIN_ROW_HEIGHT);
+      expect(pageHeightPx({ rowsPerPage, rowHeight: rh, marginY: 8 })).toBeCloseTo(available, 5);
+      // At least one chart's worth of rows fit per page (CHART_ROWS = 7), so a
+      // page always shows a real chart rather than slivers.
+      expect(rowsPerPage).toBeGreaterThanOrEqual(7);
     }
   });
 
@@ -207,11 +223,11 @@ describe('placementRows (hand-calculated)', () => {
   it('the default cockpit occupies DEFAULT_FIT_ROWS rows at lg', () => {
     // Stat band (STAT_ROWS) + two chart rows (2*CHART_ROWS) = DEFAULT_FIT_ROWS.
     // With 7 charts the chart block is 4 rows tall, but the DEFAULT cockpit math
-    // (one band + two chart rows) is the no-scroll target the fit uses for the
-    // common 4-up case; the live count just tracks the real layout.
+    // (one band + two chart rows) is the per-PAGE target the fit uses; the live
+    // count just tracks the real (possibly multi-page) layout.
     const lg = generateDefaultPlacements(INPUT).lg!;
-    // The stat band is STAT_ROWS tall; the smallest chart-block height is two
-    // chart rows, so a 2-chart layout occupies exactly DEFAULT_FIT_ROWS.
+    // A 2-chart layout: stat band (STAT_ROWS) + the bills rail (which spans the
+    // 2-row chart-block minimum = 2*CHART_ROWS) = DEFAULT_FIT_ROWS exactly.
     const twoCharts = generateDefaultPlacements({
       statIds: STATS,
       chartIds: ['chart:usage', 'chart:cost'],
@@ -220,5 +236,134 @@ describe('placementRows (hand-calculated)', () => {
     expect(placementRows(twoCharts)).toBe(DEFAULT_FIT_ROWS);
     // (sanity: the full set is taller, since 7 charts wrap to 4 rows.)
     expect(placementRows(lg)).toBeGreaterThan(DEFAULT_FIT_ROWS);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 5. PAGINATION — the phone-home-screen no-scroll fit (issue #73 iteration)
+// ---------------------------------------------------------------------------
+describe('computeRowsPerPage (hand-calculated)', () => {
+  it('floors to whole rows that fit: (available − m)/(rh + m)', () => {
+    // available 600, rowHeight 40, margin 8 → (600−8)/(40+8) = 592/48 = 12.33 → 12
+    expect(computeRowsPerPage({ available: 600, rowHeight: 40, marginY: 8 })).toBe(12);
+  });
+  it('clamps to ≥1 so a tiny band still yields one row per page', () => {
+    expect(computeRowsPerPage({ available: 10, rowHeight: 40, marginY: 8 })).toBe(1);
+  });
+  it('floors a row height below the engine floor up to the floor (never divides by ~0)', () => {
+    // rowHeight 1 is below MIN_ROW_HEIGHT(24) → treated as 24: (600−8)/(24+8)=18.5→18
+    expect(computeRowsPerPage({ available: 600, rowHeight: 1, marginY: 8 })).toBe(18);
+  });
+});
+
+describe('computePagedRowHeight + pageHeightPx (the per-page no-scroll guarantee)', () => {
+  it('sizes a row so rowsPerPage rows EXACTLY fill the band', () => {
+    // band 560, 14 rows, margin 8: usable = 560 − 8*15 = 440; rh = 440/14 = 31.43
+    const rh = computePagedRowHeight({ available: 560, rowsPerPage: 14, marginY: 8 });
+    expect(rh).toBeCloseTo(440 / 14, 5);
+    // The page's pixel height == the band (so one page fills the viewport).
+    expect(pageHeightPx({ rowsPerPage: 14, rowHeight: rh, marginY: 8 })).toBeCloseTo(560, 5);
+  });
+});
+
+describe('pageCount (hand-calculated)', () => {
+  it('is the last occupied band + 1', () => {
+    const ps: Placement[] = [
+      { i: 'a', x: 0, y: 0, w: 4, h: 7 }, // page 0 (rows 0–6, rpp=7)
+      { i: 'b', x: 4, y: 7, w: 4, h: 7 }, // page 1 (rows 7–13)
+    ];
+    expect(pageCount(ps, 7)).toBe(2);
+  });
+  it('a tile ending exactly on a band boundary does NOT start a new page', () => {
+    // h=7 at y=0 ends at row 7 (exclusive), i.e. bottom=7 → ceil(7/7)=1 page.
+    expect(pageCount([{ i: 'a', x: 0, y: 0, w: 4, h: 7 }], 7)).toBe(1);
+  });
+  it('empty layout is a single page', () => {
+    expect(pageCount([], 7)).toBe(1);
+    expect(pageCount(undefined, 7)).toBe(1);
+  });
+});
+
+describe('clampToPages — no tile straddles a page boundary (hand-calculated)', () => {
+  it('keeps tiles that already fit within a page band', () => {
+    const ps: Placement[] = [
+      { i: 'a', x: 0, y: 0, w: 4, h: 7 },
+      { i: 'b', x: 4, y: 0, w: 4, h: 7 },
+    ];
+    expect(clampToPages(ps, 7)).toEqual(ps);
+  });
+  it('pushes a straddling tile down to the next page band', () => {
+    // rpp=7; a tile at y=4 h=7 would span rows 4–10 (crosses the row-7 boundary).
+    // It must be re-banded to start at row 7 (the next page), height preserved.
+    const out = clampToPages([{ i: 'a', x: 0, y: 4, w: 4, h: 7 }], 7);
+    expect(out[0]).toMatchObject({ i: 'a', y: 7, h: 7 });
+  });
+  it('clamps a tile taller than a whole page to the page height', () => {
+    // rpp=7; a 10-row tile can never fit one band → clamp h to 7.
+    const out = clampToPages([{ i: 'a', x: 0, y: 0, w: 4, h: 10 }], 7);
+    expect(out[0].h).toBe(7);
+  });
+  it('stacks re-banded tiles in a band instead of overlapping', () => {
+    // Two tiles that both want to spill onto page 1 must not overlap there.
+    const out = clampToPages(
+      [
+        { i: 'a', x: 0, y: 5, w: 4, h: 5 }, // spills → page 1 (y=7)
+        { i: 'b', x: 0, y: 6, w: 4, h: 5 }, // spills → page 1, below a
+      ],
+      7
+    );
+    const a = out.find((p) => p.i === 'a')!;
+    const b = out.find((p) => p.i === 'b')!;
+    // No vertical overlap: b starts at or after a's bottom.
+    expect(b.y).toBeGreaterThanOrEqual(a.y + a.h);
+  });
+});
+
+describe('paginatePlacements — partition into pages (hand-calculated)', () => {
+  it('buckets tiles by row band; fills page 1 then spills to page 2', () => {
+    const ps: Placement[] = [
+      { i: 'a', x: 0, y: 0, w: 4, h: 7 }, // page 0
+      { i: 'b', x: 4, y: 0, w: 4, h: 7 }, // page 0
+      { i: 'c', x: 0, y: 7, w: 4, h: 7 }, // page 1
+    ];
+    const pages = paginatePlacements(ps, 7);
+    expect(pages.length).toBe(2);
+    expect(pages[0].map((p) => p.i).sort()).toEqual(['a', 'b']);
+    expect(pages[1].map((p) => p.i)).toEqual(['c']);
+  });
+  it('a straddling tile is re-banded so it lands wholly on one page', () => {
+    const pages = paginatePlacements(
+      [
+        { i: 'a', x: 0, y: 0, w: 4, h: 7 }, // page 0
+        { i: 'b', x: 0, y: 4, w: 4, h: 7 }, // straddles → page 1
+      ],
+      7
+    );
+    // Every tile sits within exactly one page's row band (no straddler).
+    pages.forEach((pg, i) => {
+      for (const p of pg) {
+        expect(Math.floor(p.y / 7)).toBe(i);
+        expect(p.y + p.h).toBeLessThanOrEqual((i + 1) * 7);
+      }
+    });
+  });
+  it('an empty grid is a single empty page', () => {
+    expect(paginatePlacements([], 7)).toEqual([[]]);
+  });
+});
+
+describe('the default cockpit paginates cleanly at the pinned page budget', () => {
+  it('7 charts + bills rail spill to a second page below a pinned stat strip', () => {
+    // With the strip pinned, the paged area is PINNED_PAGE_ROWS (= 2 chart rows).
+    // The default lg layout's charts+bills (4 chart rows + a 4-row-tall rail)
+    // therefore span more than one page → the pager appears.
+    const lg = generateDefaultPlacements(INPUT).lg!;
+    const grid = lg.filter((p) => !p.i.startsWith('stat:')); // charts + bills
+    const pages = paginatePlacements(grid, PINNED_PAGE_ROWS);
+    expect(pages.length).toBeGreaterThan(1);
+    // And no tile straddles a page boundary after the clamp.
+    pages.forEach((pg, i) => {
+      for (const p of pg) expect(p.y + p.h).toBeLessThanOrEqual((i + 1) * PINNED_PAGE_ROWS);
+    });
   });
 });

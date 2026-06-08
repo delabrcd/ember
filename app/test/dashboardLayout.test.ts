@@ -124,6 +124,17 @@ describe('mergeDashboardLayout (hand-calculated)', () => {
     const def = defaultDashboardLayout();
     expect(mergeDashboardLayout(def)).toEqual(def);
   });
+
+  it('pinnedStatStrip defaults ON, defends an explicit false, ignores garbage', () => {
+    // Issue #73 iteration: the toggle rides the same blob (no schema change).
+    expect(defaultDashboardLayout().pinnedStatStrip).toBe(true);
+    // No saved value → default ON (today's always-visible stat strip).
+    expect(mergeDashboardLayout({ order: DEFAULT_ORDER }).pinnedStatStrip).toBe(true);
+    // An explicit false survives (typeof boolean, never a truthiness test).
+    expect(mergeDashboardLayout({ order: DEFAULT_ORDER, pinnedStatStrip: false }).pinnedStatStrip).toBe(false);
+    // Garbage falls back to the default ON.
+    expect(mergeDashboardLayout({ order: DEFAULT_ORDER, pinnedStatStrip: 'nope' }).pinnedStatStrip).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------
