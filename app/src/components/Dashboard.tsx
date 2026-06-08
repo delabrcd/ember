@@ -22,7 +22,7 @@ import { ScrapeProgressBanner } from './ScrapeProgress';
 import { RangeControl } from './RangeControl';
 import { NgLoginsSection } from './NgLoginsSection';
 import { ToolsModal, type ToolsTab } from './ToolsModal';
-import { NotificationsBell } from './NotificationsBell';
+import { HeaderActions } from './HeaderActions';
 import { useDashboardData } from './useDashboardData';
 import { dateLabel, relativeFromNow } from '@/lib/format';
 import { STAT_SPECS, type StatData } from '@/lib/widgets/statSpec';
@@ -406,66 +406,23 @@ export function Dashboard() {
               )
             )}
           </div>
-          {/* Header actions. flex-wrap + justify-end so the button cluster
-              (Customize / bell / Tools / Settings / Refresh) wraps onto a second
-              line on narrow screens instead of overflowing the viewport (the
-              added Customize button pushed the unwrapped row past ~390px → a
-              horizontal scrollbar on mobile). No effect at widths where they fit. */}
-          <div className="flex flex-wrap items-center justify-end gap-2 gap-y-2">
-            {/* Customize / Done toggle (Phase E, #73): flips the grid between the
-                static default view and the drag/resize/add/remove edit mode. Only
-                shown when there's data to arrange. */}
-            {!empty && !layoutLoading && layout && (
-              <button
-                type="button"
-                onClick={() => setCustomizing((v) => !v)}
-                className={`btn border ${
-                  customizing
-                    ? 'border-amber-500/60 bg-amber-500/20 text-amber-200 hover:bg-amber-500/30'
-                    : 'border-slate-700/70 bg-slate-800/40 text-slate-200 hover:bg-slate-700'
-                }`}
-              >
-                {customizing ? (
-                  <>
-                    <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6 9 17l-5-5" /></svg>
-                    Done
-                  </>
-                ) : (
-                  <>
-                    <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 21v-4l11-11 4 4L8 21H4zM13 6l4 4" /></svg>
-                    Customize
-                  </>
-                )}
-              </button>
-            )}
-            {!empty && (
-              <NotificationsBell
-                accountId={selectedAccountId}
-                bills={bills}
-                onOpenCompare={() => openTools('compare')}
-              />
-            )}
-            {!empty && (
-              <button
-                type="button"
-                onClick={() => openTools('compare')}
-                className="btn border border-slate-700/70 bg-slate-800/40 text-slate-200 hover:bg-slate-700"
-              >
-                <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18v3h3l6.3-6.3a4 4 0 0 0 5.4-5.4l-2.3 2.3a1.5 1.5 0 0 1-2.1-2.1z" />
-                </svg>
-                Tools
-              </button>
-            )}
-            <Link href="/settings" className="btn border border-slate-700/70 bg-slate-800/40 text-slate-200 hover:bg-slate-700">
-              <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <circle cx="12" cy="12" r="3" />
-                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-              </svg>
-              Settings
-            </Link>
-            <RefreshButton onDone={load} onStarted={trackRun} running={scraping} />
-          </div>
+          {/* Header actions (Customize / bell / Tools / Settings / Refresh). At
+              ≥sm they render inline exactly as before; below sm they collapse into
+              a ☰ hamburger menu (the bell stays visible) so they never overflow a
+              phone — HeaderActions owns that responsive split and shares every
+              handler between the inline buttons and the menu items (issue #73). */}
+          <HeaderActions
+            empty={empty}
+            canCustomize={!empty && !layoutLoading && !!layout}
+            customizing={customizing}
+            onToggleCustomize={() => setCustomizing((v) => !v)}
+            onOpenTools={() => openTools('compare')}
+            accountId={selectedAccountId}
+            bills={bills}
+            onRefreshDone={load}
+            onRefreshStarted={trackRun}
+            scraping={scraping}
+          />
         </header>
 
         <ScrapeProgressBanner run={progressRun} onRetry={retryScrape} onDismiss={dismissProgress} />

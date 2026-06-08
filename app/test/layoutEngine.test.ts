@@ -110,19 +110,22 @@ describe('generateDefaultPlacements (hand-calculated)', () => {
     expect(stats.filter((p) => p.w === 1).length).toBe(4);
   });
 
-  it('lg: charts two-up on the left (8 cols), bills rail on the right (4 cols)', () => {
+  it('lg: charts in a 2×2 grid — half-width (6 cols) two-up at x=0 / x=6', () => {
     const lg = placements.lg!;
     const charts = lg.filter((p) => p.i.startsWith('chart:'));
-    // Two columns at x=0 and x=4, each 4 cols wide → an 8-col left block.
-    expect(new Set(charts.map((p) => p.x))).toEqual(new Set([0, 4]));
-    expect(charts.every((p) => p.w === 4)).toBe(true);
-    // The bills rail is the right block: x=8 (12-8), 4 cols wide, and tall enough
-    // to span the chart block (stretches the cockpit like today's rail).
+    // Two columns at x=0 and x=6, each 6 cols wide → a full-width 2-up grid (the
+    // 2×2 density iteration, issue #73). Two chart rows = four charts per page.
+    expect(new Set(charts.map((p) => p.x))).toEqual(new Set([0, 6]));
+    expect(charts.every((p) => p.w === 6)).toBe(true);
+    // The bills panel is a full-width tile (12 cols) below the charts, one
+    // page-band (PINNED_PAGE_ROWS) tall so it occupies its own page.
     const bills = lg.find((p) => p.i === 'panel:bills')!;
-    expect(bills.x).toBe(8);
-    expect(bills.w).toBe(4);
-    // 7 charts → ceil(7/2)=4 chart rows → the rail spans 4*CHART_ROWS rows.
-    expect(bills.h).toBe(4 * 7);
+    expect(bills.x).toBe(0);
+    expect(bills.w).toBe(COLS.lg);
+    expect(bills.h).toBe(PINNED_PAGE_ROWS);
+    // It sits below the last chart row: 7 charts → ceil(7/2)=4 chart rows.
+    const lastChartBottom = Math.max(...charts.map((p) => p.y + p.h));
+    expect(bills.y).toBeGreaterThanOrEqual(lastChartBottom);
   });
 
   it('xs (mobile): a single column — every widget at x=0, w=1, stacked in order', () => {
@@ -221,21 +224,23 @@ describe('placementRows (hand-calculated)', () => {
     expect(placementRows(undefined)).toBe(1);
   });
 
-  it('the default cockpit occupies DEFAULT_FIT_ROWS rows at lg', () => {
-    // Stat band (STAT_ROWS) + two chart rows (2*CHART_ROWS) = DEFAULT_FIT_ROWS.
-    // With 7 charts the chart block is 4 rows tall, but the DEFAULT cockpit math
-    // (one band + two chart rows) is the per-PAGE target the fit uses; the live
-    // count just tracks the real (possibly multi-page) layout.
+  it('the default cockpit spans more than one page budget at lg', () => {
+    // DEFAULT_FIT_ROWS = stat band (STAT_ROWS) + two chart rows (2*CHART_ROWS),
+    // the per-PAGE row budget the fit math targets; the live row count just tracks
+    // the real (multi-page) layout, which is taller because the bills panel sits
+    // a full page-band below the charts.
     const lg = generateDefaultPlacements(INPUT).lg!;
-    // A 2-chart layout: stat band (STAT_ROWS) + the bills rail (which spans the
-    // 2-row chart-block minimum = 2*CHART_ROWS) = DEFAULT_FIT_ROWS exactly.
+    // A 2-chart layout: stat band + one chart row + the full-width bills panel
+    // (PINNED_PAGE_ROWS tall) below it. The bills panel's bottom is the row count.
     const twoCharts = generateDefaultPlacements({
       statIds: STATS,
       chartIds: ['chart:usage', 'chart:cost'],
       panelIds: PANELS,
     }).lg!;
-    expect(placementRows(twoCharts)).toBe(DEFAULT_FIT_ROWS);
-    // (sanity: the full set is taller, since 7 charts wrap to 4 rows.)
+    // STAT_ROWS(3) + 1 chart row (CHART_ROWS=7) → bills at y=10, h=PINNED_PAGE_ROWS
+    // (14) → bottom 24.
+    expect(placementRows(twoCharts)).toBe(3 + 7 + PINNED_PAGE_ROWS);
+    // (sanity: the full 7-chart set is taller still, since charts wrap to 4 rows.)
     expect(placementRows(lg)).toBeGreaterThan(DEFAULT_FIT_ROWS);
   });
 });
@@ -423,9 +428,9 @@ describe('placementsEqual — the no-change detector that breaks the loop', () =
 });
 
 describe('the default cockpit paginates cleanly at the pinned page budget', () => {
-  it('7 charts + bills rail spill to a second page below a pinned stat strip', () => {
+  it('7 charts + bills panel spill to a second page below a pinned stat strip', () => {
     // With the strip pinned, the paged area is PINNED_PAGE_ROWS (= 2 chart rows).
-    // The default lg layout's charts+bills (4 chart rows + a 4-row-tall rail)
+    // The default lg layout's charts+bills (4 chart rows + a full-page bills tile)
     // therefore span more than one page → the pager appears.
     const lg = generateDefaultPlacements(INPUT).lg!;
     const grid = lg.filter((p) => !p.i.startsWith('stat:')); // charts + bills
@@ -435,5 +440,30 @@ describe('the default cockpit paginates cleanly at the pinned page budget', () =
     pages.forEach((pg, i) => {
       for (const p of pg) expect(p.y + p.h).toBeLessThanOrEqual((i + 1) * PINNED_PAGE_ROWS);
     });
+  });
+
+  it('packs a 2×2 of charts (4 charts) on page 1 at the pinned budget (issue #73 density)', () => {
+    // The operator decision: ~4 charts per page in a 2×2, so the 7 charts span
+    // ≈2 pages of charts rather than ~5 sparse pages. With the stat strip pinned,
+    // the paged area is PINNED_PAGE_ROWS (= 2 chart rows). The lg charts (half-
+    // width, two-up) therefore put four charts (two rows × two columns) on page 1.
+    const lg = generateDefaultPlacements(INPUT).lg!;
+    // The grid below a pinned strip is charts + bills, REBASED to start at row 0
+    // (WidgetLayout drops the stat-band offset when the strip is pinned).
+    const grid = lg.filter((p) => !p.i.startsWith('stat:'));
+    const minY = Math.min(...grid.map((p) => p.y));
+    const rebased = grid.map((p) => ({ ...p, y: p.y - minY }));
+    const pages = paginatePlacements(rebased, PINNED_PAGE_ROWS);
+    // Page 1 holds a 2×2 of charts (exactly four chart tiles).
+    const page1Charts = pages[0].filter((p) => p.i.startsWith('chart:'));
+    expect(page1Charts.length).toBe(4);
+    // They form a 2×2: two columns (x ∈ {0, 6}) over two rows (y ∈ {0, CHART_ROWS}).
+    expect(new Set(page1Charts.map((p) => p.x))).toEqual(new Set([0, 6]));
+    expect(new Set(page1Charts.map((p) => p.y)).size).toBe(2);
+    // The 7 charts span ~2 chart pages (≤3), not the old ~5. The bills panel adds
+    // at most one more page, so the whole grid paginates to ~2–3 pages.
+    const chartPages = pages.filter((pg) => pg.some((p) => p.i.startsWith('chart:'))).length;
+    expect(chartPages).toBeLessThanOrEqual(2);
+    expect(pages.length).toBeLessThanOrEqual(3);
   });
 });

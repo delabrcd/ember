@@ -173,8 +173,25 @@ function statBand(ids: string[], cols: number): { items: Placement[]; nextY: num
   return { items, nextY: y + STAT_ROWS };
 }
 
-// Generate the lg (12-col) cockpit: stat band on top, charts left two-up, bills
-// rail right spanning the chart block. This is the no-scroll fit arrangement.
+// Generate the lg (12-col) cockpit: stat band on top, then a 2×2 chart GRID
+// (half-width charts, two per row), with the bills panel below the charts. This
+// is the no-scroll PAGINATED fit arrangement.
+//
+// 2×2 DENSITY (issue #73 iteration, operator decision): the old layout put
+// charts in an 8-col left block two-up (w=4) alongside a 4-col bills rail, which
+// made each chart only 1/3-width and — at the pinned-strip per-page budget of
+// two chart rows — spread the 7 charts across ~5 sparse pages. The operator wants
+// the old cockpit density back: ~4 charts per page in a true 2×2 (like a phone
+// home screen, two columns × two rows of chart tiles). So charts now span HALF
+// the grid (w=6 of 12) two-up at x=0 / x=6, and a page-row budget of two chart
+// rows (PINNED_PAGE_ROWS = 2*CHART_ROWS) lands exactly four charts on a page. The
+// 7 charts therefore paginate to ~2 pages instead of ~5.
+//
+// The bills panel can no longer be a right rail (the charts use the full width),
+// so it sits as a full-width tile BELOW the charts; at the pinned per-page budget
+// it falls onto its own page band (clampToPages keeps it whole), staying readable
+// with its own internal scroll. Below the fit breakpoint (md/sm/xs) the page
+// scrolls, so the panel just stacks under the charts as before.
 function generateLg(input: DefaultLayoutInput): Placement[] {
   const cols = COLS.lg;
   const out: Placement[] = [];
@@ -189,11 +206,11 @@ function generateLg(input: DefaultLayoutInput): Placement[] {
   out.push(...stat.items);
   const afterStats = stat.nextY;
 
-  // Charts: left block, 8 of 12 cols, two-up (each 4 cols) so they pair into rows
-  // — the old 2×N fit cockpit. minH keeps a chart from being resized uselessly
-  // short; minW keeps a chart at least half the chart block.
-  const chartCols = 8;
-  const chartW = 4;
+  // Charts: a full-width 2×2 grid — each chart is HALF the grid (6 of 12 cols),
+  // two per row at x=0 / x=6, so two chart rows = four charts fill one page band
+  // (PINNED_PAGE_ROWS). minH keeps a chart from being resized uselessly short;
+  // minW=3 keeps a chart at least a quarter-width so a row of two stays sane.
+  const chartW = cols / 2; // 6 of 12 — half width, two-up
   input.chartIds.forEach((i, idx) => {
     out.push({
       i,
@@ -201,19 +218,23 @@ function generateLg(input: DefaultLayoutInput): Placement[] {
       y: afterStats + Math.floor(idx / 2) * CHART_ROWS,
       w: chartW,
       h: CHART_ROWS,
-      minW: 2,
+      minW: 3,
       minH: 2,
     });
   });
-  // How many chart rows the left block occupies (≥ two so the rail stretches the
-  // cockpit even with 0–2 charts, matching today's two-row fit grid).
-  const chartRowCount = Math.max(2, Math.ceil(input.chartIds.length / 2));
-  const chartBlockH = chartRowCount * CHART_ROWS;
+  // How many chart rows the 2-up block occupies (≥ one so the panel still lands
+  // below charts even with 0–2 charts). The bills panel goes on the row AFTER the
+  // last chart row.
+  const chartRowCount = Math.max(1, Math.ceil(input.chartIds.length / 2));
+  const afterCharts = afterStats + chartRowCount * CHART_ROWS;
 
-  // Bills rail: right block (12 − 8 = 4 cols), spanning the full chart block so
-  // it stretches to the cockpit height exactly like today's `align stretch` rail.
+  // Bills panel: a full-width (12-col) tile below the charts, one page-band tall
+  // (PINNED_PAGE_ROWS) so it occupies a clean page of its own under the pinned
+  // strip — it scrolls internally, so a full page of bills reads well. At the
+  // unpinned budget (DEFAULT_FIT_ROWS) it still fits within a band; clampToPages
+  // re-bands it whole if a partly-filled chart band would otherwise straddle.
   input.panelIds.forEach((i) => {
-    out.push({ i, x: chartCols, y: afterStats, w: cols - chartCols, h: chartBlockH, minW: 2, minH: 2 });
+    out.push({ i, x: 0, y: afterCharts, w: cols, h: PINNED_PAGE_ROWS, minW: 3, minH: 2 });
   });
   return out;
 }

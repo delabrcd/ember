@@ -100,9 +100,10 @@ function chartWidget(spec: ChartSpec): WidgetDef {
     category: 'chart',
     title: spec.title,
     dataDeps: [spec.dataset],
-    // A chart fills half the lg chart block (4 of 12 cols) and is tall (7 rows,
-    // = CHART_ROWS); mirrors the default generator's two-up chart placement.
-    defaultSize: { w: 4, h: 7, minW: 2, minH: 3 },
+    // A chart is HALF the lg grid (6 of 12 cols) and tall (7 rows = CHART_ROWS);
+    // mirrors the default generator's 2×2 two-up chart placement (issue #73
+    // density iteration). minW=3 keeps an added chart at least quarter-width.
+    defaultSize: { w: 6, h: 7, minW: 3, minH: 3 },
     render: (host) => {
       const drawn = host.specFor(spec.id);
       const rows = host.resolveDataset(drawn.dataset, spec.id);
@@ -152,14 +153,15 @@ function statWidget(spec: StatSpec): WidgetDef {
 
 // The bills rail as a `panel` widget (Phase E, #73). One instance, id
 // 'panel:bills'. Renders the BillsPanel from the host's range-filtered bills +
-// export scopes (byte-identical to the old inline rail). It's wide (4 of 12 cols
-// at lg → the right rail) and tall so it stretches the cockpit like before.
+// export scopes. It's full-width (12 of 12 cols at lg) and one page-band tall so
+// it occupies its own page below the 2×2 charts (issue #73 density iteration);
+// it scrolls internally so a full page of bills reads well.
 const BILLS_PANEL: WidgetDef = {
   type: 'panel:bills',
   category: 'panel',
   title: 'Bills',
   dataDeps: ['bills'],
-  defaultSize: { w: 4, h: 14, minW: 2, minH: 4 },
+  defaultSize: { w: 12, h: 14, minW: 3, minH: 4 },
   render: (host) => <BillsPanel data={host.billsData} />,
 };
 
