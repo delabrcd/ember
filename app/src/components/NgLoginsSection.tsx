@@ -37,7 +37,10 @@ function maskUsername(u: string): string {
   return `${head}${'•'.repeat(Math.max(2, local.length - 1))}${domain}`;
 }
 
-export function NgLoginsSection() {
+// `onChanged` lets a parent (the first-run setup flow) react when the stored-login
+// set changes — added, removed, or re-authenticated — so it can advance without a
+// manual page reload (e.g. reveal the "pull your history" step once a login exists).
+export function NgLoginsSection({ onChanged }: { onChanged?: () => void } = {}) {
   const [logins, setLogins] = useState<NgLoginRow[]>([]);
   const [secretKeyConfigured, setSecretKeyConfigured] = useState(true);
   const [loaded, setLoaded] = useState(false);
@@ -111,8 +114,11 @@ export function NgLoginsSection() {
         // Re-auth failures still want the row list refreshed (status may have moved).
         load();
       }
+      // Either terminal can change the stored-login set / status, so let the parent
+      // (first-run setup) re-read it and advance the flow without a page reload.
+      onChanged?.();
     },
-    [load]
+    [load, onChanged]
   );
 
   const poll = useCallback(
@@ -255,6 +261,7 @@ export function NgLoginsSection() {
       }
       closeConfirm();
       load();
+      onChanged?.();
     } catch (e2) {
       setConfirmErr((e2 as Error).message);
       setConfirmBusy(false);
