@@ -65,6 +65,7 @@ export const DEFAULT_PREFS: Prefs = {
     weather: baseChart({ stacked: false }),
     degreeDays: baseChart({ stacked: false }),
     normalized: baseChart({ type: 'line' }),
+    emissions: baseChart({ stacked: false }),
   },
 };
 
