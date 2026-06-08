@@ -146,6 +146,13 @@ export function Dashboard() {
   const yoyCardFuels = yoyCard ? [yoyCard.elec, yoyCard.gas].filter((r) => r != null) : [];
   const showYoyCard = yoyCardFuels.length > 0;
 
+  // Budget / annual-spend target card (issue #46). Always-visible when a target
+  // is set: spent so far (currentCharges), the projected end-of-window total with
+  // its band, an on/over/under status pill, and a progress bar. Self-hides when no
+  // target is set (the subtle "set a budget" affordance covers that case). All the
+  // arithmetic happened server-side (ov.budget); this only renders it.
+  const budget = ov?.budget ?? null;
+
   // Chart pagination (issue #38): in "fit" density at ≥xl we page through the
   // visible charts (in the user's chosen order) up to four at a time in a 2×2 grid
   // that fills the chart region — so charts are tall enough on a laptop and the
@@ -334,8 +341,8 @@ export function Dashboard() {
               Tailwind's JIT. */}
           <div
             className={`grid shrink-0 grid-cols-2 gap-2 sm:grid-cols-3 ${
-              { 4: 'lg:grid-cols-4', 5: 'lg:grid-cols-5', 6: 'lg:grid-cols-6', 7: 'lg:grid-cols-7', 8: 'lg:grid-cols-8' }[
-                4 + (ov?.nextBillEstimate ? 1 : 0) + (seasonCard ? 1 : 0) + (ov?.emissions ? 1 : 0) + (showYoyCard ? 1 : 0)
+              { 4: 'lg:grid-cols-4', 5: 'lg:grid-cols-5', 6: 'lg:grid-cols-6', 7: 'lg:grid-cols-7', 8: 'lg:grid-cols-8', 9: 'lg:grid-cols-9' }[
+                4 + (ov?.nextBillEstimate ? 1 : 0) + (seasonCard ? 1 : 0) + (ov?.emissions ? 1 : 0) + (showYoyCard ? 1 : 0) + (budget ? 1 : 0)
               ]
             } ${
               fit
@@ -467,7 +474,72 @@ export function Dashboard() {
                 <div className="sub mt-0.5 text-[11px] text-slate-500">normalized vs last yr</div>
               </div>
             ) : null}
+            {/* Budget / annual-spend target (issue #46): always-visible when a
+                target is set. Shows projected end-of-window total vs the target,
+                an on-track / over / under status, and a progress bar (spent solid,
+                projected-remaining lighter). When NO target is set, a subtle "set
+                a budget" affordance links to Settings. The verbose detail (spent,
+                window, band, remaining periods) lives behind the ⓘ tooltip. All
+                math is server-side (ov.budget). */}
+            {budget ? (() => {
+              const { spent, projected, projectedLow, projectedHigh, target, delta, status, window } = budget;
+              const statusColor =
+                status === 'over' ? 'text-rose-300' : status === 'under' ? 'text-emerald-300' : 'text-slate-200';
+              const statusLabel =
+                status === 'over' ? `over by ${usd(Math.abs(delta), 0)}`
+                  : status === 'under' ? `under by ${usd(Math.abs(delta), 0)}`
+                    : 'on track';
+              // Progress bar: spent (solid) + projected-remaining (lighter), as a
+              // fraction of max(target, projected) so an over-budget projection
+              // still fills the bar and overflows visibly into the rose tint.
+              const denom = Math.max(target, projected, 1);
+              const spentPct = Math.min(100, (spent / denom) * 100);
+              const remPct = Math.min(100 - spentPct, (Math.max(0, projected - spent) / denom) * 100);
+              const targetPct = Math.min(100, (target / denom) * 100);
+              const fromY = Math.floor(window.fromYm / 100);
+              return (
+                <div className="card relative !p-3">
+                  <div className="card-title flex items-center gap-1 text-xs">
+                    Budget {fromY}
+                    <span
+                      tabIndex={0}
+                      role="img"
+                      aria-label={`Spent ${usd(spent, 0)} of your ${usd(target, 0)} ${fromY} target so far; projected end-of-year total ${usd(projected, 0)} (range ${usd(projectedLow, 0)}–${usd(projectedHigh, 0)}). Spent is the sum of this year's bills' actual period charges (currentCharges, the PDF source of truth — never the statement amount due); the projected remainder reuses the next-bill estimate and the seasonal 12-month projection. Set or change the target in Settings. Not a real charge.`}
+                      title={`Spent ${usd(spent, 0)} of your ${usd(target, 0)} ${fromY} target so far; projected end-of-year total ${usd(projected, 0)} (range ${usd(projectedLow, 0)}–${usd(projectedHigh, 0)}). Spent is the sum of this year's bills' actual period charges (currentCharges, the PDF source of truth — never the statement amount due); the projected remainder reuses the next-bill estimate and the seasonal 12-month projection. Set or change the target in Settings. Not a real charge.`}
+                      className="inline-flex h-4 w-4 cursor-help items-center justify-center rounded-full border border-slate-600/70 text-[10px] font-semibold text-slate-400 transition hover:border-slate-400 hover:text-slate-200 focus:outline-none focus:ring-1 focus:ring-amber-500/60"
+                    >
+                      i
+                    </span>
+                  </div>
+                  <div className="stat text-2xl">
+                    ~{usd(projected, 0)}<span className="text-sm text-slate-500"> / {usd(target, 0)}</span>
+                  </div>
+                  {/* Progress bar: spent solid, projected-remaining lighter, with a
+                      target tick. Overflows into a rose tint when over budget. */}
+                  <div className="relative mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-slate-800">
+                    <div className="absolute inset-y-0 left-0 flex">
+                      <div className={status === 'over' ? 'bg-rose-500/80' : 'bg-amber-400'} style={{ width: `${spentPct}%` }} />
+                      <div className={status === 'over' ? 'bg-rose-400/40' : 'bg-amber-400/35'} style={{ width: `${remPct}%` }} />
+                    </div>
+                    <div className="absolute inset-y-0 w-px bg-slate-300/80" style={{ left: `${targetPct}%` }} />
+                  </div>
+                  <div className={`sub mt-0.5 text-[11px] ${statusColor}`}>
+                    {statusLabel} · {usd(spent, 0)} spent
+                  </div>
+                </div>
+              );
+            })() : null}
           </div>
+
+          {/* Subtle "set a budget" affordance (issue #46) when no target is set —
+              links to Settings where the target input lives. Hidden once a target
+              is set (the budget card replaces it). */}
+          {!budget && !empty ? (
+            <div className="shrink-0 text-[11px] text-slate-500">
+              Want to track an annual spending target?{' '}
+              <Link href="/settings" className="text-amber-400 hover:underline">Set a budget</Link>.
+            </div>
+          ) : null}
 
           {/* Interactive "Compare periods" tool (issue #47): pick any two windows
               (preset — trailing-12, this-winter-vs-last, YTD — or two custom range

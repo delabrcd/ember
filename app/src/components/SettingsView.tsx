@@ -23,6 +23,9 @@ interface ServerSettings {
   // when unset) and the effective factor actually used (region default or override).
   gridEmissionFactor?: string;
   effectiveGridFactor?: number;
+  // Budget / annual-spend target (issue #46). The raw target dollars (empty when
+  // unset). Calendar-year window; tracked on the dashboard's budget card.
+  budgetTarget?: string;
 }
 interface Run {
   id: number;
@@ -57,6 +60,10 @@ export function SettingsView() {
   // input; seeded from the server value once loaded. Empty = use region default.
   const [gridFactor, setGridFactor] = useState('');
   const [savingGrid, setSavingGrid] = useState(false);
+  // Budget / annual-spend target (issue #46). Local edit buffer; seeded from the
+  // server value once loaded. Empty = no target (the dashboard budget card hides).
+  const [budgetTarget, setBudgetTarget] = useState('');
+  const [savingBudget, setSavingBudget] = useState(false);
   const [verify, setVerify] = useState<{ ok: boolean; total: number; failed: number; bills: { statementDate: string; ok: boolean; checks: { name: string; ok: boolean; detail?: string }[] }[] } | null>(null);
   const [verifying, setVerifying] = useState(false);
   // Bill-PDF bulk-download range. Empty until the user (or the loaded account)
@@ -82,6 +89,7 @@ export function SettingsView() {
     setRuns(r.runs || []);
     setAccounts(a.accounts || []);
     setGridFactor(s.gridEmissionFactor ?? '');
+    setBudgetTarget(s.budgetTarget ?? '');
   }, []);
 
   // Match the dashboard's scoping so an export = what's on screen. Validate the
@@ -135,6 +143,20 @@ export function SettingsView() {
       body: JSON.stringify({ gridEmissionFactor: gridFactor.trim() }),
     });
     setSavingGrid(false);
+    loadServer();
+  };
+
+  // Save (or clear) the annual-spend budget target (issue #46). The server
+  // validates it's a positive number before storing; an empty value clears it
+  // (the dashboard budget card disappears). Reload so the saved state reflects.
+  const saveBudgetTarget = async () => {
+    setSavingBudget(true);
+    await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ budgetTarget: budgetTarget.trim() }),
+    });
+    setSavingBudget(false);
     loadServer();
   };
 
@@ -254,6 +276,46 @@ export function SettingsView() {
                 In use: <span className="text-slate-300">{server.effectiveGridFactor} kg/kWh</span>
                 {server.gridEmissionFactor ? '' : ' (region default)'}
               </span>
+            )}
+          </div>
+        </div>
+
+        {/* Budget / annual-spend target (issue #46). A positive dollar target,
+            tracked on the dashboard's budget card (spent so far vs a projected
+            end-of-year total). Calendar-year window. Blank clears it. */}
+        <div className="space-y-2">
+          <div>
+            <div className="text-sm font-medium text-slate-200">Annual spending target</div>
+            <div className="text-xs text-slate-500">
+              Dollars per calendar year. The dashboard shows a budget card with how much you&apos;ve spent so far
+              (from your bills&apos; actual period charges) and a projected end-of-year total, with on-track / over /
+              under status. Leave blank to hide the card.
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 pl-3">
+            <input
+              type="number"
+              step="50"
+              min="0"
+              inputMode="decimal"
+              value={budgetTarget}
+              placeholder="e.g. 2800"
+              onChange={(e) => setBudgetTarget(e.target.value)}
+              className="w-32 rounded-lg border border-slate-700 bg-slate-800/50 px-2 py-1 text-xs text-slate-200"
+            />
+            <button
+              onClick={saveBudgetTarget}
+              disabled={savingBudget || budgetTarget === (server?.budgetTarget ?? '')}
+              className="btn border border-slate-700/70 bg-slate-800/40 text-xs text-slate-200 transition hover:bg-slate-700 disabled:opacity-40"
+            >
+              {savingBudget ? 'Saving…' : 'Save'}
+            </button>
+            {server?.budgetTarget ? (
+              <span className="text-xs text-slate-500">
+                Target: <span className="text-slate-300">${server.budgetTarget}/yr</span>
+              </span>
+            ) : (
+              <span className="text-xs text-slate-500">No target set</span>
             )}
           </div>
         </div>

@@ -315,6 +315,159 @@ export function trailing12AllIn(rows: MonthRow[], fuel: 'elec' | 'gas'): number 
   return use > 0 ? cost / use : null;
 }
 
+// ---------------------------------------------------------------------------
+// Budget / annual-spend target with on-track projection (issue #46)
+//
+// "Am I on track for my spending target?" The window defaults to the calendar
+// year (the caller passes {fromYm, toYm} — calendar-year by default — so this
+// pure fn never needs a clock). Three pieces:
+//
+//   1. SPENT so far = sum of each in-window bill's period energy charge
+//      (billTotal = currentCharges — the PDF source of truth). NEVER the API
+//      amount due (totalDueAmount), which can fold in a carried-over balance and
+//      would double-count. This is asserted in the unit tests.
+//   2. PROJECTED end-of-window total = spent + the cost of the bills still to
+//      come in the window. We DON'T recompute any prediction here — the caller
+//      passes in the already-computed next-bill estimate (issue #9/#67) and the
+//      seasonal 12-month projection (issue #52); we just SELECT the future
+//      periods that land inside the window and sum them. A future period counts
+//      as "remaining" when its ym is strictly after the latest in-window bill we
+//      already have AND within the window. The next-bill estimate (point + band)
+//      is used for the FIRST such period; any later in-window periods come from
+//      the seasonal projection. Each future period carries its own band, which
+//      we combine in QUADRATURE (independent period residuals, matching how the
+//      seasonal annual band is built) to band the projected total.
+//   3. STATUS vs the target: 'over' / 'under' / 'on_track', with delta =
+//      projected − target (positive = over budget). A small tolerance band
+//      around the target (default ±2%) reads as 'on_track' so a trivially-close
+//      projection isn't alarmingly flagged either way.
+//
+// Returns null only when there's no target set. With a target but no spend yet
+// it still reports (spent 0, projected = the remaining projection). PURE — the
+// projection inputs are supplied; the arithmetic is hand-calculable in tests.
+// ---------------------------------------------------------------------------
+
+export interface BudgetWindow {
+  fromYm: number; // inclusive YYYYMM lower bound
+  toYm: number; // inclusive YYYYMM upper bound
+}
+
+// A future bill period the projection knows about, with its confidence band.
+// The caller maps the next-bill estimate and seasonal months onto this shape.
+export interface BudgetFuturePeriod {
+  ym: number;
+  point: number;
+  low: number;
+  high: number;
+}
+
+export interface BudgetProjectionInput {
+  // The next-bill estimate (issue #9/#67), keyed to the period it covers. Used
+  // for the first remaining in-window period. Omit when there's no estimate.
+  nextBill?: BudgetFuturePeriod | null;
+  // The seasonal 12-month projection's per-month periods (issue #52). Supplies
+  // any in-window periods beyond the next bill. Empty when none.
+  seasonMonths?: BudgetFuturePeriod[];
+}
+
+export type BudgetStatus = 'over' | 'under' | 'on_track';
+
+export interface BudgetResult {
+  window: BudgetWindow;
+  target: number;
+  spent: number; // sum of in-window billTotal (currentCharges)
+  billsCounted: number; // how many in-window bills fed `spent`
+  // Remaining projection: the in-window future periods we summed, and their band.
+  remaining: number; // sum of remaining-period points
+  remainingLow: number; // spent + Σ low (band floored at spent)
+  remainingHigh: number; // spent + Σ high
+  remainingPeriods: number; // count of future periods counted
+  // End-of-window projection = spent + remaining, with a quadrature band.
+  projected: number;
+  projectedLow: number;
+  projectedHigh: number;
+  delta: number; // projected − target (positive = over budget)
+  status: BudgetStatus;
+}
+
+// Fraction of the target within which the projection reads as "on track" rather
+// than over/under, so a projection a few dollars off a $2,800 target isn't
+// alarmingly flagged. ±2% of target.
+export const BUDGET_ON_TRACK_TOL = 0.02;
+
+export function projectBudget(
+  rows: MonthRow[],
+  target: number | null | undefined,
+  window: BudgetWindow,
+  projection?: BudgetProjectionInput,
+  opts?: { tolerance?: number }
+): BudgetResult | null {
+  if (target == null || !(target > 0) || !Number.isFinite(target)) return null;
+
+  const inWindow = (ym: number) => ym >= window.fromYm && ym <= window.toYm;
+
+  // Spent so far = Σ in-window billTotal (currentCharges). NEVER totalDueAmount.
+  let spent = 0;
+  let billsCounted = 0;
+  let latestBilledYm = 0;
+  for (const r of rows) {
+    if (r.billTotal == null || !inWindow(r.ym)) continue;
+    spent += r.billTotal;
+    billsCounted += 1;
+    if (r.ym > latestBilledYm) latestBilledYm = r.ym;
+  }
+
+  // Remaining in-window periods: strictly after the latest bill we already have
+  // (so we never double-count a period that's both billed AND projected), inside
+  // the window. The next-bill estimate covers its own period; seasonal months
+  // cover the rest. De-dupe by ym (next-bill wins over a same-ym seasonal month).
+  const future = new Map<number, BudgetFuturePeriod>();
+  const nb = projection?.nextBill;
+  if (nb && inWindow(nb.ym) && nb.ym > latestBilledYm) future.set(nb.ym, nb);
+  for (const m of projection?.seasonMonths ?? []) {
+    if (!inWindow(m.ym) || m.ym <= latestBilledYm || future.has(m.ym)) continue;
+    future.set(m.ym, m);
+  }
+
+  const periods = [...future.values()];
+  const remaining = periods.reduce((s, p) => s + p.point, 0);
+  // Band: combine the per-period half-widths in quadrature (independent period
+  // residuals, matching the seasonal annual band), then center on spent+remaining.
+  const halfSq = periods.reduce((s, p) => s + Math.max(0, p.high - p.point) ** 2, 0);
+  const half = Math.sqrt(halfSq);
+
+  const projected = spent + remaining;
+  const projectedLow = Math.max(spent, projected - half);
+  const projectedHigh = projected + half;
+
+  const delta = projected - target;
+  const tol = (opts?.tolerance ?? BUDGET_ON_TRACK_TOL) * target;
+  const status: BudgetStatus = delta > tol ? 'over' : delta < -tol ? 'under' : 'on_track';
+
+  return {
+    window,
+    target,
+    spent,
+    billsCounted,
+    remaining,
+    remainingLow: Math.max(spent, spent + periods.reduce((s, p) => s + p.low, 0)),
+    remainingHigh: spent + periods.reduce((s, p) => s + p.high, 0),
+    remainingPeriods: periods.length,
+    projected,
+    projectedLow,
+    projectedHigh,
+    delta,
+    status,
+  };
+}
+
+// Calendar-year budget window for a given ym (YYYYMM): Jan–Dec of that ym's year.
+// The default window the dashboard uses; the caller passes the current ym.
+export function calendarYearWindow(ym: number): BudgetWindow {
+  const year = Math.floor(ym / 100);
+  return { fromYm: year * 100 + 1, toYm: year * 100 + 12 };
+}
+
 // ESCO supply-rate what-if back-test (issue #48). The biggest controllable lever
 // on a National Grid bill is the SUPPLY rate — you can switch ESCO suppliers while
 // DELIVERY stays with the utility — so this answers "what would a quoted fixed

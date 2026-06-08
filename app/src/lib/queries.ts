@@ -14,7 +14,16 @@ import {
   projectSeason,
   type SeasonProjection,
 } from '@/lib/prediction';
-import { trailing12AllIn, latestVsYearAgo, withSupplyRateTrailing, type YoyResult } from '@/lib/series';
+import {
+  trailing12AllIn,
+  latestVsYearAgo,
+  withSupplyRateTrailing,
+  projectBudget,
+  calendarYearWindow,
+  type YoyResult,
+  type BudgetFuturePeriod,
+} from '@/lib/series';
+import { ymAddMonths } from '@/lib/ym';
 import { seasonNormalsByMonth, nextBillWindowDegreeDays } from '@/lib/weather/expectedDegreeDaysSync';
 import { shapeAccount, type AccountSummary } from '@/lib/accountSwitcher';
 import { ymFromDate as ymOf, isoDate as ymd } from '@/lib/ym';
@@ -243,6 +252,42 @@ export async function getOverview(accountId: number) {
   // number, never fed to /api/verify. The full interactive period-compare tool
   // computes its own windows client-side from the loaded series.
   const latestYoy: YoyResult | null = latestVsYearAgo(series);
+  // Budget / annual-spend target with on-track projection (issue #46). The target
+  // is a per-account runtime AppSetting; the window defaults to the CALENDAR YEAR
+  // of the latest usage month (so "spent so far" and the projection are about the
+  // same year the data is in, not a server-clock year that might be ahead of the
+  // data). Spent is the sum of in-window billTotal (= currentCharges, PDF source
+  // of truth — projectBudget asserts this); the remaining projection REUSES the
+  // already-computed next-bill estimate and seasonal projection (we don't recompute
+  // anything), selecting only the in-window future periods. Null when no target is
+  // set. Never a real charge, never fed to /api/verify.
+  const budget = await (async () => {
+    const raw = (await getSetting('budgetTarget')) ?? '';
+    const target = Number.parseFloat(raw);
+    if (!Number.isFinite(target) || target <= 0) return null;
+    const lastUsage = [...series].reverse().find((r) => r.kwh != null || r.therms != null);
+    const anchorYm = lastUsage?.ym ?? null;
+    if (anchorYm == null) return null;
+    const window = calendarYearWindow(anchorYm);
+    // Map the next-bill estimate (which covers the month after the latest usage
+    // row) and the seasonal projection months onto the budget's future-period
+    // shape (ym + point/low/high band).
+    const nextBill: BudgetFuturePeriod | null = nextBillEstimate
+      ? {
+          ym: ymAddMonths(anchorYm, 1),
+          point: nextBillEstimate.point,
+          low: nextBillEstimate.low,
+          high: nextBillEstimate.high,
+        }
+      : null;
+    const seasonMonths: BudgetFuturePeriod[] = (seasonProjection?.months ?? []).map((m) => ({
+      ym: m.ym,
+      point: m.projCost,
+      low: m.low,
+      high: m.high,
+    }));
+    return projectBudget(series, target, window, { nextBill, seasonMonths });
+  })();
   const latest = bills[0] ? shapeBill(bills[0]) : null;
   return {
     account: account
@@ -260,6 +305,7 @@ export async function getOverview(accountId: number) {
     seasonProjection,
     emissions,
     latestYoy,
+    budget,
     latestBill: latest
       ? {
           statementDate: latest.statementDate,

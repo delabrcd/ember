@@ -45,6 +45,24 @@ export interface Overview {
   // null without a prior-year month to match. The full interactive compare tool
   // computes its own windows client-side from the loaded series rows.
   latestYoy?: YoyResult | null;
+  // Budget / annual-spend target with on-track projection (issue #46): spent so
+  // far (currentCharges), the projected end-of-window total with a confidence
+  // band, and on/over/under status vs the target. null when no target is set.
+  budget?: {
+    window: { fromYm: number; toYm: number };
+    target: number;
+    spent: number;
+    billsCounted: number;
+    remaining: number;
+    remainingLow: number;
+    remainingHigh: number;
+    remainingPeriods: number;
+    projected: number;
+    projectedLow: number;
+    projectedHigh: number;
+    delta: number;
+    status: 'over' | 'under' | 'on_track';
+  } | null;
   latestBill?: { statementDate: string; totalDueAmount: number | null } | null;
   firstStatement?: string | null;
   schedule?: { predictedNextBillDate: string | null; nextCheckAt: string | null; lastCheckedAt: string | null } | null;

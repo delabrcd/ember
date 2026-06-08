@@ -14,6 +14,9 @@ export async function GET() {
   // UI can show what the estimate currently runs on (region default vs override).
   const gridEmissionFactor = (await getSetting('gridEmissionFactor')) ?? '';
   const effectiveGridFactor = resolveGridFactor(overview?.account?.region, gridEmissionFactor);
+  // Budget / annual-spend target (issue #46): the raw target the user has set
+  // (empty when unset) so the Settings UI can show + edit it.
+  const budgetTarget = (await getSetting('budgetTarget')) ?? '';
   return NextResponse.json({
     schedulerEnabled: await isSchedulerEnabled(),
     notify: await getNotifyStatus(),
@@ -24,6 +27,7 @@ export async function GET() {
     latestBill: overview?.latestBill ?? null,
     gridEmissionFactor,
     effectiveGridFactor,
+    budgetTarget,
   });
 }
 
@@ -45,9 +49,23 @@ export async function POST(req: Request) {
       if (Number.isFinite(n) && n > 0) await setSetting('gridEmissionFactor', String(n));
     }
   }
+  // Budget / annual-spend target (issue #46), dollars. An empty string clears the
+  // target (the budget card disappears); any other value is validated as a positive
+  // finite number before it's stored, so a bad input can never poison the projection.
+  if (typeof body.budgetTarget === 'string') {
+    const raw = body.budgetTarget.trim();
+    if (raw === '') {
+      await setSetting('budgetTarget', '');
+    } else {
+      const n = Number.parseFloat(raw);
+      if (Number.isFinite(n) && n > 0) await setSetting('budgetTarget', String(n));
+    }
+  }
   const gridEmissionFactor = (await getSetting('gridEmissionFactor')) ?? '';
+  const budgetTarget = (await getSetting('budgetTarget')) ?? '';
   return NextResponse.json({
     schedulerEnabled: await isSchedulerEnabled(),
     gridEmissionFactor,
+    budgetTarget,
   });
 }
