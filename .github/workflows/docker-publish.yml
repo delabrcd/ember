@@ -25,6 +25,29 @@ jobs:
       - name: Run unit tests
         run: docker run --rm ngrid-dashboard-test
 
+  # Static analysis: ESLint (next/core-web-vitals) + a TypeScript typecheck
+  # (tsc --noEmit). Runs on every PR + push; gates the publish.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install deps
+        run: cd app && npm ci
+
+      - name: Generate Prisma client (types for the typecheck)
+        run: cd app && npx prisma generate
+
+      - name: ESLint
+        run: cd app && npm run lint
+
+      - name: Typecheck
+        run: cd app && npx tsc --noEmit
+
   # Upgrade-safety: applying the current schema on top of the PREVIOUS release's
   # database must not clobber data. The deploy entrypoint uses `prisma db push
   # --accept-data-loss` with no rollback, so a destructive schema change would
@@ -151,7 +174,7 @@ jobs:
     # Gate the image publish on tests, the upgrade-safety check, AND the boot-health
     # smoke test passing. PRs only run the test + migration-safety + smoke-boot jobs
     # above (no publish — no secrets, and forks can't push to GHCR).
-    needs: [test, migration-safety, smoke-boot]
+    needs: [test, lint, migration-safety, smoke-boot]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
