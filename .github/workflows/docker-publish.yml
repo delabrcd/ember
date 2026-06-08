@@ -77,11 +77,81 @@ jobs:
           NEW_SCHEMA: app/prisma/schema.prisma
         run: bash .github/migration-safety/check.sh
 
+  # Boot-health smoke test: build the runner image exactly as it ships, boot it
+  # against a throwaway Postgres (the real entrypoint runs `prisma db push`), seed
+  # representative data, and assert the app comes up HEALTHY (/api/overview serves
+  # real data). Catches a change that breaks startup/DB/queries BEFORE it becomes
+  # :edge (staging) or :latest. Runs on PRs + main; gates the publish.
+  smoke-boot:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ngrid
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: ngrid
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ngrid" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://ngrid:ci@localhost:5432/ngrid?schema=public
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build the runner image (as shipped)
+        run: docker build -t ngrid-dashboard-boot ./app
+
+      - name: Boot the image
+        run: |
+          docker run -d --name boot --network host \
+            -e DATABASE_URL="postgresql://ngrid:ci@localhost:5432/ngrid?schema=public" \
+            -e SCHEDULER_ENABLED=false \
+            -e NGRID_USER=ci@example.com -e NGRID_PASS=ci \
+            ngrid-dashboard-boot
+
+      - name: Wait for the server (entrypoint runs db push, then starts Next)
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS -o /dev/null http://localhost:3000/; then echo "server up"; exit 0; fi
+            sleep 3
+          done
+          echo "::error::server never started (root / not 200)"; docker logs boot | tail -80; exit 1
+
+      - name: Seed representative data
+        # Strip the Prisma-only ?schema=public param — libpq/psql rejects it.
+        run: psql "${DATABASE_URL%%\?*}" -v ON_ERROR_STOP=1 -f .github/migration-safety/seed.sql
+
+      - name: Assert /api/overview is healthy and serves data
+        run: |
+          code="$(curl -s -o /tmp/ov.json -w '%{http_code}' http://localhost:3000/api/overview)"
+          echo "HTTP $code"; cat /tmp/ov.json | head -c 400; echo
+          if [ "$code" != "200" ]; then
+            echo "::error::/api/overview returned $code (app not healthy)"; docker logs boot | tail -80; exit 1
+          fi
+          bills="$(python3 -c 'import json;print(json.load(open("/tmp/ov.json")).get("billCount",0))')"
+          if [ "${bills:-0}" -lt 1 ]; then
+            echo "::error::/api/overview returned 200 but no data (billCount=$bills) — DB/query path unhealthy"; docker logs boot | tail -80; exit 1
+          fi
+          echo "healthy: /api/overview 200 with billCount=$bills"
+
+      - name: Container logs (always)
+        if: always()
+        run: docker logs boot 2>&1 | tail -60 || true
+
+      - name: Cleanup
+        if: always()
+        run: docker rm -f boot || true
+
   build-push:
-    # Gate the image publish on tests AND the upgrade-safety check passing. PRs
-    # only run the test + migration-safety jobs above (no publish — no secrets,
-    # and forks can't push to GHCR).
-    needs: [test, migration-safety]
+    # Gate the image publish on tests, the upgrade-safety check, AND the boot-health
+    # smoke test passing. PRs only run the test + migration-safety + smoke-boot jobs
+    # above (no publish — no secrets, and forks can't push to GHCR).
+    needs: [test, migration-safety, smoke-boot]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
