@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import type { MonthRow } from '@/lib/chartSpec';
 import { SPEC_BY_ID } from '@/lib/chartSpec';
 import { seasonForwardRows } from '@/lib/prediction';
@@ -17,7 +17,6 @@ import {
   ymToLastYmd,
 } from '@/lib/range';
 import { buildAccountGroups, hasMultipleAccounts } from '@/lib/accountSwitcher';
-import { ConfigurableChart } from './ConfigurableChart';
 import { AccountSwitcher } from './AccountSwitcher';
 import { RefreshButton } from './RefreshButton';
 import { ScrapeProgressBanner } from './ScrapeProgress';
@@ -27,7 +26,9 @@ import { CockpitPager } from './CockpitPager';
 import { ToolsModal, type ToolsTab } from './ToolsModal';
 import { NotificationsBell } from './NotificationsBell';
 import { useDashboardData } from './useDashboardData';
-import { dateLabel, estimateTooltip, num, rate, relativeFromNow, signedPct, usd } from '@/lib/format';
+import { dateLabel, relativeFromNow, usd } from '@/lib/format';
+import { STAT_SPECS, type StatData } from '@/lib/widgets/statSpec';
+import { chartWidgetType, getWidget, statWidgetType, type WidgetHost } from '@/lib/widgets/registry';
 
 // Up to four charts per page in the paginated "fit" cockpit (issue #38), laid out
 // 2×2 so each chart is comfortably tall on a laptop.
@@ -137,33 +138,22 @@ export function Dashboard() {
   const visibleCharts = prefs.order.filter((id) => prefs.charts[id]?.visible && SPEC_BY_ID[id]);
   const fit = prefs.density === 'fit';
 
-  // "vs last year (normalized)" card (issue #47). Latest-month-vs-same-month-a-
-  // year-ago, weather-normalized, per fuel — computed server-side (ov.latestYoy).
-  // We show whichever fuels have a result; the card self-hides only when neither
-  // fuel matched a prior-year month (like the other optional cards). The number
-  // shown is the normalized (intensity) change, the honest "did I use less" figure.
-  const yoyCard = ov?.latestYoy ?? null;
-  const yoyCardFuels = yoyCard ? [yoyCard.elec, yoyCard.gas].filter((r) => r != null) : [];
-  const showYoyCard = yoyCardFuels.length > 0;
-  // Green/red tint for a normalized YoY delta: LOWER usage than last year is BETTER
-  // (emerald), higher is WORSE (rose), ~flat or null is neutral (slate). A tiny
-  // epsilon around 0 counts as flat. Matches the budget card's emerald/rose tokens
-  // and the Compare tool's normalized-cost coloring. Presentation only.
-  const yoyDeltaClass = (pct: number | null | undefined): string =>
-    pct == null || Math.abs(pct) < 0.005
-      ? 'text-slate-200'
-      : pct < 0
-        ? 'text-emerald-300'
-        : 'text-rose-300';
-
   // Budget / annual-spend target card (issue #46). The redesign merges the old
   // standalone Budget card AND the "Proj. next 12 mo" card into ONE compact,
-  // CLICKABLE Budget card: a concise projected-year-end / target headline + a
-  // seasonally-fair status, that opens the Tools modal's Budget tab (the
-  // month-by-month detail + projection context). Always-visible when a target is
-  // set; a subtle "set a budget" affordance covers the no-target case. The
-  // arithmetic happened server-side (ov.budget); this only renders the headline.
+  // CLICKABLE Budget card. The arithmetic happened server-side (ov.budget); the
+  // value-rendering now lives in the budget StatSpec/StatCard. We still read it
+  // directly here for the no-target "set a budget" affordance and the Tools modal.
   const budget = ov?.budget ?? null;
+
+  // Stat-strip widgets (Phase A, issue #93). The 8 cards that used to be ~190
+  // lines of hardcoded JSX are now declarative StatSpecs rendered through the
+  // widget registry. StatData is the exact bag the cards read (the trailing12
+  // rate calcs + lastRow find above stay where they are — pure); each StatSpec's
+  // pure isVisible predicate mirrors the card's old guard. We filter to the
+  // visible specs here, in their declared order (4 fixed + the optional
+  // est-next/carbon/vs-last-year/budget), and the count drives the grid columns.
+  const statData: StatData = { ov, elecAllIn, gasAllIn, lastRow, currencyDecimals: dp };
+  const visibleStats = STAT_SPECS.filter((s) => s.isVisible(statData));
 
   // Header notifications bell (notification-log feature). The old inline amber
   // anomaly banner (#45) is superseded by a dropdown over the persistent
@@ -184,6 +174,24 @@ export function Dashboard() {
     setToolsTab(tab);
     setToolsOpen(true);
   };
+
+  // The host context the widget registry renders against (Phase A, issue #93).
+  // Charts and stats keep their existing, separate data sources in Phase A (the
+  // dataset abstraction is Phase B), so we hand the host exactly what the old
+  // inline JSX consumed: the specFor/chartRows adapters (which carry the #71
+  // spec-stripping and #52/#71 forward-projection append UNCHANGED), the chart
+  // layout knobs, and the StatData bag + openTools. `chartFill` is set per chart
+  // code-path below (the paginated fit grid always fills; the stacking grid fills
+  // only in fit density) — exactly as the two old ConfigurableChart call sites
+  // passed it — so we build the host with a caller-supplied fill.
+  const widgetHost = (chartFill: boolean): WidgetHost => ({
+    specFor,
+    chartRows,
+    chartFill,
+    chartHeight: 288,
+    statData,
+    openTools,
+  });
 
   // Chart pagination (issue #38): in "fit" density at ≥xl we page through the
   // visible charts (in the user's chosen order) up to four at a time in a 2×2 grid
@@ -419,10 +427,23 @@ export function Dashboard() {
               #71): 4 fixed + the optional est-next, proj, carbon and vs-last-year
               cards. We map to an explicit literal so the class string is visible to
               Tailwind's JIT. */}
+          {/* The 8 cards now render through the widget registry (Phase A, issue
+              #93) as declarative StatSpecs — the ~190 lines of hardcoded card JSX
+              that used to live here moved into lib/widgets/statSpec.ts (pure
+              selectors) + components/widgets/StatCard.tsx (the shared/bespoke
+              renderers), with byte-identical markup. We render `visibleStats` (the
+              specs whose isVisible passed, in their declared order: 4 fixed + the
+              optional est-next/carbon/vs-last-year/budget) through the registry.
+
+              The lg column count still tracks the number of cards actually
+              rendered (issue #71) — now derived from `visibleStats.length` — and
+              still maps to an explicit literal so the class string is visible to
+              Tailwind's JIT. The fit-density denser overrides on the wrapper are
+              unchanged. */}
           <div
             className={`grid shrink-0 grid-cols-2 gap-2 sm:grid-cols-3 ${
               { 4: 'lg:grid-cols-4', 5: 'lg:grid-cols-5', 6: 'lg:grid-cols-6', 7: 'lg:grid-cols-7', 8: 'lg:grid-cols-8', 9: 'lg:grid-cols-9' }[
-                4 + (ov?.nextBillEstimate ? 1 : 0) + (ov?.emissions ? 1 : 0) + (showYoyCard ? 1 : 0) + (budget ? 1 : 0)
+                visibleStats.length
               ]
             } ${
               fit
@@ -430,196 +451,12 @@ export function Dashboard() {
                 : ''
             }`}
           >
-            <div className="card !p-3">
-              <div className="card-title text-xs">Latest bill</div>
-              <div className="stat text-2xl">{usd(ov?.latestBill?.totalDueAmount, dp)}</div>
-              <div className="sub mt-0.5 text-[11px] text-slate-500">{dateLabel(ov?.latestBill?.statementDate)}</div>
-            </div>
-            <div className="card !p-3">
-              <div className="card-title text-xs">Lifetime spend</div>
-              <div className="stat text-2xl">{usd(ov?.lifetimeSpend, 0)}</div>
-              <div className="sub mt-0.5 text-[11px] text-slate-500">across {num(ov?.billCount)} bills</div>
-            </div>
-            <div className="card !p-3">
-              <div className="card-title text-xs">Electric rate</div>
-              <div className="stat text-2xl">{rate(elecAllIn)}<span className="text-sm text-slate-500">/kWh</span></div>
-              <div className="sub mt-0.5 text-[11px] text-slate-500">full price, last 12 mo · supply part {rate(lastRow?.elecRateSupply)}</div>
-            </div>
-            <div className="card !p-3">
-              <div className="card-title text-xs">Gas rate</div>
-              <div className="stat text-2xl">{rate(gasAllIn, 2)}<span className="text-sm text-slate-500">/therm</span></div>
-              <div className="sub mt-0.5 text-[11px] text-slate-500">full price, last 12 mo · supply part {rate(lastRow?.gasRateSupply, 2)}</div>
-            </div>
-            {ov?.nextBillEstimate ? (
-              // Compact estimate card (issue #38): just "Est. next bill", "~$X" and
-              // the short range. The verbose basis + disclaimer live behind the ⓘ
-              // tooltip so the word "estimate(d)" appears ONCE and the card no
-              // longer pushes the stat strip taller.
-              <div className="card relative !p-3">
-                <div className="card-title flex items-center gap-1 text-xs">
-                  Est. next bill
-                  <span
-                    tabIndex={0}
-                    role="img"
-                    aria-label={estimateTooltip(ov.nextBillEstimate.basis)}
-                    title={estimateTooltip(ov.nextBillEstimate.basis)}
-                    className="inline-flex h-4 w-4 cursor-help items-center justify-center rounded-full border border-slate-600/70 text-[10px] font-semibold text-slate-400 transition hover:border-slate-400 hover:text-slate-200 focus:outline-none focus:ring-1 focus:ring-amber-500/60"
-                  >
-                    i
-                  </span>
-                </div>
-                <div className="stat text-2xl">~{usd(ov.nextBillEstimate.point, dp)}</div>
-                <div className="sub mt-0.5 text-[11px] text-slate-500">
-                  {usd(ov.nextBillEstimate.low, dp)}–{usd(ov.nextBillEstimate.high, dp)}
-                </div>
-              </div>
-            ) : null}
-            {/* The "Proj. next 12 mo" card was merged into the Budget card → Budget
-                tab (issue #46 redesign): the next-12-months projected total now
-                lives inside that tool as projection context, so it isn't lost. The
-                dashed forward chart series is unaffected (gated separately by the
-                showProjectionOnCharts pref). */}
-            {/* Carbon-footprint estimate (issue #49): trailing-12 combined CO2e in
-                kg, with a friendly equivalence and the location-based-ESTIMATE
-                caveat behind the ⓘ tooltip so the card stays compact. Never a
-                cost number. */}
-            {ov?.emissions ? (
-              <div className="card relative !p-3">
-                <div className="card-title flex items-center gap-1 text-xs">
-                  Carbon (12 mo)
-                  <span
-                    tabIndex={0}
-                    role="img"
-                    aria-label="An estimate of the carbon emissions from your energy use, based on your electricity and gas and a regional grid average. It reflects the typical mix of power in your area, not your specific plan. You can set your own electricity factor in Settings if you're on a green plan."
-                    title="An estimate of the carbon emissions from your energy use, based on your electricity and gas and a regional grid average. It reflects the typical mix of power in your area, not your specific plan. You can set your own electricity factor in Settings if you're on a green plan."
-                    className="inline-flex h-4 w-4 cursor-help items-center justify-center rounded-full border border-slate-600/70 text-[10px] font-semibold text-slate-400 transition hover:border-slate-400 hover:text-slate-200 focus:outline-none focus:ring-1 focus:ring-emerald-500/60"
-                  >
-                    i
-                  </span>
-                </div>
-                <div className="stat text-2xl">~{num(Math.round(ov.emissions.totalKg))}<span className="text-sm text-slate-500"> kg CO₂e</span></div>
-                <div className="sub mt-0.5 text-[11px] text-slate-500">
-                  ≈ {num(Math.round(ov.emissions.gallonsGasoline))} gal gas · {num(Math.round(ov.emissions.treeYears))} tree-yrs · estimate
-                </div>
-              </div>
-            ) : null}
-            {/* vs-last-year (normalized) card (issue #47): the always-visible fix
-                for the old density-hidden YoyPanel. Shows the weather-normalized
-                usage change for the latest month vs the same calendar month a year
-                ago, per fuel ("Elec +2% · Gas −5%"). Renders in BOTH densities (it
-                lives in this shared top strip). The number is the honest normalized
-                (intensity) change; the full breakdown lives in the Compare tool
-                below. Self-hides when no fuel has a prior-year match. */}
-            {showYoyCard ? (
-              // Clickable: opens the Tools modal straight to the Compare-periods
-              // tab for the full breakdown. role=button + keyboard activation so
-              // it's reachable without a mouse.
-              <div
-                role="button"
-                tabIndex={0}
-                onClick={() => openTools('compare')}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    openTools('compare');
-                  }
-                }}
-                className="card relative cursor-pointer !p-3 transition hover:border-slate-600 hover:bg-slate-800/60 focus:outline-none focus:ring-1 focus:ring-amber-500/60"
-              >
-                <div className="card-title flex items-center gap-1 text-xs">
-                  vs last year
-                  <span
-                    tabIndex={0}
-                    role="img"
-                    aria-label="How your energy use this month compares to the same month a year ago, after accounting for how hot or cold it was. This tells you whether you actually used more or less — not just whether it was a warmer or colder month. Open the Compare tool for the full breakdown and other date ranges. Not a real charge."
-                    title="How your energy use this month compares to the same month a year ago, after accounting for how hot or cold it was. This tells you whether you actually used more or less — not just whether it was a warmer or colder month. Open the Compare tool for the full breakdown and other date ranges. Not a real charge."
-                    className="inline-flex h-4 w-4 cursor-help items-center justify-center rounded-full border border-slate-600/70 text-[10px] font-semibold text-slate-400 transition hover:border-slate-400 hover:text-slate-200 focus:outline-none focus:ring-1 focus:ring-amber-500/60"
-                  >
-                    i
-                  </span>
-                </div>
-                <div className="stat flex items-baseline gap-2 text-2xl">
-                  {yoyCard?.elec ? (
-                    <span><span className="text-sm text-amber-400">Elec</span>{' '}
-                      <span className={yoyDeltaClass(yoyCard.elec.normalizedPct)}>{signedPct(yoyCard.elec.normalizedPct)}</span>
-                    </span>
-                  ) : null}
-                  {yoyCard?.gas ? (
-                    <span><span className="text-sm text-sky-400">Gas</span>{' '}
-                      <span className={yoyDeltaClass(yoyCard.gas.normalizedPct)}>{signedPct(yoyCard.gas.normalizedPct)}</span>
-                    </span>
-                  ) : null}
-                </div>
-                <div className="sub mt-0.5 text-[11px] text-slate-500">weather-adjusted vs last year · click to compare</div>
-              </div>
-            ) : null}
-            {/* Budget / annual-spend target (issue #46 redesign): the MERGED card.
-                Concise headline (projected year-end / target + a seasonally-fair
-                status) and a progress bar; CLICKABLE to open the Tools modal's
-                Budget tab with the month-by-month breakdown + projection context.
-                When NO target is set, a subtle "set a budget" affordance links to
-                Settings. The verbose detail lives in the tab; the ⓘ tooltip keeps
-                the disclaimer. All math is server-side (ov.budget). */}
-            {budget ? (() => {
-              const { spent, projected, projectedLow, projectedHigh, target, delta, status, window } = budget;
-              const statusColor =
-                status === 'over' ? 'text-rose-300' : status === 'under' ? 'text-emerald-300' : 'text-slate-200';
-              const statusLabel =
-                status === 'over' ? `over by ${usd(Math.abs(delta), 0)}`
-                  : status === 'under' ? `under by ${usd(Math.abs(delta), 0)}`
-                    : 'on track';
-              // Progress bar: spent (solid) + projected-remaining (lighter), as a
-              // fraction of max(target, projected) so an over-budget projection
-              // still fills the bar and overflows visibly into the rose tint.
-              const denom = Math.max(target, projected, 1);
-              const spentPct = Math.min(100, (spent / denom) * 100);
-              const remPct = Math.min(100 - spentPct, (Math.max(0, projected - spent) / denom) * 100);
-              const targetPct = Math.min(100, (target / denom) * 100);
-              const fromY = Math.floor(window.fromYm / 100);
-              return (
-                <div
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => openTools('budget')}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      e.preventDefault();
-                      openTools('budget');
-                    }
-                  }}
-                  className="card relative cursor-pointer !p-3 transition hover:border-slate-600 hover:bg-slate-800/60 focus:outline-none focus:ring-1 focus:ring-amber-500/60"
-                >
-                  <div className="card-title flex items-center gap-1 text-xs">
-                    Budget {fromY}
-                    <span
-                      tabIndex={0}
-                      role="img"
-                      aria-label={`You've spent ${usd(spent, 0)} of your ${usd(target, 0)} target for ${fromY} so far, and we expect about ${usd(projected, 0)} by year's end (range ${usd(projectedLow, 0)}–${usd(projectedHigh, 0)}). "Spent" adds up what you were actually charged for energy on this year's bills; the rest of the year is estimated. On-track vs. over budget accounts for winter naturally costing more. Click for the month-by-month breakdown, or set your target in Settings. Not a real charge.`}
-                      title={`You've spent ${usd(spent, 0)} of your ${usd(target, 0)} target for ${fromY} so far, and we expect about ${usd(projected, 0)} by year's end (range ${usd(projectedLow, 0)}–${usd(projectedHigh, 0)}). "Spent" adds up what you were actually charged for energy on this year's bills; the rest of the year is estimated. On-track vs. over budget accounts for winter naturally costing more. Click for the month-by-month breakdown, or set your target in Settings. Not a real charge.`}
-                      onClick={(e) => e.stopPropagation()}
-                      className="inline-flex h-4 w-4 cursor-help items-center justify-center rounded-full border border-slate-600/70 text-[10px] font-semibold text-slate-400 transition hover:border-slate-400 hover:text-slate-200 focus:outline-none focus:ring-1 focus:ring-amber-500/60"
-                    >
-                      i
-                    </span>
-                  </div>
-                  <div className="stat text-2xl">
-                    ~{usd(projected, 0)}<span className="text-sm text-slate-500"> / {usd(target, 0)}</span>
-                  </div>
-                  {/* Progress bar: spent solid, projected-remaining lighter, with a
-                      target tick. Overflows into a rose tint when over budget. */}
-                  <div className="relative mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-slate-800">
-                    <div className="absolute inset-y-0 left-0 flex">
-                      <div className={status === 'over' ? 'bg-rose-500/80' : 'bg-amber-400'} style={{ width: `${spentPct}%` }} />
-                      <div className={status === 'over' ? 'bg-rose-400/40' : 'bg-amber-400/35'} style={{ width: `${remPct}%` }} />
-                    </div>
-                    <div className="absolute inset-y-0 w-px bg-slate-300/80" style={{ left: `${targetPct}%` }} />
-                  </div>
-                  <div className={`sub mt-0.5 text-[11px] ${statusColor}`}>
-                    {statusLabel} · click for breakdown
-                  </div>
-                </div>
-              );
-            })() : null}
+            {visibleStats.map((s) => (
+              // Fragment (not a wrapper div) so each card stays a DIRECT grid
+              // child exactly as before — no extra DOM node that would break the
+              // grid layout or the `[&_.card]` density overrides.
+              <Fragment key={s.id}>{getWidget(statWidgetType(s.id)).render(widgetHost(fit))}</Fragment>
+            ))}
           </div>
 
           {/* Subtle "set a budget" affordance (issue #46) when no target is set —
@@ -663,9 +500,11 @@ export function Dashboard() {
               <div className="flex min-h-0 flex-col gap-2">
                 <div className="grid min-h-0 flex-1 grid-cols-2 gap-2">
                   {pagedCharts.map((id) => (
-                    <div key={id}>
-                      <ConfigurableChart spec={specFor(id)} rows={chartRows(id)} fill height={288} />
-                    </div>
+                    // Chart-widgets (Phase A, #93): the registry render wraps the
+                    // SAME ConfigurableChart with the SAME specFor/chartRows
+                    // adapters — output is byte-identical. The paginated fit grid
+                    // always fills (fill=true), as before.
+                    <div key={id}>{getWidget(chartWidgetType(id)).render(widgetHost(true))}</div>
                   ))}
                 </div>
                 {showPager && (
@@ -675,8 +514,10 @@ export function Dashboard() {
             ) : (
               <div className={`grid min-h-0 grid-cols-1 gap-3 md:grid-cols-2 ${fit ? 'xl:gap-2' : ''}`}>
                 {visibleCharts.map((id) => (
+                  // Classic stacking grid: the chart-widget fills only in fit
+                  // density (fill={fit}), exactly as the old call site did.
                   <div key={id} className={fit ? '' : 'min-h-[18rem]'}>
-                    <ConfigurableChart spec={specFor(id)} rows={chartRows(id)} fill={fit} height={288} />
+                    {getWidget(chartWidgetType(id)).render(widgetHost(fit))}
                   </div>
                 ))}
               </div>
