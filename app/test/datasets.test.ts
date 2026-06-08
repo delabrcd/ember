@@ -94,10 +94,10 @@ describe('vizType → renderer registry (Phase B)', () => {
     expect(typeof getVizRenderer('timeseries')).toBe('function');
   });
 
-  it('has NO renderer for the Phase-C vizTypes yet (declared, not implemented)', () => {
+  it('resolves a renderer for the Phase-C vizTypes too (registered in #95)', () => {
     for (const v of ['scatter', 'heatmap', 'profile'] as const) {
-      expect(hasVizRenderer(v)).toBe(false);
-      expect(() => getVizRenderer(v)).toThrow(/No renderer registered/);
+      expect(hasVizRenderer(v)).toBe(true);
+      expect(typeof getVizRenderer(v)).toBe('function');
     }
   });
 

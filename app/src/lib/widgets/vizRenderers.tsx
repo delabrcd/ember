@@ -14,6 +14,7 @@
 import type { ReactNode } from 'react';
 import type { MonthRow, VizSpec } from '@/lib/chartSpec';
 import { ConfigurableChart } from '@/components/ConfigurableChart';
+import { HeatmapViz, ProfileViz, ScatterViz } from '@/components/widgets/VizCharts';
 
 // What every viz renderer is handed: the spec (its concrete vizType variant),
 // the host-resolved rows for the spec's `dataset`, and the same fill/height
@@ -43,12 +44,38 @@ const renderTimeseries: VizRenderer = ({ spec, rows, fill, height }) => {
   return <ConfigurableChart spec={spec} rows={rows as MonthRow[]} fill={fill} height={height} />;
 };
 
-// The registry. Only `'timeseries'` is implemented in Phase B; the other
-// vizTypes are intentionally absent (no renderer yet — Phase C). `getVizRenderer`
-// throws on an unregistered vizType so an unimplemented viz fails loudly rather
-// than rendering nothing.
+// The Phase C renderers (issue #95): scatter / profile (Recharts) + heatmap
+// (dependency-free SVG). Each narrows the union to its variant (guaranteed by
+// the registry routing on `vizType`) and hands the spec + rows to the matching
+// declarative component (components/widgets/VizCharts). `rows` is `unknown[]` at
+// the boundary; the component is generic over `Row`, so we pass it straight
+// through — the encoding's `keyof Row` is what makes the field reads type-safe at
+// the spec's definition site (e.g. the demo specs), not here.
+const renderScatter: VizRenderer = ({ spec, rows, height }) => {
+  if (spec.vizType !== 'scatter') throw new Error(`scatter renderer got a '${spec.vizType}' spec`);
+  return <ScatterViz spec={spec} rows={rows} height={height} />;
+};
+
+const renderHeatmap: VizRenderer = ({ spec, rows, height }) => {
+  if (spec.vizType !== 'heatmap') throw new Error(`heatmap renderer got a '${spec.vizType}' spec`);
+  return <HeatmapViz spec={spec} rows={rows} height={height} />;
+};
+
+const renderProfile: VizRenderer = ({ spec, rows, height }) => {
+  if (spec.vizType !== 'profile') throw new Error(`profile renderer got a '${spec.vizType}' spec`);
+  return <ProfileViz spec={spec} rows={rows} height={height} />;
+};
+
+// The registry. As of Phase C all four vizTypes resolve. `getVizRenderer` still
+// throws on an unregistered vizType so a future miswire fails loudly rather than
+// rendering nothing. The scatter/heatmap/profile entries are NOT added to
+// CHART_SPECS / the default dashboard — they're reached only via the demo gallery
+// (and, later, the AMI interval widgets), so the real dashboard is unchanged.
 const VIZ_RENDERERS: Partial<Record<VizSpec['vizType'], VizRenderer>> = {
   timeseries: renderTimeseries,
+  scatter: renderScatter,
+  heatmap: renderHeatmap,
+  profile: renderProfile,
 };
 
 export function getVizRenderer(vizType: VizSpec['vizType']): VizRenderer {

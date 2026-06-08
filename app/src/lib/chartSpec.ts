@@ -103,27 +103,104 @@ export interface TimeseriesVizSpec extends VizBase<MonthRow> {
   filter: (r: MonthRow) => boolean;
 }
 
-// The DECLARED-BUT-UNIMPLEMENTED vizTypes (RFC §3.2). They exist so the type
-// seam and the `vizType → renderer` registry (lib/widgets/vizRenderers) are real
-// now; their renderers + encoding shapes land in Phase C (issue #95) when the
-// AMI interval cluster needs them. Each carries a placeholder `encoding` so the
-// union is structurally distinct and future-typed without committing to the
-// exact shape yet. NOT rendered in Phase B.
-export interface ScatterVizSpec extends VizBase<unknown> {
+// ---------------------------------------------------------------------------
+// Phase C (issue #95; RFC §3.2 + Decision 3) — the three new vizTypes.
+//
+// Each `encoding` is a THIN, typed mapping of "which field of the dataset row
+// plays which visual role" — NOT a grammar-of-graphics (Decision 3 explicitly
+// rejects Vega-Lite). The renderer reads these field names off the rows; the
+// PURE aggregation that turns rows → drawable points/grid/buckets lives in
+// lib/viz/aggregate.ts and is hand-calc unit-tested. The spec just says WHAT to
+// encode; the lib says HOW to aggregate; the renderer just draws the result.
+//
+// `Row` is generic so a spec is typed against the real fields of whatever
+// dataset it declares: scatter-over-`monthly` keys on `MonthRow` fields
+// (kwh/avgTemp/…); the interval-grain heatmap/profile key on the synthetic
+// sample row (lib/viz/sampleInterval.ts) until the real `IntervalUsage` (#76)
+// lands — at which point only the `dataset`/`Row` change, not the encoding shape.
+// ---------------------------------------------------------------------------
+
+// A dataset row, for the PURE aggregators, is a string-keyed record (they read
+// the encoded field by its string name). `MonthRow`/the sample row are read this
+// way at the renderer boundary. Defined here so aggregate.ts shares one name.
+export type VizRow = Record<string, unknown>;
+
+// The numeric-valued fields of `Row` — the only valid targets for an axis / a
+// color scale (you can't put a label on a numeric axis). For a CONCRETE `Row`
+// this resolves to a UNION OF STRING LITERALS (the numeric field names), so
+// picking a non-numeric field at a spec's definition site is a compile error.
+// (At the registry boundary the specs are instantiated at `Row = any` — see the
+// `*VizSpec` defaults below — where this is permissive, which is the point: the
+// renderer doesn't know the row type and just dispatches on `vizType`.)
+export type NumericKey<Row> = {
+  [K in keyof Row]-?: Row[K] extends number | null | undefined ? K : never;
+}[keyof Row];
+
+// Any field of `Row` — for display-only roles like a tooltip label.
+export type FieldKey<Row> = keyof Row;
+
+// SCATTER — a cloud of (x, y) points over a dataset's rows. The canonical demo
+// is usage (kWh) vs avg temperature over `monthly`. Optional `label` names a row
+// field used for the point's tooltip; optional `color` is the dot color (a
+// single series for v1 — multi-series scatter is a later, additive change).
+export interface ScatterEncoding<Row> {
+  x: NumericKey<Row>;
+  y: NumericKey<Row>;
+  label?: FieldKey<Row>; // row field shown in the tooltip (e.g. the month label)
+  color?: string; // dot color; defaults to the elec amber token in the renderer
+  xLabel?: string; // axis title override (defaults to the field name)
+  yLabel?: string;
+}
+export interface ScatterVizSpec<Row = any> extends VizBase<Row> {
   vizType: 'scatter';
-  encoding?: unknown;
+  encoding: ScatterEncoding<Row>;
 }
-export interface HeatmapVizSpec extends VizBase<unknown> {
+
+// HEATMAP — a 2-D binned grid. The canonical use (AMI #77) is hour-of-day (x)
+// × day/date (y) with a usage `value` colored by magnitude. `x`/`y` name the
+// numeric bin fields on the row (e.g. `hour` 0–23 and `day` 0–N); `value` is the
+// field aggregated (mean) into each cell. The renderer maps value → color via a
+// min/max scale the aggregator computes (so the scale is data-driven, not magic).
+export interface HeatmapEncoding<Row> {
+  x: NumericKey<Row>; // column bin (e.g. hour-of-day)
+  y: NumericKey<Row>; // row bin (e.g. day index / date)
+  value: NumericKey<Row>; // the magnitude colored per cell
+  // Optional row field holding a DISPLAY label for each y bin (e.g. a `dayLabel`
+  // → 'Mon'). Display only — the binning/aggregation stays purely numeric on `y`;
+  // the renderer uses this just to label rows. Multiple rows in a y bin are
+  // assumed to share the label (the first seen wins).
+  yLabelField?: FieldKey<Row>;
+  xLabel?: string;
+  yLabel?: string;
+  valueLabel?: string; // legend/tooltip name for the value (e.g. 'kWh')
+}
+export interface HeatmapVizSpec<Row = any> extends VizBase<Row> {
   vizType: 'heatmap';
-  encoding?: unknown;
+  encoding: HeatmapEncoding<Row>;
 }
-export interface ProfileVizSpec extends VizBase<unknown> {
+
+// PROFILE — an hour-of-day (or period-of-day) LOAD PROFILE: rows are bucketed by
+// a `bucket` field (e.g. `hour` 0–23) and the `value` field is aggregated within
+// each bucket (mean or median) to a single curve, optionally with a shaded
+// spread band (±1 std-dev) showing how variable each hour is. This is the
+// "typical day" shape #77 wants.
+export interface ProfileEncoding<Row> {
+  bucket: NumericKey<Row>; // the period field rows are grouped by (e.g. hour 0–23)
+  value: NumericKey<Row>; // the field averaged within each bucket
+  agg?: 'mean' | 'median'; // central tendency per bucket (default 'mean')
+  band?: boolean; // draw a ±1σ spread band around the curve (default false)
+  valueLabel?: string;
+  bucketLabel?: string;
+}
+export interface ProfileVizSpec<Row = any> extends VizBase<Row> {
   vizType: 'profile';
-  encoding?: unknown;
+  encoding: ProfileEncoding<Row>;
 }
 
 // A visualization over a typed dataset (RFC §3.2). The discriminant is
-// `vizType`; only `'timeseries'` is fully specified in Phase B.
+// `vizType`. As of Phase C all four are specified; the new three default their
+// `Row` to `unknown` here so the union stays a simple closed set the registry
+// can switch on — a concrete spec (e.g. the demo specs) supplies its real `Row`.
 export type VizSpec =
   | TimeseriesVizSpec
   | ScatterVizSpec
