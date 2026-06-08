@@ -1,18 +1,16 @@
 'use client';
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
-import { CHART_SPECS } from './chartSpec';
 import { mergeOrder, mergeRange } from './cockpit';
 import { DEFAULT_RANGE, type RangePref } from './range';
+import { DEFAULT_CHART_CONFIG, DEFAULT_CHART_ORDER, type ChartConfig } from './chartConfig';
 
-export interface ChartConfig {
-  visible: boolean;
-  hidden: string[]; // hidden series keys
-  type: 'bar' | 'line' | 'area'; // applies to bar-role series
-  stacked: boolean;
-  leftScale: 'linear' | 'log';
-  rightScale: 'linear' | 'log';
-}
+// `ChartConfig` + the chart defaults now live in the PURE, server-safe
+// lib/chartConfig.ts so the Phase D layout route (a server module) can read the
+// defaults without dotting into this 'use client' module. Re-exported here so
+// the 30+ existing `import { ChartConfig } from '@/lib/prefs'` sites are
+// unchanged.
+export type { ChartConfig };
 
 // Density of the cockpit layout (issue #2). 'fit' packs the main view into a
 // 16:9 desktop viewport with no page scroll (vh-based chart heights); 'comfortable'
@@ -52,16 +50,6 @@ export interface Prefs {
   showReadNotifications: boolean;
 }
 
-const baseChart = (over: Partial<ChartConfig> = {}): ChartConfig => ({
-  visible: true,
-  hidden: [],
-  type: 'bar',
-  stacked: true,
-  leftScale: 'linear',
-  rightScale: 'linear',
-  ...over,
-});
-
 export const DEFAULT_PREFS: Prefs = {
   range: DEFAULT_RANGE,
   currencyDecimals: 2,
@@ -71,19 +59,17 @@ export const DEFAULT_PREFS: Prefs = {
   selectedAccountId: null,
   dismissedNotifications: [],
   showReadNotifications: false,
-  order: CHART_SPECS.map((s) => s.id),
-  charts: {
-    usage: baseChart({ stacked: false }),
-    cost: baseChart({ stacked: true }),
-    rates: baseChart({ type: 'line' }),
-    weather: baseChart({ stacked: false }),
-    degreeDays: baseChart({ stacked: false }),
-    normalized: baseChart({ type: 'line' }),
-    emissions: baseChart({ stacked: false }),
-  },
+  // Chart order + per-chart config defaults come from the shared, server-safe
+  // lib/chartConfig.ts (the same source the Phase D server layout default uses).
+  order: DEFAULT_CHART_ORDER,
+  charts: DEFAULT_CHART_CONFIG,
 };
 
-const KEY = 'ngrid-prefs-v1';
+// Exported so the Phase D one-time localStorage→server layout import
+// (useDashboardLayout) reads the SAME v1 blob this provider persists, rather
+// than hardcoding the key in two places.
+export const PREFS_KEY = 'ngrid-prefs-v1';
+const KEY = PREFS_KEY;
 
 export function mergePrefs(
   saved: (Partial<Prefs> & { rangeMonths?: number; showProjection?: boolean }) | null

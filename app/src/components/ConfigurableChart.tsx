@@ -193,18 +193,27 @@ export function ConfigurableChart({
   rows,
   fill = false,
   height = 288,
+  config: configProp,
+  onConfigChange,
 }: {
   spec: ChartSpec;
   rows: MonthRow[];
   fill?: boolean;
   height?: number;
+  // Phase D (#96): the dashboard now sources a chart's config from the SERVER
+  // layout and supplies it (plus a write-back) here, so the in-chart Customize
+  // popover persists to the server. When omitted (e.g. the demo gallery), we fall
+  // back to the localStorage prefs config + prefs.updateChart, as before — so
+  // this component renders byte-identically whichever side owns the config.
+  config?: ChartConfig;
+  onConfigChange?: (c: Partial<ChartConfig>) => void;
 }) {
   const { prefs, updateChart } = usePrefs();
-  const config = prefs.charts[spec.id];
+  const config = configProp ?? prefs.charts[spec.id];
   const [menu, setMenu] = useState(false);
   const [expand, setExpand] = useState(false);
   if (!config) return null;
-  const onChange = (c: Partial<ChartConfig>) => updateChart(spec.id, c);
+  const onChange = (c: Partial<ChartConfig>) => (onConfigChange ?? ((cc) => updateChart(spec.id, cc)))(c);
 
   return (
     <div className={`card relative ${fill ? 'flex flex-col !p-2.5' : ''}`}>

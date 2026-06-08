@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 import { SPEC_BY_ID } from '@/lib/chartSpec';
 import { usePrefs } from '@/lib/prefs';
+import { useDashboardLayout } from './useDashboardLayout';
 import { resolveSelectedAccountId, type AccountSummary } from '@/lib/accountSwitcher';
 import { resolveRange, ymOfDate, ymdToYm } from '@/lib/range';
 import { dateLabel, relativeFromNow } from '@/lib/format';
@@ -54,7 +55,7 @@ function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean
 }
 
 export function SettingsView() {
-  const { prefs, patch, setRange, updateChart, reset } = usePrefs();
+  const { prefs, loaded, patch, setRange, reset } = usePrefs();
   const [server, setServer] = useState<ServerSettings | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
   const [accounts, setAccounts] = useState<AccountSummary[]>([]);
@@ -102,6 +103,16 @@ export function SettingsView() {
   // persisted selection against the live list (a stale id is ignored → default
   // account); only a real, non-default selection adds a query param.
   const selectedAccountId = resolveSelectedAccountId(accounts, prefs.selectedAccountId);
+
+  // Server-side dashboard DEFINITION (Phase D, #96). The "Charts shown & order"
+  // editor below now reads/writes the SERVER layout (per account) instead of the
+  // localStorage prefs.{order,charts}. Scoped to the same resolved account as the
+  // exports; gated on prefs `loaded` so the first fetch targets the persisted
+  // selection. updateChart toggles a chart's visibility; reorder moves it.
+  const { layout, layoutLoading, updateChart: updateLayoutChart, reorder } = useDashboardLayout(
+    selectedAccountId,
+    loaded
+  );
 
   // The selected date range scopes the CSV exports too (issue #24), matching the
   // dashboard. We only know the account's first/last statement here, which is all
@@ -325,38 +336,49 @@ export function SettingsView() {
           </div>
         </div>
 
+        {/* Charts shown & order (Phase D, #96): this now edits the SERVER layout
+            (per account, persisted across browsers/devices) rather than the
+            localStorage prefs. Toggling visibility / moving a chart PUTs the
+            change back through the layout hook. We show a skeleton while it
+            loads so the list isn't a flash of the default order. The per-chart
+            series/type/axes customization still lives on the dashboard chart's
+            Customize button (also server-backed now). */}
         <div>
           <div className="text-sm font-medium text-slate-200">Charts shown &amp; order</div>
-          <div className="mb-2 text-xs text-slate-500">Toggle visibility and reorder the dashboard charts (customize each chart&apos;s series, type, and axes from its <span className="text-slate-300">Customize</span> button on the dashboard)</div>
-          <ul className="space-y-1.5">
-            {prefs.order.map((id, i) => {
-              const spec = SPEC_BY_ID[id];
-              if (!spec) return null;
-              const on = prefs.charts[id]?.visible;
-              const move = (delta: number) => {
-                const next = [...prefs.order];
-                const j = i + delta;
-                if (j < 0 || j >= next.length) return;
-                [next[i], next[j]] = [next[j], next[i]];
-                patch({ order: next });
-              };
-              return (
-                <li key={id} className="flex items-center justify-between gap-2 rounded-lg border border-slate-800/70 bg-slate-800/30 px-3 py-1.5">
-                  <button onClick={() => updateChart(id, { visible: !on })}
-                    className={`flex items-center gap-2 text-sm ${on ? 'text-slate-100' : 'text-slate-500'}`}>
-                    <span className={`inline-block h-3 w-3 rounded-full border ${on ? 'border-amber-500 bg-amber-500' : 'border-slate-600'}`} />
-                    {spec.title}
-                  </button>
-                  <div className="flex items-center gap-1">
-                    <button onClick={() => move(-1)} disabled={i === 0} title="Move up"
-                      className="rounded border border-slate-700/70 bg-slate-800/40 px-1.5 py-0.5 text-slate-300 transition hover:bg-slate-700 disabled:opacity-30">↑</button>
-                    <button onClick={() => move(1)} disabled={i === prefs.order.length - 1} title="Move down"
-                      className="rounded border border-slate-700/70 bg-slate-800/40 px-1.5 py-0.5 text-slate-300 transition hover:bg-slate-700 disabled:opacity-30">↓</button>
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
+          <div className="mb-2 text-xs text-slate-500">Toggle visibility and reorder the dashboard charts (customize each chart&apos;s series, type, and axes from its <span className="text-slate-300">Customize</span> button on the dashboard). Saved to your account.</div>
+          {layoutLoading || !layout ? (
+            <div className="text-xs text-slate-500">Loading…</div>
+          ) : (
+            <ul className="space-y-1.5">
+              {layout.order.map((id, i) => {
+                const spec = SPEC_BY_ID[id];
+                if (!spec) return null;
+                const on = layout.widgetConfig[id]?.visible;
+                const move = (delta: number) => {
+                  const next = [...layout.order];
+                  const j = i + delta;
+                  if (j < 0 || j >= next.length) return;
+                  [next[i], next[j]] = [next[j], next[i]];
+                  reorder(next);
+                };
+                return (
+                  <li key={id} className="flex items-center justify-between gap-2 rounded-lg border border-slate-800/70 bg-slate-800/30 px-3 py-1.5">
+                    <button onClick={() => updateLayoutChart(id, { visible: !on })}
+                      className={`flex items-center gap-2 text-sm ${on ? 'text-slate-100' : 'text-slate-500'}`}>
+                      <span className={`inline-block h-3 w-3 rounded-full border ${on ? 'border-amber-500 bg-amber-500' : 'border-slate-600'}`} />
+                      {spec.title}
+                    </button>
+                    <div className="flex items-center gap-1">
+                      <button onClick={() => move(-1)} disabled={i === 0} title="Move up"
+                        className="rounded border border-slate-700/70 bg-slate-800/40 px-1.5 py-0.5 text-slate-300 transition hover:bg-slate-700 disabled:opacity-30">↑</button>
+                      <button onClick={() => move(1)} disabled={i === layout.order.length - 1} title="Move down"
+                        className="rounded border border-slate-700/70 bg-slate-800/40 px-1.5 py-0.5 text-slate-300 transition hover:bg-slate-700 disabled:opacity-30">↓</button>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
         </div>
 
         <button onClick={reset} className="btn border border-slate-700/70 bg-slate-800/40 text-xs text-slate-300 hover:bg-slate-700">

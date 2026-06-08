@@ -13,6 +13,7 @@
 
 import type { ReactNode } from 'react';
 import type { MonthRow, VizSpec } from '@/lib/chartSpec';
+import type { ChartConfig } from '@/lib/prefs';
 import { ConfigurableChart } from '@/components/ConfigurableChart';
 import { HeatmapViz, ProfileViz, ScatterViz } from '@/components/widgets/VizCharts';
 
@@ -27,6 +28,12 @@ export interface VizRenderProps {
   rows: unknown[];
   fill: boolean;
   height: number;
+  // Phase D (#96), timeseries only: an externally-supplied per-chart config +
+  // write-back. When present, ConfigurableChart reads/writes THIS (the server
+  // layout) instead of localStorage prefs; when absent it falls back to prefs
+  // (the demo gallery path). The other renderers ignore these.
+  config?: ChartConfig;
+  onConfigChange?: (c: Partial<ChartConfig>) => void;
 }
 
 type VizRenderer = (props: VizRenderProps) => ReactNode;
@@ -35,13 +42,22 @@ type VizRenderer = (props: VizRenderProps) => ReactNode;
 // layout exactly as Dashboard's old call sites did. The spec is narrowed to the
 // timeseries variant (and rows to `MonthRow[]`) — guaranteed by the registry
 // only routing a `'timeseries'` spec here.
-const renderTimeseries: VizRenderer = ({ spec, rows, fill, height }) => {
+const renderTimeseries: VizRenderer = ({ spec, rows, fill, height, config, onConfigChange }) => {
   if (spec.vizType !== 'timeseries') {
     // Unreachable in Phase B (the registry routes by vizType); a defensive guard
     // so a future miswire is a loud error, not a silently mis-rendered chart.
     throw new Error(`timeseries renderer got a '${spec.vizType}' spec`);
   }
-  return <ConfigurableChart spec={spec} rows={rows as MonthRow[]} fill={fill} height={height} />;
+  return (
+    <ConfigurableChart
+      spec={spec}
+      rows={rows as MonthRow[]}
+      fill={fill}
+      height={height}
+      config={config}
+      onConfigChange={onConfigChange}
+    />
+  );
 };
 
 // The Phase C renderers (issue #95): scatter / profile (Recharts) + heatmap

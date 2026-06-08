@@ -22,6 +22,7 @@ import type { DatasetId, DatasetResolver } from '@/lib/datasets';
 import { getVizRenderer } from '@/lib/widgets/vizRenderers';
 import { STAT_SPECS, type StatData, type StatSpec } from '@/lib/widgets/statSpec';
 import { BudgetStatCard, StatCard, YoyStatCard } from '@/components/widgets/StatCard';
+import type { ChartConfig } from '@/lib/prefs';
 import type { ToolsTab } from '@/components/ToolsModal';
 
 // The host context every widget render can read.
@@ -46,6 +47,15 @@ export interface WidgetHost {
   specFor: (id: string) => ChartSpec;
   chartFill: boolean;
   chartHeight: number;
+  // Per-chart config + its write-back (Phase D, #96). The dashboard now sources a
+  // chart's config (hidden series / type / stacked / scales / visibility) from
+  // the SERVER layout (useDashboardLayout) rather than letting ConfigurableChart
+  // read it from localStorage prefs. The host hands the chart its config and an
+  // onChange that PUTs the edit back, so the in-chart "Customize" popover persists
+  // to the server. Optional so non-dashboard callers (the demo gallery) can omit
+  // them and ConfigurableChart falls back to its prefs-backed config, unchanged.
+  configFor?: (id: string) => ChartConfig | undefined;
+  onChartChange?: (id: string, c: Partial<ChartConfig>) => void;
   // Stat inputs.
   statData: StatData;
   openTools: (tab: ToolsTab) => void;
@@ -91,6 +101,12 @@ function chartWidget(spec: ChartSpec): WidgetDef {
         rows,
         fill: host.chartFill,
         height: host.chartHeight,
+        // Phase D (#96): when the host supplies a server-backed config + write-back
+        // for this chart, thread them to the renderer so the chart reads/writes the
+        // SERVER layout instead of localStorage. Omitted → ConfigurableChart keeps
+        // its prefs-backed behavior (the demo gallery path).
+        config: host.configFor?.(spec.id),
+        onConfigChange: host.onChartChange ? (c) => host.onChartChange!(spec.id, c) : undefined,
       });
     },
   };

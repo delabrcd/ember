@@ -7,6 +7,7 @@ import type { AnomalyResult } from '@/lib/anomaly';
 import { resolveSelectedAccountId, type AccountSummary } from '@/lib/accountSwitcher';
 import { usePrefs } from '@/lib/prefs';
 import { useScrapeProgress } from './ScrapeProgress';
+import { useDashboardLayout, type DashboardLayoutState } from './useDashboardLayout';
 import type { RunStatus, ProgressRun } from '@/lib/ngrid/progress';
 
 export interface Overview {
@@ -106,6 +107,12 @@ export interface DashboardData {
   // Action callbacks the component wires to buttons.
   load: () => Promise<void>;
   loadLogins: () => Promise<void>;
+  // Server-side, per-account dashboard DEFINITION (Phase D, #96): chart order +
+  // per-chart config + visibility, loaded async with its own skeleton flag and
+  // re-fetched when the selected account changes. The component reads order/
+  // config from here (instead of prefs.charts/prefs.order) and writes edits back
+  // through its mutators. See useDashboardLayout for the prefs.tsx↔server split.
+  dashboardLayout: DashboardLayoutState;
 }
 
 // Owns the dashboard's three independent fetch lifecycles plus the live
@@ -206,6 +213,12 @@ export function useDashboardData(): DashboardData {
   });
   const scraping = progressRun?.status === 'RUNNING';
 
+  // Server-side dashboard definition (Phase D, #96). Scoped to the SAME resolved
+  // selection as the data fetches and gated on the same `loaded` flag, so its
+  // first fetch already targets the persisted account and it re-fetches on an
+  // account switch (layouts are per-account).
+  const dashboardLayout = useDashboardLayout(selectedAccountId, loaded);
+
   // Retry from the error banner: kick a fresh scrape and adopt it. Mirrors the
   // Refresh button's POST so the banner can recover without a page reload.
   const retryScrape = useCallback(async () => {
@@ -236,5 +249,6 @@ export function useDashboardData(): DashboardData {
     retryScrape,
     load,
     loadLogins,
+    dashboardLayout,
   };
 }

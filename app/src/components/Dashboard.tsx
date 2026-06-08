@@ -71,7 +71,16 @@ export function Dashboard() {
     retryScrape,
     load,
     loadLogins,
+    dashboardLayout,
   } = useDashboardData();
+  // Server-side dashboard DEFINITION (Phase D, #96): the chart order, per-chart
+  // config, and visibility now live on the server (per account), loaded async.
+  // While it's loading we render a skeleton for the chart region (see below) so
+  // there's NO first-paint flash of the default order/config snapping to the
+  // user's saved one — the old localStorage path was synchronous and never
+  // flashed, so this preserves that. `layout` is null until the first fetch
+  // resolves; we guard the chart reads on it.
+  const { layout, layoutLoading, updateChart: updateLayoutChart, reorder } = dashboardLayout;
 
   const groups = buildAccountGroups(accounts);
   const showSwitcher = hasMultipleAccounts(accounts);
@@ -135,7 +144,13 @@ export function Dashboard() {
   const csvScope = `&from=${resolved.fromYm}&to=${resolved.toYm}${acctQuery}`;
   const pdfScope = `?from=${ymToYmd(resolved.fromYm)}&to=${ymToLastYmd(resolved.toYm)}${acctQuery}`;
 
-  const visibleCharts = prefs.order.filter((id) => prefs.charts[id]?.visible && SPEC_BY_ID[id]);
+  // The visible charts, IN ORDER, now come from the SERVER layout (Phase D, #96)
+  // — same filter as before (visible flag + a known spec), just sourced from
+  // `layout.{order,widgetConfig}` instead of `prefs.{order,charts}`. Empty while
+  // the layout is still loading so we render the skeleton, not a stale set.
+  const visibleCharts = layout
+    ? layout.order.filter((id) => layout.widgetConfig[id]?.visible && SPEC_BY_ID[id])
+    : [];
   const fit = prefs.density === 'fit';
 
   // Budget / annual-spend target card (issue #46). The redesign merges the old
@@ -195,6 +210,12 @@ export function Dashboard() {
     specFor,
     chartFill,
     chartHeight: 288,
+    // Phase D (#96): a chart's config now comes from the SERVER layout and its
+    // in-chart Customize edits write back through the layout hook (optimistic +
+    // PUT). `layout` is non-null wherever charts render (we gate on it below), so
+    // configFor resolves the saved config; updateLayoutChart persists the change.
+    configFor: (id) => layout?.widgetConfig[id],
+    onChartChange: updateLayoutChart,
     statData,
     openTools,
   });
@@ -498,7 +519,21 @@ export function Dashboard() {
                 FILL_BODY_CLASSES so the two rows add up to the viewport with no
                 page scroll — and a prev/next + dots pager sits below. Everywhere
                 else it's the classic scrolling stack of every visible chart. */}
-            {visibleCharts.length === 0 ? (
+            {layoutLoading || !layout ? (
+              // SKELETON (Phase D, #96): the chart DEFINITION (order/config/
+              // visibility) loads async from the server, so we hold a neutral
+              // skeleton card here until it resolves — never a flash of the default
+              // layout that snaps to the user's saved one (the old localStorage
+              // path was synchronous and never flashed; this preserves that). The
+              // surrounding chrome (header, stat strip, range, bills rail) is
+              // unaffected — only the chart region waits on the layout.
+              <div className="card flex min-h-[18rem] items-center justify-center text-sm text-slate-500">
+                <span className="inline-flex items-center gap-2">
+                  <span className="h-2 w-2 animate-pulse rounded-full bg-slate-600" />
+                  Loading your dashboard…
+                </span>
+              </div>
+            ) : visibleCharts.length === 0 ? (
               <div className="card text-sm text-slate-400">
                 All charts are hidden. Enable them in <Link href="/settings" className="text-amber-400">Settings</Link>.
               </div>
