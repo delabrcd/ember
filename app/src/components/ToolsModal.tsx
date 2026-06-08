@@ -16,12 +16,16 @@
 import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { MonthRow } from '@/lib/chartSpec';
+import type { BudgetResult } from '@/lib/series';
+import type { SeasonProjection } from '@/lib/prediction';
 import { ComparePeriods } from './ComparePeriods';
 import { SupplyWhatIf } from './SupplyWhatIf';
+import { BudgetTab } from './BudgetTab';
 
-export type ToolsTab = 'compare' | 'whatif';
+export type ToolsTab = 'budget' | 'compare' | 'whatif';
 
 const TABS: { value: ToolsTab; label: string }[] = [
+  { value: 'budget', label: 'Budget' },
   { value: 'compare', label: 'Compare periods' },
   { value: 'whatif', label: 'Supply what-if' },
 ];
@@ -32,17 +36,23 @@ export function ToolsModal({
   initialTab = 'compare',
   rows,
   rangedRows,
+  budget,
+  seasonProjection,
   currencyDecimals,
 }: {
   open: boolean;
   onClose: () => void;
-  // The tab the modal opens to (the vs-last-year card opens straight to Compare).
+  // The tab the modal opens to (the vs-last-year card opens straight to Compare,
+  // the Budget card straight to Budget).
   initialTab?: ToolsTab;
   // ComparePeriods works over the full series (it does its own preset windowing);
   // SupplyWhatIf back-tests the on-screen range — same split as the old inline
-  // renders, so behaviour is unchanged.
+  // renders, so behaviour is unchanged. The Budget tab needs the full series for
+  // month actuals plus the headline BudgetResult and the seasonal projection.
   rows: MonthRow[];
   rangedRows: MonthRow[];
+  budget: BudgetResult | null;
+  seasonProjection: SeasonProjection | null;
   currencyDecimals: number;
 }) {
   const [mounted, setMounted] = useState(false);
@@ -107,7 +117,14 @@ export function ToolsModal({
         {/* Active tool. The tools render their own card chrome; the body scrolls
             internally when a tool runs long. */}
         <div className="min-h-0 flex-1 overflow-y-auto p-4">
-          {tab === 'compare' ? (
+          {tab === 'budget' ? (
+            <BudgetTab
+              rows={rows}
+              budget={budget}
+              seasonProjection={seasonProjection}
+              currencyDecimals={currencyDecimals}
+            />
+          ) : tab === 'compare' ? (
             <ComparePeriods rows={rows} currencyDecimals={currencyDecimals} />
           ) : (
             <SupplyWhatIf rows={rangedRows} currencyDecimals={currencyDecimals} />

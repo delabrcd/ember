@@ -96,13 +96,13 @@ export function Dashboard() {
   // dashed line connects to the solid history. It deliberately ignores the date
   // range (a forward projection is always shown in full). Charts that don't
   // declare a proj* series drop these rows via their own filter.
-  // The projection display prefs (issue #71) gate the feature in two independent
-  // halves: `seasonCharts` drives the dashed forward series + per-chart spec
-  // filtering, while `seasonCard` drives the "Proj. next 12 mo" summary card.
-  // Either being null means that half is hidden (the `?? null` also covers the
-  // case where the server simply has no projection to show).
+  // The chart-projection pref (issue #71) gates the dashed forward series + the
+  // per-chart spec filtering. (The old "Proj. next 12 mo" summary card, gated by
+  // the separate showProjectionCard pref, was merged into the Budget card → Budget
+  // tab — its annual total now lives in that tool, always available regardless of
+  // this chart toggle.) null means the series is hidden (the `?? null` also covers
+  // the case where the server simply has no projection to show).
   const seasonCharts = prefs.showProjectionOnCharts ? (ov?.seasonProjection ?? null) : null;
-  const seasonCard = prefs.showProjectionCard ? (ov?.seasonProjection ?? null) : null;
   const forwardRows: MonthRow[] = seasonCharts ? seasonForwardRows(seasonCharts) : [];
   const withForward = (base: MonthRow[]): MonthRow[] => {
     if (!forwardRows.length) return base;
@@ -156,11 +156,13 @@ export function Dashboard() {
         ? 'text-emerald-300'
         : 'text-rose-300';
 
-  // Budget / annual-spend target card (issue #46). Always-visible when a target
-  // is set: spent so far (currentCharges), the projected end-of-window total with
-  // its band, an on/over/under status pill, and a progress bar. Self-hides when no
-  // target is set (the subtle "set a budget" affordance covers that case). All the
-  // arithmetic happened server-side (ov.budget); this only renders it.
+  // Budget / annual-spend target card (issue #46). The redesign merges the old
+  // standalone Budget card AND the "Proj. next 12 mo" card into ONE compact,
+  // CLICKABLE Budget card: a concise projected-year-end / target headline + a
+  // seasonally-fair status, that opens the Tools modal's Budget tab (the
+  // month-by-month detail + projection context). Always-visible when a target is
+  // set; a subtle "set a budget" affordance covers the no-target case. The
+  // arithmetic happened server-side (ov.budget); this only renders the headline.
   const budget = ov?.budget ?? null;
 
   // Header notifications bell (notification-log feature). The old inline amber
@@ -398,7 +400,7 @@ export function Dashboard() {
           <div
             className={`grid shrink-0 grid-cols-2 gap-2 sm:grid-cols-3 ${
               { 4: 'lg:grid-cols-4', 5: 'lg:grid-cols-5', 6: 'lg:grid-cols-6', 7: 'lg:grid-cols-7', 8: 'lg:grid-cols-8', 9: 'lg:grid-cols-9' }[
-                4 + (ov?.nextBillEstimate ? 1 : 0) + (seasonCard ? 1 : 0) + (ov?.emissions ? 1 : 0) + (showYoyCard ? 1 : 0) + (budget ? 1 : 0)
+                4 + (ov?.nextBillEstimate ? 1 : 0) + (ov?.emissions ? 1 : 0) + (showYoyCard ? 1 : 0) + (budget ? 1 : 0)
               ]
             } ${
               fit
@@ -450,30 +452,11 @@ export function Dashboard() {
                 </div>
               </div>
             ) : null}
-            {/* Annual-total readout (issue #52): the sum of the next 12 projected
-                bill periods, with its combined band. Clearly labelled a
-                climatological PROJECTION, not a forecast — the verbose basis lives
-                behind the ⓘ tooltip so the word "projection" appears once. */}
-            {seasonCard ? (
-              <div className="card relative !p-3">
-                <div className="card-title flex items-center gap-1 text-xs">
-                  Proj. next 12 mo
-                  <span
-                    tabIndex={0}
-                    role="img"
-                    aria-label={`Climatological projection (degree-day normals × current all-in rates) for the next 12 bill periods — ${seasonCard.basis}. Not a forecast, not a real charge.`}
-                    title={`Climatological projection (degree-day normals × current all-in rates) for the next 12 bill periods — ${seasonCard.basis}. Not a forecast, not a real charge.`}
-                    className="inline-flex h-4 w-4 cursor-help items-center justify-center rounded-full border border-slate-600/70 text-[10px] font-semibold text-slate-400 transition hover:border-slate-400 hover:text-slate-200 focus:outline-none focus:ring-1 focus:ring-violet-500/60"
-                  >
-                    i
-                  </span>
-                </div>
-                <div className="stat text-2xl">~{usd(seasonCard.annual.point, 0)}</div>
-                <div className="sub mt-0.5 text-[11px] text-slate-500">
-                  {usd(seasonCard.annual.low, 0)}–{usd(seasonCard.annual.high, 0)} · projection
-                </div>
-              </div>
-            ) : null}
+            {/* The "Proj. next 12 mo" card was merged into the Budget card → Budget
+                tab (issue #46 redesign): the next-12-months projected total now
+                lives inside that tool as projection context, so it isn't lost. The
+                dashed forward chart series is unaffected (gated separately by the
+                showProjectionOnCharts pref). */}
             {/* Carbon-footprint estimate (issue #49): trailing-12 combined CO2e in
                 kg, with a friendly equivalence and the location-based-ESTIMATE
                 caveat behind the ⓘ tooltip so the card stays compact. Never a
@@ -548,13 +531,13 @@ export function Dashboard() {
                 <div className="sub mt-0.5 text-[11px] text-slate-500">normalized vs last yr · click to compare</div>
               </div>
             ) : null}
-            {/* Budget / annual-spend target (issue #46): always-visible when a
-                target is set. Shows projected end-of-window total vs the target,
-                an on-track / over / under status, and a progress bar (spent solid,
-                projected-remaining lighter). When NO target is set, a subtle "set
-                a budget" affordance links to Settings. The verbose detail (spent,
-                window, band, remaining periods) lives behind the ⓘ tooltip. All
-                math is server-side (ov.budget). */}
+            {/* Budget / annual-spend target (issue #46 redesign): the MERGED card.
+                Concise headline (projected year-end / target + a seasonally-fair
+                status) and a progress bar; CLICKABLE to open the Tools modal's
+                Budget tab with the month-by-month breakdown + projection context.
+                When NO target is set, a subtle "set a budget" affordance links to
+                Settings. The verbose detail lives in the tab; the ⓘ tooltip keeps
+                the disclaimer. All math is server-side (ov.budget). */}
             {budget ? (() => {
               const { spent, projected, projectedLow, projectedHigh, target, delta, status, window } = budget;
               const statusColor =
@@ -572,14 +555,26 @@ export function Dashboard() {
               const targetPct = Math.min(100, (target / denom) * 100);
               const fromY = Math.floor(window.fromYm / 100);
               return (
-                <div className="card relative !p-3">
+                <div
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => openTools('budget')}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      openTools('budget');
+                    }
+                  }}
+                  className="card relative cursor-pointer !p-3 transition hover:border-slate-600 hover:bg-slate-800/60 focus:outline-none focus:ring-1 focus:ring-amber-500/60"
+                >
                   <div className="card-title flex items-center gap-1 text-xs">
                     Budget {fromY}
                     <span
                       tabIndex={0}
                       role="img"
-                      aria-label={`Spent ${usd(spent, 0)} of your ${usd(target, 0)} ${fromY} target so far; projected end-of-year total ${usd(projected, 0)} (range ${usd(projectedLow, 0)}–${usd(projectedHigh, 0)}). Spent is the sum of this year's bills' actual period charges (currentCharges, the PDF source of truth — never the statement amount due); the projected remainder reuses the next-bill estimate and the seasonal 12-month projection. Set or change the target in Settings. Not a real charge.`}
-                      title={`Spent ${usd(spent, 0)} of your ${usd(target, 0)} ${fromY} target so far; projected end-of-year total ${usd(projected, 0)} (range ${usd(projectedLow, 0)}–${usd(projectedHigh, 0)}). Spent is the sum of this year's bills' actual period charges (currentCharges, the PDF source of truth — never the statement amount due); the projected remainder reuses the next-bill estimate and the seasonal 12-month projection. Set or change the target in Settings. Not a real charge.`}
+                      aria-label={`Spent ${usd(spent, 0)} of your ${usd(target, 0)} ${fromY} target so far; projected end-of-year total ${usd(projected, 0)} (range ${usd(projectedLow, 0)}–${usd(projectedHigh, 0)}). Spent is the sum of this year's bills' actual period charges (currentCharges, the PDF source of truth — never the statement amount due); the projected remainder reuses the next-bill estimate and the seasonal 12-month projection. The on/off-track status is paced against a seasonally-weighted expectation (winter is naturally heavier). Click for the month-by-month breakdown. Set or change the target in Settings. Not a real charge.`}
+                      title={`Spent ${usd(spent, 0)} of your ${usd(target, 0)} ${fromY} target so far; projected end-of-year total ${usd(projected, 0)} (range ${usd(projectedLow, 0)}–${usd(projectedHigh, 0)}). Spent is the sum of this year's bills' actual period charges (currentCharges, the PDF source of truth — never the statement amount due); the projected remainder reuses the next-bill estimate and the seasonal 12-month projection. The on/off-track status is paced against a seasonally-weighted expectation (winter is naturally heavier). Click for the month-by-month breakdown. Set or change the target in Settings. Not a real charge.`}
+                      onClick={(e) => e.stopPropagation()}
                       className="inline-flex h-4 w-4 cursor-help items-center justify-center rounded-full border border-slate-600/70 text-[10px] font-semibold text-slate-400 transition hover:border-slate-400 hover:text-slate-200 focus:outline-none focus:ring-1 focus:ring-amber-500/60"
                     >
                       i
@@ -598,7 +593,7 @@ export function Dashboard() {
                     <div className="absolute inset-y-0 w-px bg-slate-300/80" style={{ left: `${targetPct}%` }} />
                   </div>
                   <div className={`sub mt-0.5 text-[11px] ${statusColor}`}>
-                    {statusLabel} · {usd(spent, 0)} spent
+                    {statusLabel} · click for breakdown
                   </div>
                 </div>
               );
@@ -730,6 +725,8 @@ export function Dashboard() {
         initialTab={toolsTab}
         rows={rows}
         rangedRows={ranged}
+        budget={budget}
+        seasonProjection={ov?.seasonProjection ?? null}
         currencyDecimals={dp}
       />
 

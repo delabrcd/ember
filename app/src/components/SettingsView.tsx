@@ -231,7 +231,7 @@ export function SettingsView() {
         <div className="space-y-3">
           <div>
             <div className="text-sm font-medium text-slate-200">12-month projection</div>
-            <div className="text-xs text-slate-500">Show the seasonal next-12-months projection independently on the charts and as a summary card</div>
+            <div className="text-xs text-slate-500">Show the seasonal next-12-months projection as a dashed forward series on the cost &amp; usage charts. The projection&rsquo;s annual total now lives in the Budget tool (Tools &rarr; Budget), so there&rsquo;s no longer a separate summary card.</div>
           </div>
           <div className="flex flex-wrap items-center justify-between gap-3 pl-3">
             <div className="text-xs text-slate-400">On charts <span className="text-slate-600">— dashed projected series on cost &amp; usage</span></div>
@@ -239,17 +239,6 @@ export function SettingsView() {
               {([true, false] as const).map((on) => (
                 <button key={String(on)} onClick={() => patch({ showProjectionOnCharts: on })}
                   className={`px-3 py-1 text-xs transition ${prefs.showProjectionOnCharts === on ? 'bg-amber-500 text-slate-950' : 'bg-slate-800/50 text-slate-300 hover:bg-slate-700'}`}>
-                  {on ? 'On' : 'Off'}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div className="flex flex-wrap items-center justify-between gap-3 pl-3">
-            <div className="text-xs text-slate-400">Summary card <span className="text-slate-600">— the &ldquo;Proj. next 12 mo&rdquo; stat card</span></div>
-            <div className="inline-flex overflow-hidden rounded-lg border border-slate-700">
-              {([true, false] as const).map((on) => (
-                <button key={String(on)} onClick={() => patch({ showProjectionCard: on })}
-                  className={`px-3 py-1 text-xs transition ${prefs.showProjectionCard === on ? 'bg-amber-500 text-slate-950' : 'bg-slate-800/50 text-slate-300 hover:bg-slate-700'}`}>
                   {on ? 'On' : 'Off'}
                 </button>
               ))}

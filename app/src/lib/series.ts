@@ -2,7 +2,7 @@
 // tested with hand-calculated inputs. queries.ts feeds it DB rows; the dashboard
 // uses trailing12AllIn for the headline rate cards.
 import type { MonthRow } from './chartSpec';
-import { ymLabel } from './ym';
+import { ymAddMonths, ymLabel } from './ym';
 
 export interface UsageInput { periodYearMonth: number; usageType: string; quantity: number }
 export interface CostInput { periodYearMonth: number; fuelType: string; kind: string; amount: number }
@@ -466,6 +466,187 @@ export function projectBudget(
 export function calendarYearWindow(ym: number): BudgetWindow {
   const year = Math.floor(ym / 100);
   return { fromYm: year * 100 + 1, toYm: year * 100 + 12 };
+}
+
+// ---------------------------------------------------------------------------
+// budgetMonthly — month-by-month budget pace with a SEASONALLY-WEIGHTED expected
+// share (issue #46, Budget tab).
+//
+// The flat "over by $X" headline is unfair month-to-month: a Northeast winter
+// bill is several times a shoulder-season one, so spending $300 in January is
+// NOT over budget the way spending $300 in May would be. This builds a per-month
+// breakdown for the budget window where the EXPECTED pace is weighted by the
+// season instead of split evenly.
+//
+// SEASONAL PACE WEIGHTING
+//   We derive a per-calendar-month weight from the seasonal 12-month projection's
+//   projected COSTS (projCost — the climatological degree-day-normals × rate
+//   estimate, the same numbers the projection card/series use). The projection
+//   covers exactly 12 consecutive months (one full calendar cycle) starting after
+//   the latest usage row, so it carries one value per calendar month. We key it by
+//   CALENDAR MONTH (ym % 100, 1..12) so even an already-billed window month gets a
+//   seasonal weight from its calendar-month projection.
+//     weight[m]  = projCost for calendar month m   (≥ 0)
+//     share[m]   = weight[m] / Σ weight             (normalized to sum to 1)
+//     expected[m]= target × share[m]
+//   So winter months get a larger expected slice and summer a smaller one — the
+//   pace is seasonally fair. FALLBACK: if no seasonal data is supplied (or every
+//   weight is 0), every month gets a FLAT 1/N share (N = months in window).
+//
+// PER MONTH (one entry per calendar month in the window):
+//   actual    : billed spend for that month = the row's billTotal (currentCharges,
+//               the PDF source of truth — NEVER totalDueAmount), or null if the
+//               month has no bill yet.
+//   expected  : target × seasonal share for that month (the fair pace).
+//   projected : actual when the month is already billed; otherwise the seasonal
+//               projection's projCost for that calendar month (the same forward
+//               estimate the headline projectBudget() rolls up). null when neither
+//               an actual nor a projection exists.
+//   cumActual / cumExpected / cumProjected: running totals through that month.
+//               cumActual is null until the first billed month, then CARRIES the
+//               last billed cumulative forward (it flattens once months are
+//               unbilled rather than dropping back to null), so the actual-spend
+//               line is continuous up to "today".
+//   status    : the cumulative-pace verdict for that month — projected cumulative
+//               vs expected cumulative, with the same ±tolerance band as
+//               projectBudget (BUDGET_ON_TRACK_TOL × target). 'over'/'under'/
+//               'on_track'. This is the seasonally-fair on/off-track signal.
+//
+// REUSE: the year-end headline (projected total, status vs target) is NOT
+// recomputed here — the caller passes projectBudget()'s BudgetResult through so
+// the card and tab agree. budgetMonthly is purely the per-month detail.
+//
+// PURE: all inputs are supplied; the arithmetic is hand-calculable in tests.
+// ---------------------------------------------------------------------------
+
+export interface BudgetMonthlyMonth {
+  ym: number;
+  label: string;
+  share: number; // this month's normalized share of the annual (Σ share = 1)
+  actual: number | null; // billed currentCharges, or null if not yet billed
+  expected: number; // target × share (the seasonally-fair pace for the month)
+  projected: number | null; // actual if billed, else the seasonal projection point
+  cumActual: number | null; // running Σ actual through this month (null until first bill)
+  cumExpected: number; // running Σ expected through this month
+  cumProjected: number; // running Σ projected through this month (uses expected when no point)
+  delta: number; // cumProjected − cumExpected (positive = ahead of pace = spending more)
+  status: BudgetStatus; // cumulative pace verdict vs the seasonal expectation
+}
+
+export interface BudgetMonthlyResult {
+  window: BudgetWindow;
+  target: number;
+  seasonal: boolean; // true when seasonal weights were used; false on the flat fallback
+  months: BudgetMonthlyMonth[];
+  // Convenience roll-ups (= the last month's cumulatives) so the tab needn't sum.
+  totalActual: number; // Σ actual over billed months
+  billsCounted: number; // how many months had an actual
+}
+
+// Each calendar month in [fromYm, toYm], inclusive.
+function windowMonths(window: BudgetWindow): number[] {
+  const out: number[] = [];
+  for (let ym = window.fromYm; ym <= window.toYm; ym = ymAddMonths(ym, 1)) out.push(ym);
+  return out;
+}
+
+export function budgetMonthly(
+  rows: MonthRow[],
+  target: number | null | undefined,
+  window: BudgetWindow,
+  // The seasonal 12-month projection months (issue #52): one projCost per calendar
+  // month. Supplies the pace weights AND the future-month projected points. Pass
+  // [] / null for the flat-share fallback.
+  seasonal?: { ym: number; projCost: number }[] | null,
+  opts?: { tolerance?: number }
+): BudgetMonthlyResult | null {
+  if (target == null || !(target > 0) || !Number.isFinite(target)) return null;
+
+  const months = windowMonths(window);
+  const n = months.length;
+
+  // billTotal (currentCharges) per window month. NEVER totalDueAmount.
+  const actualByYm = new Map<number, number>();
+  for (const r of rows) {
+    if (r.billTotal == null || r.ym < window.fromYm || r.ym > window.toYm) continue;
+    actualByYm.set(r.ym, (actualByYm.get(r.ym) ?? 0) + r.billTotal);
+  }
+
+  // Seasonal projected cost keyed by CALENDAR MONTH (1..12). The projection spans
+  // one full cycle, so each calendar month appears once.
+  const projByCalMonth = new Map<number, number>();
+  for (const m of seasonal ?? []) {
+    const cal = m.ym % 100;
+    if (m.projCost >= 0 && !projByCalMonth.has(cal)) projByCalMonth.set(cal, m.projCost);
+  }
+
+  // Per-month weight = the calendar month's seasonal projected cost. Use seasonal
+  // weights only when we have a weight for EVERY window month and they sum > 0;
+  // otherwise fall back to a flat 1/N share so the pace is still defined.
+  const rawWeights = months.map((ym) => projByCalMonth.get(ym % 100) ?? 0);
+  const weightSum = rawWeights.reduce((s, w) => s + w, 0);
+  const useSeasonal =
+    weightSum > 0 && rawWeights.every((w) => w > 0) && months.length > 0;
+  const shares = useSeasonal ? rawWeights.map((w) => w / weightSum) : months.map(() => 1 / n);
+
+  const tol = (opts?.tolerance ?? BUDGET_ON_TRACK_TOL) * target;
+
+  let cumActual = 0;
+  let sawActual = false;
+  let cumExpected = 0;
+  let cumProjected = 0;
+  let totalActual = 0;
+  let billsCounted = 0;
+
+  const out: BudgetMonthlyMonth[] = months.map((ym, i) => {
+    const share = shares[i];
+    const expected = target * share;
+    const actualRaw = actualByYm.get(ym);
+    const hasActual = actualRaw != null;
+
+    // projected: the actual if billed, else this calendar month's seasonal point
+    // (the same forward estimate the headline rolls up). null when neither exists.
+    const projPoint = projByCalMonth.get(ym % 100);
+    const projected = hasActual ? actualRaw! : projPoint != null ? projPoint : null;
+
+    if (hasActual) {
+      cumActual += actualRaw!;
+      sawActual = true;
+      totalActual += actualRaw!;
+      billsCounted += 1;
+    }
+    cumExpected += expected;
+    // cumProjected accrues the projected point (actual or seasonal estimate); when a
+    // future month has no projection at all it falls back to the expected pace so
+    // the cumulative projection still spans the whole window.
+    cumProjected += projected != null ? projected : expected;
+
+    const delta = cumProjected - cumExpected;
+    const status: BudgetStatus = delta > tol ? 'over' : delta < -tol ? 'under' : 'on_track';
+
+    return {
+      ym,
+      label: ymLabel(ym),
+      share,
+      actual: hasActual ? actualRaw! : null,
+      expected,
+      projected,
+      cumActual: sawActual ? cumActual : null,
+      cumExpected,
+      cumProjected,
+      delta,
+      status,
+    };
+  });
+
+  return {
+    window,
+    target,
+    seasonal: useSeasonal,
+    months: out,
+    totalActual,
+    billsCounted,
+  };
 }
 
 // ESCO supply-rate what-if back-test (issue #48). The biggest controllable lever
