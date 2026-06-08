@@ -19,12 +19,25 @@ backup_before_migrate() {
     return 0
   fi
 
-  # psql/pg_dump use libpq, which rejects Prisma's ?schema= query param — strip it.
-  local clean_url="${DATABASE_URL%%\?*}"
+  # Connect via discrete libpq params, NOT the DATABASE_URL. libpq parses URLs
+  # strictly, so a DB password containing %, @, etc. (all valid via env_file) makes
+  # psql/pg_dump fail to parse the URL even though Prisma's looser parser accepts
+  # it. The password comes straight from $DB_PASSWORD (any character, no parsing);
+  # host/port come from the URL authority — the slice after the LAST '@' and before
+  # the first '/', neither of which can contain the password's special characters.
+  local authority="${DATABASE_URL##*@}"   # host:port/db?params  (password stripped)
+  authority="${authority%%/*}"            # host:port
+  local pghost="${authority%%:*}"
+  local pgport="${authority##*:}"
+  [ "$pgport" = "$authority" ] && pgport=5432   # no explicit port in the URL
+  local pguser="${DB_USER:-ngrid}"
+  local pgdb="${DB_NAME:-ngrid}"
+  local -a pg_conn=(-h "$pghost" -p "$pgport" -U "$pguser" -d "$pgdb")
 
-  # Fresh database (no app tables yet) → nothing to back up.
+  # Fresh database (no app tables yet) → nothing to back up. `|| true` keeps a probe
+  # that can't connect from tripping `set -e`; an empty result is treated as fresh.
   local has_account
-  has_account="$(psql "$clean_url" -Atqc "SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='Account' LIMIT 1" 2>/dev/null)"
+  has_account="$(PGPASSWORD="$DB_PASSWORD" psql "${pg_conn[@]}" -Atqc "SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='Account' LIMIT 1" 2>/dev/null || true)"
   if [ "$has_account" != "1" ]; then
     echo "[entrypoint] fresh database — no pre-migrate backup needed"
     return 0
@@ -43,7 +56,7 @@ backup_before_migrate() {
   echo "[entrypoint] schema change detected — backing up database to $out"
   # pipefail so a pg_dump failure fails the pipeline (gzip alone would still
   # succeed on empty input and mask it — that would defeat the safety net).
-  if ! ( set -o pipefail; pg_dump "$clean_url" | gzip > "$out" ); then
+  if ! ( set -o pipefail; PGPASSWORD="$DB_PASSWORD" pg_dump "${pg_conn[@]}" | gzip > "$out" ); then
     rm -f "$out"
     echo "[entrypoint] ERROR: pre-migrate backup FAILED — refusing to apply schema changes."
     echo "[entrypoint] Fix the backup target, or set BACKUP_BEFORE_MIGRATE=false to override (NOT recommended)."

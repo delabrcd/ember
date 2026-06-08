@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { MonthRow } from '@/lib/chartSpec';
 import { SPEC_BY_ID } from '@/lib/chartSpec';
 import { seasonForwardRows } from '@/lib/prediction';
@@ -153,6 +153,25 @@ export function Dashboard() {
   useEffect(() => {
     if (page !== activePage) setPage(activePage);
   }, [page, activePage]);
+
+  // First-run convenience: once the first login is verified during setup, kick the
+  // initial scrape automatically (exactly once) so the user doesn't have to hunt
+  // for a button — the "You're connected" card then shows live progress and, on
+  // success, the populated dashboard replaces this setup view. The button there
+  // stays as an explicit retry. The ref resets if the login is removed, so
+  // re-adding one re-arms the auto-scrape. The `!progressRun` guard skips it when a
+  // run is already in flight (e.g. the page reloaded mid-scrape).
+  const autoScrapeStarted = useRef(false);
+  useEffect(() => {
+    if (!hasLogin) {
+      autoScrapeStarted.current = false;
+      return;
+    }
+    if (needsSetup && !progressRun && !autoScrapeStarted.current) {
+      autoScrapeStarted.current = true;
+      retryScrape();
+    }
+  }, [needsSetup, hasLogin, progressRun, retryScrape]);
   const pagedCharts = paginateCharts ? (chartPages[activePage] ?? []) : visibleCharts;
   const showPager = paginateCharts && pageCount > 1;
 
@@ -176,8 +195,11 @@ export function Dashboard() {
           </p>
         </header>
 
-        {/* The existing add-login flow (with its OTP pre-flight) front-and-center. */}
-        <NgLoginsSection />
+        {/* The existing add-login flow (with its OTP pre-flight) front-and-center.
+            onChanged advances this setup view as soon as a login is verified (no
+            manual reload) — which both reveals the card below and arms the
+            auto-scrape effect above. */}
+        <NgLoginsSection onChanged={loadLogins} />
 
         {/* Once a login exists, prompt the first scrape right here. */}
         {hasLogin ? (
