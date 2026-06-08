@@ -22,19 +22,21 @@
 
 import { mergeOrder } from './cockpit';
 import { DEFAULT_CHART_CONFIG, DEFAULT_CHART_ORDER, type ChartConfig } from './chartConfig';
+import type { Placements } from './layoutEngine';
 
 // Bumped only on a BREAKING shape change; `mergeDashboardLayout` already repairs
 // additive/partial drift, so a minor field addition does NOT need a bump.
 export const DASHBOARD_LAYOUT_VERSION = 1;
 
-// PHASE E SEAM (issue #73). Phase E adds the react-grid-layout placement engine;
-// its serializable `layouts: Record<Breakpoint, Placement[]>` will live on this
-// same blob (RFC §3.4). It is declared here ONLY as an opaque, optional
-// passthrough so a Phase-E-written layout survives a Phase-D read/merge/write
-// round-trip unharmed — Phase D NEITHER generates NOR interprets it. Phase E
-// owns the concrete `Breakpoint`/`Placement` types and the generator; until then
-// this is carried verbatim and never read. Do NOT implement placements here.
-export type DashboardPlacements = Record<string, unknown>;
+// PHASE E (issue #73) now OWNS this. The react-grid-layout placement engine's
+// serializable per-breakpoint placements (`Placements` = the concrete
+// `Record<Breakpoint, Placement[]>` from layoutEngine.ts) live on this same blob
+// (RFC §3.4). Phase D reserved this field as an opaque passthrough; Phase E fills
+// in the real type. `mergeDashboardLayout` still carries it through merges
+// untouched (it's the layout engine — not this module — that repairs placements
+// via mergePlacements, since that needs the live visible-widget set the host
+// builds). A round-trip therefore preserves a Phase-E layout verbatim.
+export type DashboardPlacements = Placements;
 
 // The dashboard definition blob. Versioned + forward-compatible.
 export interface DashboardLayout {

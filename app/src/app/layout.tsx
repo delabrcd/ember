@@ -1,4 +1,10 @@
 import type { Metadata } from 'next';
+// react-grid-layout's base CSS (Phase E, #73): grid item positioning + the
+// resize-handle hit area. Imported BEFORE globals.css so our dark slate/amber
+// overrides (in globals.css, .ngrid-rgl scope) win the cascade — RGL ships a
+// light default we deliberately re-skin rather than ship unstyled.
+import 'react-grid-layout/css/styles.css';
+import 'react-resizable/css/styles.css';
 import './globals.css';
 import { PrefsProvider } from '@/lib/prefs';
 
