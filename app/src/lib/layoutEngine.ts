@@ -461,6 +461,44 @@ export function placementRows(placements: Placement[] | undefined): number {
   return Math.max(1, ...placements.map((p) => p.y + p.h));
 }
 
+// Do two boxes (x/y/w/h cells) overlap on the grid? Used to find a collision-free
+// drop slot for a newly-added widget. Half-open intervals — tiles that merely
+// touch edge-to-edge ([0,6) and [6,12)) do NOT overlap. PURE.
+function boxesOverlap(
+  a: { x: number; y: number; w: number; h: number },
+  b: { x: number; y: number; w: number; h: number }
+): boolean {
+  return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+}
+
+// Find a free top-left cell for a new w×h tile on a `cols`-wide grid that already
+// holds `existing` placements, scanning rows top-to-bottom then columns left-to-
+// right (reading order). Returns the first {x, y} where the tile fits without
+// overlapping anything. With FREE PLACEMENT (compactType=null + preventCollision,
+// CHANGE 2) RGL no longer auto-tucks a tile dropped at (0,0), and would REJECT a
+// drop that collides — so an "add widget" must land the tile on an empty patch
+// itself. We always find a slot: a row below every existing tile is guaranteed
+// empty, so the scan terminates there at worst. PURE — hand-calc unit-tested.
+export function findFreeSlot(
+  existing: Placement[],
+  size: { w: number; h: number },
+  cols: number
+): { x: number; y: number } {
+  const w = Math.min(Math.max(1, size.w), cols);
+  const h = Math.max(1, size.h);
+  // Scan no further down than one row past the lowest existing tile — placing the
+  // new tile there is always collision-free (nothing lives below the layout).
+  const maxY = existing.length === 0 ? 0 : Math.max(...existing.map((p) => p.y + p.h));
+  for (let y = 0; y <= maxY; y++) {
+    for (let x = 0; x + w <= cols; x++) {
+      const candidate = { x, y, w, h };
+      if (!existing.some((p) => boxesOverlap(candidate, p))) return { x, y };
+    }
+  }
+  // Fallback (only reached if cols < w, which we already clamped): stack below all.
+  return { x: 0, y: maxY };
+}
+
 // ---------------------------------------------------------------------------
 // PAGINATION — the "phone home screen" no-scroll fit (issue #73 iteration).
 // ---------------------------------------------------------------------------

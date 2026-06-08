@@ -35,7 +35,14 @@ import {
 } from '@/lib/widgets/registry';
 import { WidgetLayout } from './WidgetLayout';
 import { WidgetPalette, type PaletteGroup } from './WidgetPalette';
-import { FIT_BREAKPOINT, generateDefaultPlacements, type Breakpoint, type Placement } from '@/lib/layoutEngine';
+import {
+  COLS,
+  FIT_BREAKPOINT,
+  findFreeSlot,
+  generateDefaultPlacements,
+  type Breakpoint,
+  type Placement,
+} from '@/lib/layoutEngine';
 
 export function Dashboard() {
   const { prefs, patch, setRange } = usePrefs();
@@ -264,15 +271,18 @@ export function Dashboard() {
     if (!cur) return; // nothing removed yet → already shown
     const lg = Array.isArray(cur[FIT_BREAKPOINT]) ? cur[FIT_BREAKPOINT]! : [];
     if (lg.some((p) => p.i === type)) return; // already placed
-    // Drop a default-sized placement at the top-left of the lg grid; RGL's
-    // vertical compaction tucks it in and the user can drag it. Other breakpoints
-    // get it appended by WidgetLayout's merge against fresh defaults.
     const next: Record<string, Placement[]> = { ...(cur as Record<string, Placement[]>) };
-    // Drop at the widget's registry default size so an added chart/stat/panel
-    // lands at a sensible size; RGL's vertical compaction tucks it in.
+    // Drop at the widget's registry default size on the FIRST free slot of the lg
+    // grid. Under FREE PLACEMENT (compactType=null + preventCollision, CHANGE 2)
+    // RGL no longer compacts a tile dropped at (0,0) into an empty cell, and would
+    // REJECT a drop that overlaps an existing tile — so we must place the new tile
+    // on an empty patch ourselves (findFreeSlot scans reading-order for the first
+    // non-overlapping cell, always finding one below the layout at worst). Other
+    // breakpoints get it appended by WidgetLayout's merge against fresh defaults.
     const { defaultSize } = getWidget(type);
+    const slot = findFreeSlot(lg, defaultSize, COLS[FIT_BREAKPOINT]);
     next[FIT_BREAKPOINT] = [
-      { i: type, x: 0, y: 0, w: defaultSize.w, h: defaultSize.h, minW: defaultSize.minW, minH: defaultSize.minH },
+      { i: type, x: slot.x, y: slot.y, w: defaultSize.w, h: defaultSize.h, minW: defaultSize.minW, minH: defaultSize.minH },
       ...lg,
     ];
     setPlacements(next);

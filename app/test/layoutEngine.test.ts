@@ -8,6 +8,7 @@ import {
   computeFitRowHeight,
   computePagedRowHeight,
   computeRowsPerPage,
+  findFreeSlot,
   generateDefaultPlacements,
   mergePlacements,
   pageCount,
@@ -465,5 +466,94 @@ describe('the default cockpit paginates cleanly at the pinned page budget', () =
     const chartPages = pages.filter((pg) => pg.some((p) => p.i.startsWith('chart:'))).length;
     expect(chartPages).toBeLessThanOrEqual(2);
     expect(pages.length).toBeLessThanOrEqual(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FREE PLACEMENT — the Android-home-screen model (CHANGE 2, issue #73).
+// ---------------------------------------------------------------------------
+//
+// The grid runs with compactType=null + preventCollision in the component, so a
+// tile stays exactly where it's dropped and EMPTY CELLS/GAPS between tiles are
+// preserved (no upward compaction). The component still runs clampToPages over
+// the lg grid to keep a tile from straddling a page boundary, but that pass must
+// NOT compact away within-page gaps. These tests fence that contract on the pure
+// side: a placement that sits wholly within its page band — INCLUDING one with
+// empty rows/columns above or beside it — survives the clamp unchanged, so a
+// user-dropped layout round-trips (persist → re-feed → clamp) without re-packing.
+describe('clampToPages preserves gaps (free placement, no compaction)', () => {
+  it('a tile with empty rows ABOVE it (a vertical gap) is left exactly in place', () => {
+    // rpp=14 (a whole page). A tile at y=6 with nothing above it: under vertical
+    // compaction this would snap up to y=0; under free placement the gap stays.
+    const ps: Placement[] = [{ i: 'chart:cost', x: 3, y: 6, w: 6, h: 7 }];
+    expect(clampToPages(ps, 14)).toEqual(ps);
+  });
+
+  it('a sparse layout (gaps between AND beside tiles) round-trips byte-identical', () => {
+    // A deliberately gappy single-page layout: a tile top-left, one offset to the
+    // right with a column gap, one lower with a row gap. None straddles the page
+    // (rpp=14), so the clamp is a no-op — every (x, y, w, h) is preserved.
+    const sparse: Placement[] = [
+      { i: 'chart:usage', x: 0, y: 0, w: 4, h: 4 },
+      { i: 'chart:cost', x: 7, y: 1, w: 4, h: 4 }, // column gap (x 4–6 empty)
+      { i: 'chart:rates', x: 1, y: 8, w: 5, h: 5 }, // row gap (rows 4–7 empty)
+    ];
+    const once = clampToPages(sparse, 14);
+    expect(once).toEqual(sparse);
+    // Idempotent on the gappy layout too (the persist→re-feed loop settles).
+    expect(clampToPages(once, 14)).toEqual(once);
+  });
+
+  it('only straddlers move; an in-band gap tile beside a straddler keeps its slot', () => {
+    // rpp=7. `keep` sits wholly on page 0 with a gap above it; `straddle` crosses
+    // the boundary and must re-band to page 1. `keep` must NOT be disturbed.
+    const ps: Placement[] = [
+      { i: 'keep', x: 0, y: 2, w: 4, h: 4 }, // page 0, rows 2–5 (gap rows 0–1)
+      { i: 'straddle', x: 4, y: 5, w: 4, h: 5 }, // rows 5–9 → straddles, → page 1
+    ];
+    const out = clampToPages(ps, 7);
+    expect(out.find((p) => p.i === 'keep')).toEqual(ps[0]); // untouched, gap intact
+    expect(out.find((p) => p.i === 'straddle')!.y).toBe(7); // re-banded whole
+  });
+});
+
+// ---------------------------------------------------------------------------
+// findFreeSlot — collision-free drop for "add widget" under free placement.
+// ---------------------------------------------------------------------------
+//
+// With compaction OFF and preventCollision ON, adding a widget can no longer drop
+// it at (0,0) and rely on RGL to tuck it in — an overlapping drop would be
+// REJECTED. findFreeSlot scans reading-order for the first non-overlapping cell.
+describe('findFreeSlot (hand-calculated)', () => {
+  it('an empty grid places the tile at the origin', () => {
+    expect(findFreeSlot([], { w: 6, h: 7 }, 12)).toEqual({ x: 0, y: 0 });
+  });
+
+  it('finds the first empty COLUMN slot on row 0 beside an existing tile', () => {
+    // A 6-wide tile at x=0 leaves x=6..11 free on row 0 → a new 6-wide tile fits at x=6.
+    const existing: Placement[] = [{ i: 'a', x: 0, y: 0, w: 6, h: 7 }];
+    expect(findFreeSlot(existing, { w: 6, h: 7 }, 12)).toEqual({ x: 6, y: 0 });
+  });
+
+  it('drops onto the next free ROW when row 0 is full', () => {
+    // Row 0 fully occupied by two 6-wide tiles → a new 6-wide tile lands at y=7.
+    const existing: Placement[] = [
+      { i: 'a', x: 0, y: 0, w: 6, h: 7 },
+      { i: 'b', x: 6, y: 0, w: 6, h: 7 },
+    ];
+    expect(findFreeSlot(existing, { w: 6, h: 7 }, 12)).toEqual({ x: 0, y: 7 });
+  });
+
+  it('returns a non-overlapping slot for every existing tile (general property)', () => {
+    const existing: Placement[] = [
+      { i: 'a', x: 0, y: 0, w: 6, h: 7 },
+      { i: 'b', x: 6, y: 0, w: 6, h: 7 },
+      { i: 'c', x: 0, y: 7, w: 4, h: 5 },
+    ];
+    const slot = findFreeSlot(existing, { w: 6, h: 7 }, 12);
+    const dropped = { ...slot, w: 6, h: 7 };
+    const overlaps = (p: Placement) =>
+      dropped.x < p.x + p.w && p.x < dropped.x + 6 && dropped.y < p.y + p.h && p.y < dropped.y + 7;
+    expect(existing.some(overlaps)).toBe(false);
   });
 });

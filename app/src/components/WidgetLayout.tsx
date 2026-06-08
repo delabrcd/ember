@@ -159,12 +159,28 @@ export function WidgetLayout(props: WidgetLayoutProps) {
   const [bp, setBp] = useState<Breakpoint>(FIT_BREAKPOINT);
 
   // ---- Runtime chrome + viewport measurement (the no-scroll fit) ----
-  // We measure the chrome height (everything ABOVE the grid) AND, when the stat
-  // strip is pinned, the pinned strip's own height, so the paged area's available
-  // band is computed — never a hand-tuned constant. The chrome ref is the parent
-  // region tagged [data-dashboard-chrome]; the pinned strip is our own element.
+  // We measure the GRID CONTAINER'S TOP (its viewport-relative y, in CSS pixels)
+  // AND, when the stat strip is pinned, the pinned strip's own height, so the
+  // paged area's available band is computed — never a hand-tuned constant.
+  //
+  // WHY gridTop, NOT chromeHeight (the header-cutoff fix, CHANGE 1): the previous
+  // math used `available = viewportH − chromeHeight − …`, but the grid does NOT
+  // begin at `chromeHeight` from the top of the viewport — it begins below the
+  // PAGE PADDING (the shell's `py-3`) AND the flex `gap` between the chrome and
+  // the grid. So `viewportH − chromeHeight` over-counted the band by exactly
+  // (pageTopPadding + gap) ≈ 20px: the fit math sized the page that much too tall,
+  // so at the no-scroll-pinned breakpoint the page's content ran 20px past the
+  // viewport and the bottom row (or, once a banner pushed the chrome down, the
+  // FIRST row) was clipped behind/under the fixed chrome. Measuring the
+  // container's real top via getBoundingClientRect().top folds the chrome height,
+  // the page padding AND the gap into one number, so `available = viewportH −
+  // gridTop − …` is exact regardless of how the chrome/padding/gap compose. It's a
+  // CSS-pixel quantity (getBoundingClientRect/innerHeight are DPI-independent —
+  // devicePixelRatio never enters the math), so it's robust across resolutions
+  // and DPIs (CHANGE 3). gridTop is read from the container itself (always present)
+  // rather than the chrome element, so a missing/late chrome can't zero it out.
   const [viewportH, setViewportH] = useState(0);
-  const [chromeH, setChromeH] = useState(0);
+  const [gridTop, setGridTop] = useState(0);
   const [stripH, setStripH] = useState(0);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const stripRef = useRef<HTMLDivElement | null>(null);
@@ -174,16 +190,38 @@ export function WidgetLayout(props: WidgetLayoutProps) {
     if (!container) return;
     const chrome = container.parentElement?.querySelector<HTMLElement>('[data-dashboard-chrome]') ?? null;
 
+    // Measure into state, but only WRITE when a value actually changed — the
+    // ResizeObserver fires on every layout pass (and our own re-renders resize the
+    // grid, which the observer sees), so an unconditional setState would churn and
+    // could feed a render→measure→render loop. The functional-update form compares
+    // against the latest committed value and returns it unchanged on a no-op, so
+    // React bails the re-render (the Customize-mode loop guard, kept intact).
     const measure = () => {
-      setViewportH(window.innerHeight);
-      setChromeH(chrome ? chrome.getBoundingClientRect().height : 0);
-      setStripH(stripRef.current ? stripRef.current.getBoundingClientRect().height : 0);
+      // The container's TOP measured WITHOUT its own paged-grid height influencing
+      // it: getBoundingClientRect().top is the distance from the viewport top to
+      // the grid column's first pixel — i.e. everything above it (chrome + page
+      // padding + gap). DPI-independent CSS pixels.
+      const top = container.getBoundingClientRect().top;
+      const sh = stripRef.current ? stripRef.current.getBoundingClientRect().height : 0;
+      const vh = window.innerHeight;
+      setViewportH((prev) => (prev === vh ? prev : vh));
+      // Round to whole CSS pixels so sub-pixel jitter from fractional DPI scaling
+      // (e.g. a 1.25× display reporting 127.5px) can't flip the value every frame
+      // and re-trigger the fit recompute → a quiet, change-only update.
+      setGridTop((prev) => (Math.abs(prev - top) < 0.5 ? prev : top));
+      setStripH((prev) => (Math.abs(prev - sh) < 0.5 ? prev : sh));
     };
     measure();
 
+    // Observe the chrome (so a banner appearing/dismissing remeasures the band)
+    // and the pinned strip; the container itself is NOT observed — its height is
+    // the fit OUTPUT, so observing it would close a measure→resize→measure loop.
     const ro = new ResizeObserver(measure);
     if (chrome) ro.observe(chrome);
     if (stripRef.current) ro.observe(stripRef.current);
+    // window.resize covers viewport-height changes (which a chrome ResizeObserver
+    // alone would miss — the chrome's height needn't change when the window does)
+    // AND DPI/zoom changes that reflow the layout (CHANGE 3: recompute on resize).
     window.addEventListener('resize', measure);
     return () => {
       ro.disconnect();
@@ -228,7 +266,12 @@ export function WidgetLayout(props: WidgetLayoutProps) {
   // stats page with the grid, or PINNED_PAGE_ROWS (just the chart rows) when the
   // strip is pinned out of the paged area — so a page of charts still fills the
   // viewport.
-  const available = Math.max(0, viewportH - chromeH - (pinStats ? stripH : 0) - PAGER_ALLOWANCE);
+  // available = viewport − everything above the grid (gridTop folds in chrome +
+  // page padding + the gap) − the pinned strip (when shown) − the pager band. Using
+  // gridTop (not a bare chrome height) is the header-cutoff fix: the grid is sized
+  // to EXACTLY the space below its own top, so the first row sits clear of the
+  // chrome and the last row stops at the viewport edge — no clip, no scroll.
+  const available = Math.max(0, viewportH - gridTop - (pinStats ? stripH : 0) - PAGER_ALLOWANCE);
   const rowsPerPage = useMemo(() => {
     const budget = pinStats ? PINNED_PAGE_ROWS : DEFAULT_FIT_ROWS;
     if (!fitActive || viewportH === 0) return budget;
@@ -413,7 +456,16 @@ export function WidgetLayout(props: WidgetLayoutProps) {
       isDraggable={customizing}
       isResizable={customizing}
       draggableCancel=".rgl-no-drag, button, a, input, label, select, textarea"
-      compactType="vertical"
+      // FREE PLACEMENT — the Android-home-screen model (CHANGE 2). compactType=null
+      // turns OFF RGL's auto-packing so a tile stays EXACTLY where it's dropped and
+      // empty cells/gaps between tiles are preserved (vertical compaction used to
+      // collapse every gap upward, which is what prevented free placement).
+      // preventCollision=true makes a drag/resize STOP if it would overlap another
+      // tile, so tiles can't stack on top of each other — they keep their own
+      // cells on the fixed 12-col × fit-rowHeight grid. Together: a fixed cell
+      // matrix you can drop tiles anywhere on, with the space between them intact.
+      compactType={null}
+      preventCollision
       onLayoutChange={onLayoutChange}
       onDragStop={(layout) => onGestureStop(layout)}
       onResizeStop={(layout) => onGestureStop(layout)}
