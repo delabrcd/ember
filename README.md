@@ -1,7 +1,7 @@
 # National Grid Dashboard
 
 [![Release](https://img.shields.io/github/v/release/delabrcd/ngrid-dashboard?sort=semver)](https://github.com/delabrcd/ngrid-dashboard/releases/latest)
-[![Build and publish image](https://github.com/delabrcd/ngrid-dashboard/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/delabrcd/ngrid-dashboard/actions/workflows/docker-publish.yml)
+[![CI](https://github.com/delabrcd/ngrid-dashboard/actions/workflows/docker-publish.yml/badge.svg?branch=main)](https://github.com/delabrcd/ngrid-dashboard/actions/workflows/docker-publish.yml)
 [![License: MIT](https://img.shields.io/github/license/delabrcd/ngrid-dashboard)](LICENSE)
 [![GHCR image](https://img.shields.io/badge/ghcr.io-delabrcd%2Fngrid--dashboard-2496ED?logo=docker&logoColor=white)](https://github.com/delabrcd/ngrid-dashboard/pkgs/container/ngrid-dashboard)
 
