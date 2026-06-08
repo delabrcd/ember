@@ -24,9 +24,9 @@ import { ScrapeProgressBanner } from './ScrapeProgress';
 import { RangeControl } from './RangeControl';
 import { NgLoginsSection } from './NgLoginsSection';
 import { CockpitPager } from './CockpitPager';
-import { YoyPanel } from './YoyPanel';
+import { ComparePeriods } from './ComparePeriods';
 import { useDashboardData } from './useDashboardData';
-import { dateLabel, estimateTooltip, num, rate, relativeFromNow, usd } from '@/lib/format';
+import { dateLabel, estimateTooltip, num, rate, relativeFromNow, signedPct, usd } from '@/lib/format';
 
 // Up to four charts per page in the paginated "fit" cockpit (issue #38), laid out
 // 2×2 so each chart is comfortably tall on a laptop.
@@ -135,6 +135,15 @@ export function Dashboard() {
 
   const visibleCharts = prefs.order.filter((id) => prefs.charts[id]?.visible && SPEC_BY_ID[id]);
   const fit = prefs.density === 'fit';
+
+  // "vs last year (normalized)" card (issue #47). Latest-month-vs-same-month-a-
+  // year-ago, weather-normalized, per fuel — computed server-side (ov.latestYoy).
+  // We show whichever fuels have a result; the card self-hides only when neither
+  // fuel matched a prior-year month (like the other optional cards). The number
+  // shown is the normalized (intensity) change, the honest "did I use less" figure.
+  const yoyCard = ov?.latestYoy ?? null;
+  const yoyCardFuels = yoyCard ? [yoyCard.elec, yoyCard.gas].filter((r) => r != null) : [];
+  const showYoyCard = yoyCardFuels.length > 0;
 
   // Chart pagination (issue #38): in "fit" density at ≥xl we page through the
   // visible charts (in the user's chosen order) up to four at a time in a 2×2 grid
@@ -319,12 +328,13 @@ export function Dashboard() {
               the FILL_BODY_CLASSES height constant is tuned to this chrome.
               Comfortable density stays roomier. */}
           {/* lg column count tracks the number of cards actually rendered (issue
-              #71): 4 fixed + the optional est-next and proj cards. We map to an
-              explicit literal so the class string is visible to Tailwind's JIT. */}
+              #71): 4 fixed + the optional est-next, proj, carbon and vs-last-year
+              cards. We map to an explicit literal so the class string is visible to
+              Tailwind's JIT. */}
           <div
             className={`grid shrink-0 grid-cols-2 gap-2 sm:grid-cols-3 ${
-              { 4: 'lg:grid-cols-4', 5: 'lg:grid-cols-5', 6: 'lg:grid-cols-6', 7: 'lg:grid-cols-7' }[
-                4 + (ov?.nextBillEstimate ? 1 : 0) + (seasonCard ? 1 : 0) + (ov?.emissions ? 1 : 0)
+              { 4: 'lg:grid-cols-4', 5: 'lg:grid-cols-5', 6: 'lg:grid-cols-6', 7: 'lg:grid-cols-7', 8: 'lg:grid-cols-8' }[
+                4 + (ov?.nextBillEstimate ? 1 : 0) + (seasonCard ? 1 : 0) + (ov?.emissions ? 1 : 0) + (showYoyCard ? 1 : 0)
               ]
             } ${
               fit
@@ -424,16 +434,50 @@ export function Dashboard() {
                 </div>
               </div>
             ) : null}
+            {/* vs-last-year (normalized) card (issue #47): the always-visible fix
+                for the old density-hidden YoyPanel. Shows the weather-normalized
+                usage change for the latest month vs the same calendar month a year
+                ago, per fuel ("Elec +2% · Gas −5%"). Renders in BOTH densities (it
+                lives in this shared top strip). The number is the honest normalized
+                (intensity) change; the full breakdown lives in the Compare tool
+                below. Self-hides when no fuel has a prior-year match. */}
+            {showYoyCard ? (
+              <div className="card relative !p-3">
+                <div className="card-title flex items-center gap-1 text-xs">
+                  vs last year
+                  <span
+                    tabIndex={0}
+                    role="img"
+                    aria-label="Weather-normalized usage change for the latest month vs the same calendar month one year earlier, per fuel. It compares usage per degree-day so a warmer/colder month doesn't masquerade as using less/more — the honest 'did I actually use less' number. Use the Compare periods tool below for the full breakdown and other windows. Not a real charge."
+                    title="Weather-normalized usage change for the latest month vs the same calendar month one year earlier, per fuel. It compares usage per degree-day so a warmer/colder month doesn't masquerade as using less/more — the honest 'did I actually use less' number. Use the Compare periods tool below for the full breakdown and other windows. Not a real charge."
+                    className="inline-flex h-4 w-4 cursor-help items-center justify-center rounded-full border border-slate-600/70 text-[10px] font-semibold text-slate-400 transition hover:border-slate-400 hover:text-slate-200 focus:outline-none focus:ring-1 focus:ring-amber-500/60"
+                  >
+                    i
+                  </span>
+                </div>
+                <div className="stat flex items-baseline gap-2 text-2xl">
+                  {yoyCard?.elec ? (
+                    <span><span className="text-sm text-amber-400">Elec</span> {signedPct(yoyCard.elec.normalizedPct)}</span>
+                  ) : null}
+                  {yoyCard?.gas ? (
+                    <span><span className="text-sm text-sky-400">Gas</span> {signedPct(yoyCard.gas.normalizedPct)}</span>
+                  ) : null}
+                </div>
+                <div className="sub mt-0.5 text-[11px] text-slate-500">normalized vs last yr</div>
+              </div>
+            ) : null}
           </div>
 
-          {/* Year-over-year weather-normalized verdict (issue #47): a sentence
-              per fuel ("X% more kWh, but Y% degree-days — ~Z% lower after
-              normalizing") plus the raw/weather/behaviour breakdown and an
-              honest current-rate cost figure. All math is server-side (pure
-              compareYoY); this is a thin panel. Hidden when there's no full
-              prior-year window to compare. Tucked behind "fit" density to avoid
-              stealing the pinned-viewport chart space. */}
-          {ov?.yoy && !fit ? <YoyPanel yoy={ov.yoy} currencyDecimals={dp} /> : null}
+          {/* Interactive "Compare periods" tool (issue #47): pick any two windows
+              (preset — trailing-12, this-winter-vs-last, YTD — or two custom range
+              pickers) and see the full weather-normalized per-fuel breakdown. This
+              REPLACES the old density-hidden YoyPanel; it renders in BOTH densities
+              so the YoY story is actually reachable (the top-strip card covers the
+              at-a-glance need; this is the deep dive). All period math is pure +
+              tested (comparePresets + compareYoY); the component just wires inputs
+              → helpers → display. In fit mode it sits below the strip and the page
+              may scroll — an accepted tradeoff for discoverability. */}
+          <ComparePeriods rows={rows} currencyDecimals={dp} />
 
           {/* Main region: charts grid + bills rail. At ≥xl in "fit" density the
               charts carry explicit (100dvh-derived) heights so the three rows add

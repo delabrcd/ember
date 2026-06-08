@@ -244,6 +244,28 @@ export function compareYoY(
   };
 }
 
+// Latest-month vs same-calendar-month-a-year-ago weather-normalized comparison
+// (issue #47, the always-visible top-strip card). Picks the most recent row that
+// carries usage as period A, then matches the SAME calendar month one year
+// earlier (ym − 100, e.g. 202503 → 202403) as period B and runs the pure
+// compareYoY on the two single-month windows. Rates are the currentCharges-sourced
+// trailing-12 all-in (same basis the headline rate cards use), so the normalized
+// cost figure is honest. Returns null when there's no usage at all or no
+// prior-year row to match against; per-fuel nulls (a fuel with no prior-year
+// match) fall out of compareYoY so the card shows "—" for that fuel. PURE.
+export function latestVsYearAgo(rows: MonthRow[]): YoyResult | null {
+  const withUsage = rows.filter((r) => r.kwh != null || r.therms != null);
+  if (withUsage.length === 0) return null;
+  const latest = withUsage[withUsage.length - 1];
+  const priorYm = latest.ym - 100; // same calendar month, one year earlier
+  const prior = rows.find((r) => r.ym === priorYm);
+  if (!prior) return null;
+  return compareYoY([latest], [prior], {
+    elec: trailing12AllIn(rows, 'elec'),
+    gas: trailing12AllIn(rows, 'gas'),
+  });
+}
+
 // Effective all-in $/unit over the most recent 12 months that have data:
 // total (supply + delivery) cost divided by total usage.
 export function trailing12AllIn(rows: MonthRow[], fuel: 'elec' | 'gas'): number | null {

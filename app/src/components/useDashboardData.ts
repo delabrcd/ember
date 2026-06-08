@@ -39,11 +39,12 @@ export interface Overview {
     gallonsGasoline: number;
     treeYears: number;
   } | null;
-  // Year-over-year weather-normalized comparison (issue #47): per-fuel raw vs
-  // weather-explained vs normalized-intensity deltas + a current-rate normalized
-  // cost view. Computed purely server-side (compareYoY); null without a full
-  // prior-year window to compare against.
-  yoy?: YoyResult | null;
+  // "vs last year (normalized)" top-strip card (issue #47): the weather-normalized
+  // usage change for the latest usage month vs the same calendar month a year
+  // earlier, per fuel. Computed purely server-side (latestVsYearAgo → compareYoY);
+  // null without a prior-year month to match. The full interactive compare tool
+  // computes its own windows client-side from the loaded series rows.
+  latestYoy?: YoyResult | null;
   latestBill?: { statementDate: string; totalDueAmount: number | null } | null;
   firstStatement?: string | null;
   schedule?: { predictedNextBillDate: string | null; nextCheckAt: string | null; lastCheckedAt: string | null } | null;

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { MonthRow } from '../src/lib/chartSpec';
-import { compareYoY } from '../src/lib/series';
+import { compareYoY, latestVsYearAgo } from '../src/lib/series';
 import { signedPct, yoyVerdict } from '../src/lib/format';
 
 const mkRow = (over: Partial<MonthRow>): MonthRow => ({
@@ -139,6 +139,52 @@ describe('compareYoY (hand-calculated)', () => {
     const { elec, gas } = compareYoY(a, b);
     expect(elec).not.toBeNull();
     expect(gas).toBeNull(); // no therms anywhere
+  });
+});
+
+describe('latestVsYearAgo (single-month window picker, hand-calculated)', () => {
+  it('compares the latest usage month against the same month a year earlier', () => {
+    // Latest usage row is Mar 2025 (202503); its prior-year match is 202403.
+    // Electric: prior 800 kWh / 1000 DD = 0.8; latest 900 kWh / 1000 DD = 0.9.
+    //   raw +100 kWh (+12.5%), DD flat, normalized (0.9 − 0.8)/0.8 = +12.5%.
+    const rows: MonthRow[] = [
+      mkRow({ ym: 202403, kwh: 800, hdd: 1000, cdd: 0 }),
+      mkRow({ ym: 202412, kwh: 850, hdd: 1000, cdd: 0 }), // noise between the two
+      mkRow({ ym: 202503, kwh: 900, hdd: 1000, cdd: 0 }),
+    ];
+    const res = latestVsYearAgo(rows);
+    expect(res).not.toBeNull();
+    expect(res!.elec).not.toBeNull();
+    const e = res!.elec!;
+    expect(e.usageA).toBe(900);
+    expect(e.usageB).toBe(800);
+    expect(e.rawUsagePct).toBeCloseTo(0.125, 10);
+    expect(e.ddPct).toBeCloseTo(0, 10);
+    expect(e.normalizedPct).toBeCloseTo(0.125, 10);
+  });
+
+  it('returns a per-fuel null (→ "—") when only one fuel has a prior-year match', () => {
+    // Latest month has both fuels; prior-year month has gas only → elec is null,
+    // gas compares. (compareYoY yields null per fuel with no usable B data.)
+    const rows: MonthRow[] = [
+      mkRow({ ym: 202403, therms: 100, hdd: 500 }), // prior year: gas only
+      mkRow({ ym: 202503, kwh: 900, therms: 110, hdd: 500, cdd: 0 }),
+    ];
+    const res = latestVsYearAgo(rows)!;
+    expect(res.elec).toBeNull(); // no electric in the prior-year window
+    expect(res.gas).not.toBeNull();
+    expect(res.gas!.usageA).toBe(110);
+    expect(res.gas!.usageB).toBe(100);
+  });
+
+  it('returns null when there is no prior-year row to match', () => {
+    const rows: MonthRow[] = [mkRow({ ym: 202503, kwh: 900, hdd: 1000, cdd: 0 })];
+    expect(latestVsYearAgo(rows)).toBeNull();
+  });
+
+  it('returns null with no usage anywhere', () => {
+    const rows: MonthRow[] = [mkRow({ ym: 202503, hdd: 1000 })];
+    expect(latestVsYearAgo(rows)).toBeNull();
   });
 });
 

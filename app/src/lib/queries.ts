@@ -14,7 +14,7 @@ import {
   projectSeason,
   type SeasonProjection,
 } from '@/lib/prediction';
-import { trailing12AllIn, compareYoY, type YoyResult } from '@/lib/series';
+import { trailing12AllIn, latestVsYearAgo, type YoyResult } from '@/lib/series';
 import { seasonNormalsByMonth, nextBillWindowDegreeDays } from '@/lib/weather/expectedDegreeDaysSync';
 import { shapeAccount, type AccountSummary } from '@/lib/accountSwitcher';
 import { ymFromDate as ymOf, isoDate as ymd } from '@/lib/ym';
@@ -198,27 +198,6 @@ async function computeSeasonProjection(
   });
 }
 
-// Year-over-year weather-normalized comparison (issue #47). Pure assembly: slice
-// the series into the trailing 12 months that have usage (period A) and the 12
-// months before that (prior year, period B), then hand both windows to the pure
-// compareYoY along with the SAME PDF-sourced trailing-12 all-in rates the
-// headline cards use (currentCharges basis) for the normalized cost view. Returns
-// null when there isn't a full prior-year window to compare against. Never feeds
-// a real cost number or /api/verify.
-function computeYoY(series: MonthRow[]): YoyResult | null {
-  // Anchor the windows on rows that actually carry usage, so a trailing run of
-  // not-yet-scraped months doesn't shift the comparison.
-  const withUsage = series.filter((r) => r.kwh != null || r.therms != null);
-  if (withUsage.length < 13) return null; // need A's start + at least one prior month
-  const periodA = withUsage.slice(-12);
-  const periodB = withUsage.slice(-24, -12);
-  if (periodB.length === 0) return null;
-  return compareYoY(periodA, periodB, {
-    elec: trailing12AllIn(series, 'elec'),
-    gas: trailing12AllIn(series, 'gas'),
-  });
-}
-
 export async function getOverview(accountId: number) {
   const [account, bills, schedule, lastRun, series] = await Promise.all([
     prisma.account.findUnique({ where: { id: accountId } }),
@@ -253,12 +232,14 @@ export async function getOverview(accountId: number) {
   // (the series already carries per-row co2e). A location-based ESTIMATE only;
   // never a cost number, never fed to /api/verify.
   const emissions = trailing12Emissions(series);
-  // Year-over-year weather-normalized verdict (issue #47): per-fuel raw vs
-  // weather-explained vs normalized-intensity deltas + a current-rate normalized
-  // cost view, comparing the trailing 12 months to the prior year. PURE
-  // (compareYoY); rates are the currentCharges-sourced trailing-12 all-in. Never
-  // a real cost number, never fed to /api/verify.
-  const yoy = computeYoY(series);
+  // Always-visible "vs last year (normalized)" top-strip card (issue #47): the
+  // weather-normalized usage change for the LATEST usage month vs the same
+  // calendar month one year earlier, per fuel. PURE (latestVsYearAgo → compareYoY);
+  // rates are the currentCharges-sourced trailing-12 all-in for the normalized
+  // figure. null when there's no prior-year month to match. Never a real cost
+  // number, never fed to /api/verify. The full interactive period-compare tool
+  // computes its own windows client-side from the loaded series.
+  const latestYoy: YoyResult | null = latestVsYearAgo(series);
   const latest = bills[0] ? shapeBill(bills[0]) : null;
   return {
     account: account
@@ -275,7 +256,7 @@ export async function getOverview(accountId: number) {
     nextBillEstimate,
     seasonProjection,
     emissions,
-    yoy,
+    latestYoy,
     latestBill: latest
       ? {
           statementDate: latest.statementDate,
