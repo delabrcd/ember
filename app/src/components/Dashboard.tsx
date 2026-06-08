@@ -404,7 +404,12 @@ export function Dashboard() {
               )
             )}
           </div>
-          <div className="flex items-center gap-2">
+          {/* Header actions. flex-wrap + justify-end so the button cluster
+              (Customize / bell / Tools / Settings / Refresh) wraps onto a second
+              line on narrow screens instead of overflowing the viewport (the
+              added Customize button pushed the unwrapped row past ~390px → a
+              horizontal scrollbar on mobile). No effect at widths where they fit. */}
+          <div className="flex flex-wrap items-center justify-end gap-2 gap-y-2">
             {/* Customize / Done toggle (Phase E, #73): flips the grid between the
                 static default view and the drag/resize/add/remove edit mode. Only
                 shown when there's data to arrange. */}
