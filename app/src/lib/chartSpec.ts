@@ -17,6 +17,12 @@ export interface MonthRow {
   gasRateSupply: number | null;
   elecRateAllIn: number | null;
   gasRateAllIn: number | null;
+  // Trailing average of the effective SUPPLY $/unit (issue #48). Usage-weighted
+  // over a trailing window so a slowly creeping variable supply rate stands out
+  // against the noisier per-month line on the rates chart. Populated by
+  // withSupplyRateTrailing() in series.ts; null until a row's window has data.
+  elecRateSupplyAvg?: number | null;
+  gasRateSupplyAvg?: number | null;
   avgTemp: number | null;
   billTotal: number | null;
   // Length of the bill period in days, inclusive ((periodTo - periodFrom) + 1).
@@ -122,11 +128,15 @@ export const CHART_SPECS: ChartSpec[] = [
   {
     id: 'rates',
     title: 'Effective rates',
-    subtitle: 'Supply rate (solid) and all-in rate (dashed)',
+    subtitle: 'Supply rate (solid), trailing avg (dashed soft) and all-in rate (dashed)',
     series: [
       { key: 'elecRateSupply', label: 'Elec $/kWh', color: ELEC, role: 'line', axis: 'left' },
+      // Trailing-average supply rate (issue #48) — soft dashed, so a creeping
+      // variable supply rate is visible against the noisier per-month line.
+      { key: 'elecRateSupplyAvg', label: 'Elec $/kWh supply avg', color: ELEC_SOFT, role: 'line', axis: 'left', dash: true },
       { key: 'elecRateAllIn', label: 'Elec $/kWh all-in', color: ELEC, role: 'line', axis: 'left', dash: true },
       { key: 'gasRateSupply', label: 'Gas $/therm', color: GAS, role: 'line', axis: 'right' },
+      { key: 'gasRateSupplyAvg', label: 'Gas $/therm supply avg', color: GAS_SOFT, role: 'line', axis: 'right', dash: true },
       { key: 'gasRateAllIn', label: 'Gas $/therm all-in', color: GAS, role: 'line', axis: 'right', dash: true },
     ],
     leftFmt: money2,

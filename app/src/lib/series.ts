@@ -244,6 +244,39 @@ export function compareYoY(
   };
 }
 
+// Supply-rate trend trailing average (issue #48). Stamps each row with the
+// trailing-N-month average effective SUPPLY $/unit so a slowly creeping variable
+// rate is visible on the rates chart against the raw per-month line. Usage-weighted
+// (total supply cost / total usage over the window), matching trailing12AllIn's
+// definition rather than a flat mean of per-month rates, so a high-usage month
+// pulls the average the way it pulls the bill. Mutates rows in place (they're
+// freshly built by deriveMonthlySeries); window default 6 months. A row only gets
+// an average once enough prior data exists in its window — null otherwise, so the
+// dashed trend line starts where it's meaningful.
+export function withSupplyRateTrailing(rows: MonthRow[], window = 6): MonthRow[] {
+  const fuels = [
+    { supply: 'elecSupply', use: 'kwh', avg: 'elecRateSupplyAvg' },
+    { supply: 'gasSupply', use: 'therms', avg: 'gasRateSupplyAvg' },
+  ] as const;
+  for (let i = 0; i < rows.length; i++) {
+    for (const f of fuels) {
+      let cost = 0;
+      let use = 0;
+      let n = 0;
+      for (let j = Math.max(0, i - window + 1); j <= i; j++) {
+        const c = rows[j][f.supply] as number | null;
+        const u = rows[j][f.use] as number | null;
+        if (c == null || u == null || u <= 0) continue;
+        cost += c;
+        use += u;
+        n += 1;
+      }
+      rows[i][f.avg] = n > 0 && use > 0 ? cost / use : null;
+    }
+  }
+  return rows;
+}
+
 // Effective all-in $/unit over the most recent 12 months that have data:
 // total (supply + delivery) cost divided by total usage.
 export function trailing12AllIn(rows: MonthRow[], fuel: 'elec' | 'gas'): number | null {
@@ -258,4 +291,83 @@ export function trailing12AllIn(rows: MonthRow[], fuel: 'elec' | 'gas'): number 
     use += r[useKey] as number;
   }
   return use > 0 ? cost / use : null;
+}
+
+// ESCO supply-rate what-if back-test (issue #48). The biggest controllable lever
+// on a National Grid bill is the SUPPLY rate — you can switch ESCO suppliers while
+// DELIVERY stays with the utility — so this answers "what would a quoted fixed
+// supply rate have cost me against my actual historical usage?".
+//
+// For each fuel, sum the actual PDF-sourced supply cost (elecSupply / gasSupply —
+// NEVER totalDueAmount) and the actual usage (kwh / therms) over every row that
+// has BOTH (so actual and hypothetical cover the same months), then price that
+// same usage at the user's hypothetical fixed rate:
+//   hypothetical = Σ usage × rate
+//   delta        = hypothetical − actual   (negative = you'd have SAVED)
+// Delivery is held constant (it doesn't change with supplier), so it never enters
+// the math. A fuel with no hypothetical rate, or no usable months, comes back
+// null. Pure arithmetic so it's hand-calculable in tests; the component only
+// collects the two rates and renders the returned numbers.
+
+export type WhatIfFuel = 'elec' | 'gas';
+
+export interface WhatIfFuelResult {
+  fuel: WhatIfFuel;
+  rate: number; // the hypothetical fixed supply $/unit applied
+  usage: number; // total actual usage over the back-tested months
+  months: number; // count of months that had both supply cost and usage
+  actual: number; // total actual supply cost (PDF-sourced)
+  hypothetical: number; // usage × rate
+  delta: number; // hypothetical − actual (negative = savings)
+}
+
+export interface WhatIfResult {
+  elec: WhatIfFuelResult | null;
+  gas: WhatIfFuelResult | null;
+  // Combined across whichever fuels were priced (null if neither). The net delta
+  // is the headline "$Z saved/lost" figure.
+  actual: number | null;
+  hypothetical: number | null;
+  delta: number | null;
+}
+
+const WHATIF_KEYS = {
+  elec: { supply: 'elecSupply', use: 'kwh' },
+  gas: { supply: 'gasSupply', use: 'therms' },
+} as const;
+
+function whatIfFuel(rows: MonthRow[], fuel: WhatIfFuel, rate: number | null | undefined): WhatIfFuelResult | null {
+  if (rate == null || !(rate > 0)) return null;
+  const k = WHATIF_KEYS[fuel];
+  let usage = 0;
+  let actual = 0;
+  let months = 0;
+  for (const r of rows) {
+    const c = r[k.supply] as number | null;
+    const u = r[k.use] as number | null;
+    if (c == null || u == null || u <= 0) continue;
+    usage += u;
+    actual += c;
+    months += 1;
+  }
+  if (months === 0) return null;
+  const hypothetical = usage * rate;
+  return { fuel, rate, usage, months, actual, hypothetical, delta: hypothetical - actual };
+}
+
+// Back-test hypothetical fixed ESCO supply rates against actual historical usage
+// for both fuels. `rates.elecRate` is $/kWh, `rates.gasRate` is $/therm; omit or
+// pass a non-positive rate to skip a fuel. The caller slices `rows` to the window
+// it wants back-tested (e.g. the on-screen range or trailing 12 months).
+export function whatIfSupply(
+  rows: MonthRow[],
+  rates: { elecRate?: number | null; gasRate?: number | null }
+): WhatIfResult {
+  const elec = whatIfFuel(rows, 'elec', rates.elecRate);
+  const gas = whatIfFuel(rows, 'gas', rates.gasRate);
+  const parts = [elec, gas].filter((p): p is WhatIfFuelResult => p != null);
+  if (parts.length === 0) return { elec, gas, actual: null, hypothetical: null, delta: null };
+  const actual = parts.reduce((s, p) => s + p.actual, 0);
+  const hypothetical = parts.reduce((s, p) => s + p.hypothetical, 0);
+  return { elec, gas, actual, hypothetical, delta: hypothetical - actual };
 }

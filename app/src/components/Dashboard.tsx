@@ -25,6 +25,7 @@ import { RangeControl } from './RangeControl';
 import { NgLoginsSection } from './NgLoginsSection';
 import { CockpitPager } from './CockpitPager';
 import { YoyPanel } from './YoyPanel';
+import { SupplyWhatIf } from './SupplyWhatIf';
 import { useDashboardData } from './useDashboardData';
 import { dateLabel, estimateTooltip, num, rate, relativeFromNow, usd } from '@/lib/format';
 
@@ -434,6 +435,17 @@ export function Dashboard() {
               prior-year window to compare. Tucked behind "fit" density to avoid
               stealing the pinned-viewport chart space. */}
           {ov?.yoy && !fit ? <YoyPanel yoy={ov.yoy} currencyDecimals={dp} /> : null}
+
+          {/* ESCO supply-rate what-if (issue #48): the supply rate is the biggest
+              controllable lever (delivery stays with the utility), so this lets
+              you enter a quoted fixed supply rate and back-test it against actual
+              historical usage over the on-screen range. All math is the pure
+              whatIfSupply (lib/series.ts); the panel only collects the rates and
+              renders the saved/lost figure. The supply-rate TREND itself lives on
+              the "Effective rates" chart (the dashed trailing-average series).
+              Tucked behind "fit" density to preserve the pinned-viewport chart
+              space, like the YoY panel. */}
+          {!fit ? <SupplyWhatIf rows={ranged} currencyDecimals={dp} /> : null}
 
           {/* Main region: charts grid + bills rail. At ≥xl in "fit" density the
               charts carry explicit (100dvh-derived) heights so the three rows add

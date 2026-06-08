@@ -14,7 +14,7 @@ import {
   projectSeason,
   type SeasonProjection,
 } from '@/lib/prediction';
-import { trailing12AllIn, compareYoY, type YoyResult } from '@/lib/series';
+import { trailing12AllIn, compareYoY, withSupplyRateTrailing, type YoyResult } from '@/lib/series';
 import { seasonNormalsByMonth, nextBillWindowDegreeDays } from '@/lib/weather/expectedDegreeDaysSync';
 import { shapeAccount, type AccountSummary } from '@/lib/accountSwitcher';
 import { ymFromDate as ymOf, isoDate as ymd } from '@/lib/ym';
@@ -159,7 +159,10 @@ export async function getMonthlySeries(accountId: number): Promise<MonthRow[]> {
   // gridEmissionFactor AppSetting override if set, else the account region's eGRID
   // subregion default. PURE — see lib/emissions.ts.
   const factors = resolveEmissionFactors(account?.region, gridFactorSetting);
-  return estimateEmissions(rows, factors);
+  // Supply-rate trend (issue #48): stamp the trailing-average supply $/unit so the
+  // rates chart can show the dashed trend line. Pure, in place; after the cost/rate
+  // math, never feeds /api/verify.
+  return withSupplyRateTrailing(estimateEmissions(rows, factors));
 }
 
 export async function getBills(accountId: number) {
