@@ -7,6 +7,7 @@ import { syncHistoricalWeather } from '@/lib/weather/sync';
 import { notifyNewBills, notifyAnomaly } from '@/lib/notify';
 import { detectAnomalies } from '@/lib/anomaly';
 import { getMonthlySeries } from '@/lib/queries';
+import { syncNotifications } from '@/lib/notificationStore';
 import { collect } from './collect';
 import { persist } from './persist';
 import { classifyLoginError, shouldSkipScheduled, statusOnSuccess } from './loginStatus';
@@ -223,6 +224,21 @@ export async function runScrape(
           }
         } catch (aerr: any) {
           progress(`anomaly notify skipped: ${String(aerr?.message || aerr).slice(0, 200)}`);
+        }
+
+        // Server-side notification log (notification-log feature). Persist the
+        // new-bill + anomaly EVENTS into the Notification table so the in-app bell
+        // has a clickable history even if the UI never fetched. Idempotent (INSERTs
+        // only missing rows by (accountId, key), never touches readAt), so this is
+        // safe to run every scrape. Fully contained — a log hiccup must never fail
+        // or slow a successful scrape.
+        try {
+          for (const accountId of scrapedAccountIds) {
+            const inserted = await syncNotifications(accountId);
+            if (inserted) progress(`notification log: ${inserted} new`);
+          }
+        } catch (lerr: any) {
+          progress(`notification log skipped: ${String(lerr?.message || lerr).slice(0, 200)}`);
         }
       }
 

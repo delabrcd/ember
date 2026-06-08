@@ -128,6 +128,88 @@ export function buildNotifications(
 }
 
 // ---------------------------------------------------------------------------
+// Server-side notification log (notification-log feature). The PURE derivation of
+// the rows to UPSERT into the Notification table: one per bill (the full history,
+// not just the latest) and one per current anomaly flag. The impure store
+// (notificationStore.ts) computes these from the account's bills + detectAnomalies
+// and idempotently upserts them by (accountId, key) — INSERT only, never touching
+// readAt/createdAt — so this stays a no-DB, hand-testable transform.
+//
+// Keys are the SAME stable formats the in-app bell already used (see the header):
+//   bill:{statementDate}                  (one per stored bill)
+//   anomaly:{ym}:{fuel}:{metric}          (one per flag)
+// so a row is created once and read/unread is tracked against it forever.
+// ---------------------------------------------------------------------------
+
+// One bill the log derives from — the shaped, client-safe summary (no secret /
+// account number). Structurally a subset of queries.ts' shapeBill output.
+export interface NotificationBillInput {
+  statementDate: string;
+  totalDueAmount: number | null;
+  periodFrom?: string | null;
+  periodTo?: string | null;
+  hasPdf?: boolean;
+}
+
+// A row to upsert into the Notification table. `payload` is the JSON the detail
+// modal renders later (the AnomalyFlag for an anomaly, the bill summary for a
+// bill); it must never carry a secret. accountId is nullable to match the model
+// (env-bootstrapped data could have no account row, though in practice it's set).
+export interface NotificationRow {
+  accountId: number | null;
+  kind: NotificationKind;
+  key: string;
+  title: string;
+  message: string;
+  payload: NotificationBillInput | AnomalyFlag;
+}
+
+// Build the notification ROWS for an account from its full bill history and its
+// current anomaly flags: one 'bill' row per bill and one 'anomaly' row per flag,
+// each with its stable key, a human title/message, and the payload the detail view
+// needs. PURE — same inputs always yield the same rows (no DB, no ordering
+// promise; the store/list layer orders by createdAt). Bills first, then anomalies.
+export function deriveNotifications(
+  bills: NotificationBillInput[],
+  anomalies: AnomalyFlag[],
+  accountId: number | null
+): NotificationRow[] {
+  const out: NotificationRow[] = [];
+
+  for (const b of bills) {
+    if (!b.statementDate) continue;
+    const mon = monthShort(b.statementDate);
+    out.push({
+      accountId,
+      kind: 'bill',
+      key: `bill:${b.statementDate}`,
+      title: 'New bill',
+      message: `New bill: ${dollars(b.totalDueAmount)}${mon ? ` (${mon})` : ''}`,
+      payload: {
+        statementDate: b.statementDate,
+        totalDueAmount: b.totalDueAmount,
+        periodFrom: b.periodFrom ?? null,
+        periodTo: b.periodTo ?? null,
+        hasPdf: b.hasPdf ?? false,
+      },
+    });
+  }
+
+  for (const f of anomalies) {
+    out.push({
+      accountId,
+      kind: 'anomaly',
+      key: `anomaly:${f.ym}:${f.fuel}:${f.metric}`,
+      title: describeAnomaly(f).title,
+      message: f.message,
+      payload: f,
+    });
+  }
+
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Anomaly detail (notification-details feature). Clicking an anomaly notification
 // opens a breakdown; this pure helper turns the raw AnomalyFlag into the structured
 // fields that view renders, so NO formatting/arithmetic lives in the component. It

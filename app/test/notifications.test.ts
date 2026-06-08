@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { buildNotifications, describeAnomaly, type NotificationsOverview } from '../src/lib/notifications';
+import {
+  buildNotifications,
+  deriveNotifications,
+  describeAnomaly,
+  type NotificationsOverview,
+} from '../src/lib/notifications';
 import type { AnomalyFlag, AnomalyResult } from '../src/lib/anomaly';
 
 // Minimal AnomalyFlag factory — only the fields the notification key + message use
@@ -106,6 +111,89 @@ describe('buildNotifications', () => {
     expect(anomaly.flag?.fuel).toBe('elec');
     expect(anomaly.flag?.metric).toBe('usage');
     expect(anomaly.bill).toBeUndefined();
+  });
+});
+
+describe('deriveNotifications', () => {
+  // N bills + M flags => N+M rows, bills first, with the stable keys + payloads.
+  it('produces one row per bill plus one per flag with stable keys', () => {
+    const bills = [
+      { statementDate: '2026-06-03', totalDueAmount: 192.24, periodFrom: '2026-05-01', periodTo: '2026-05-31', hasPdf: true },
+      { statementDate: '2026-05-04', totalDueAmount: 88.5, periodFrom: '2026-04-01', periodTo: '2026-04-30', hasPdf: false },
+    ];
+    const flags = [
+      mkFlag({ ym: 202406, fuel: 'elec', metric: 'usage', message: 'electric usage ~30% above weather-normalized expectation' }),
+      mkFlag({ ym: 202406, fuel: 'gas', metric: 'rate', direction: 'above', message: 'gas rate ~12% above recent rate band' }),
+    ];
+    const rows = deriveNotifications(bills, flags, 7);
+    expect(rows).toHaveLength(4);
+    expect(rows.map((r) => r.key)).toEqual([
+      'bill:2026-06-03',
+      'bill:2026-05-04',
+      'anomaly:202406:elec:usage',
+      'anomaly:202406:gas:rate',
+    ]);
+    // Every row carries the account id and its kind.
+    expect(rows.every((r) => r.accountId === 7)).toBe(true);
+    expect(rows.slice(0, 2).every((r) => r.kind === 'bill')).toBe(true);
+    expect(rows.slice(2).every((r) => r.kind === 'anomaly')).toBe(true);
+  });
+
+  // A bill row carries the bill summary as payload (whole-dollar message, period,
+  // hasPdf) and a humanized title.
+  it('carries the bill summary in the payload', () => {
+    const rows = deriveNotifications(
+      [{ statementDate: '2026-06-03', totalDueAmount: 192.24, periodFrom: '2026-05-01', periodTo: '2026-05-31', hasPdf: true }],
+      [],
+      1
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].kind).toBe('bill');
+    expect(rows[0].title).toBe('New bill');
+    expect(rows[0].message).toBe('New bill: $192 (Jun)');
+    expect(rows[0].payload).toEqual({
+      statementDate: '2026-06-03',
+      totalDueAmount: 192.24,
+      periodFrom: '2026-05-01',
+      periodTo: '2026-05-31',
+      hasPdf: true,
+    });
+  });
+
+  // An anomaly row carries the FULL flag as payload (so describeAnomaly can rebuild
+  // the breakdown), the flag message verbatim, and the describeAnomaly title.
+  it('carries the full flag in the payload and uses the flag message', () => {
+    const flag = mkFlag({
+      ym: 202605, fuel: 'elec', metric: 'rate', direction: 'above',
+      message: 'electric rate ~12% above recent rate band',
+    });
+    const rows = deriveNotifications([], [flag], 1);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].kind).toBe('anomaly');
+    expect(rows[0].key).toBe('anomaly:202605:elec:rate');
+    expect(rows[0].title).toBe('Electric rate anomaly — May 2026');
+    expect(rows[0].message).toBe('electric rate ~12% above recent rate band');
+    expect(rows[0].payload).toEqual(flag);
+  });
+
+  // Defaults: missing period/hasPdf become null/false; a null amount renders a dash.
+  it('defaults missing bill fields and handles a null amount', () => {
+    const rows = deriveNotifications([{ statementDate: '2026-01-15', totalDueAmount: null }], [], null);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].accountId).toBeNull();
+    expect(rows[0].message).toBe('New bill: — (Jan)');
+    expect(rows[0].payload).toEqual({
+      statementDate: '2026-01-15',
+      totalDueAmount: null,
+      periodFrom: null,
+      periodTo: null,
+      hasPdf: false,
+    });
+  });
+
+  // No bills and no flags => no rows.
+  it('is empty with no bills and no flags', () => {
+    expect(deriveNotifications([], [], 1)).toEqual([]);
   });
 });
 

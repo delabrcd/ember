@@ -57,6 +57,7 @@ model Account {
   scrapeRuns    ScrapeRun[]
   scheduleState ScheduleState?
   weatherDaily  WeatherDaily[]
+  notifications Notification[]
 }
 
 // One statement. PDF is stored on disk; pdfPath points at it.
@@ -171,6 +172,29 @@ model ScrapeRun {
 model AppSetting {
   key   String @id
   value String
+}
+
+// Persistent server-side notification log (notification-log feature). Replaces the
+// derive-from-current-state bell: every new-bill and anomaly EVENT is stored once
+// (deduped by a stable `key`) so there's a clickable history with read/unread and
+// a "hide read" filter, surviving reloads and populated even when the UI never
+// fetched (the scheduled scrape syncs it). NEVER carries a secret — title/message/
+// amount/period only; the `payload` holds the AnomalyFlag or bill summary the
+// detail modal renders. Additive table (no existing data touched).
+model Notification {
+  id        Int       @id @default(autoincrement())
+  account   Account?  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  accountId Int?
+  kind      String // 'bill' | 'anomaly'
+  key       String // stable dedupe key: bill:{statementDate} | anomaly:{ym}:{fuel}:{metric}
+  title     String
+  message   String
+  payload   Json? // detail data for the detail modal (the AnomalyFlag, or bill summary)
+  createdAt DateTime  @default(now())
+  readAt    DateTime?
+
+  @@unique([accountId, key])
+  @@index([accountId, createdAt])
 }
 
 // Per-account scheduling: when we predict the next bill and when to next check.

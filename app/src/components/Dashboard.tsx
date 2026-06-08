@@ -26,7 +26,6 @@ import { NgLoginsSection } from './NgLoginsSection';
 import { CockpitPager } from './CockpitPager';
 import { ToolsModal, type ToolsTab } from './ToolsModal';
 import { NotificationsBell } from './NotificationsBell';
-import { buildNotifications } from '@/lib/notifications';
 import { useDashboardData } from './useDashboardData';
 import { dateLabel, estimateTooltip, num, rate, relativeFromNow, signedPct, usd } from '@/lib/format';
 
@@ -164,18 +163,14 @@ export function Dashboard() {
   // arithmetic happened server-side (ov.budget); this only renders it.
   const budget = ov?.budget ?? null;
 
-  // Header notifications bell (notifications-dropdown feature). The old inline
-  // amber anomaly banner (#45) is superseded by a dismissable dropdown that
-  // unifies the SAME events the email/webhook/ntfy channels send: usage/cost
-  // anomalies (ov.anomalies) AND the latest new-bill alert (#7, ov.latestBill).
-  // The list is derived by the pure buildNotifications helper (filtering keys the
-  // user has dismissed, persisted in prefs); dismiss appends the key. The badge
-  // counts only non-dismissed items.
-  const notifications = buildNotifications(ov, prefs.dismissedNotifications);
-  const dismissNotification = (key: string) => {
-    if (prefs.dismissedNotifications.includes(key)) return;
-    patch({ dismissedNotifications: [...prefs.dismissedNotifications, key] });
-  };
+  // Header notifications bell (notification-log feature). The old inline amber
+  // anomaly banner (#45) is superseded by a dropdown over the persistent
+  // SERVER-SIDE notification log — the SAME events the email/webhook/ntfy channels
+  // send: usage/cost anomalies (#45) AND new-bill alerts (#7). The bell fetches its
+  // own log (GET /api/notifications, scoped to the selected account) with read/
+  // unread and a "hide read" filter, so the dashboard no longer derives or passes
+  // the items in. We still hand it the loaded bills for the new-bill detail's PDF
+  // link.
 
   // On-demand Tools modal (UX refactor): the interactive Compare-periods (#47) and
   // Supply what-if (#48) tools no longer sit always-visible below the strip — they
@@ -305,8 +300,7 @@ export function Dashboard() {
               there's data (and thus a possible bill/anomaly) to surface. */}
           {!empty && (
             <NotificationsBell
-              notifications={notifications}
-              onDismiss={dismissNotification}
+              accountId={selectedAccountId}
               bills={bills}
               onOpenCompare={() => openTools('compare')}
             />
