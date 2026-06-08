@@ -240,11 +240,202 @@ jobs:
         if: always()
         run: docker rm -f boot || true
 
+  # Pre-migrate-backup coverage: exercise the REAL backup_before_migrate() code path
+  # in the deploy entrypoint via its `--pre-migrate-backup-only` hook. The unit tests
+  # never run the shell script and migration-safety/check.sh talks to psql directly,
+  # so this fail-closed safety net (the only thing standing between a schema change and
+  # `prisma db push --accept-data-loss` on a no-rollback prod) had ZERO automated
+  # coverage. #83 was a bug living entirely here (a %/@/#/$ char in DB_PASSWORD broke
+  # libpq URL parsing and crash-looped the container). This job runs the entrypoint
+  # against a Postgres 16 service and asserts every branch behaves.
+  #
+  # The service password is deliberately set to the #83 special-char value (p%a@s#s$),
+  # so EVERY assertion below also doubles as the #83 regression guard: the prisma steps
+  # (URL-encoded password in DATABASE_URL) and the discrete-libpq-param steps (raw
+  # password in DB_PASSWORD for the probe/pg_dump) must both work with it.
+  entrypoint-backup:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ngrid
+          # Special chars (%, @, #, $) — the exact class that broke libpq URL parsing
+          # in #83. Set once at container start; reused by every assertion below.
+          POSTGRES_PASSWORD: p%a@s#s$
+          POSTGRES_DB: ngrid
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ngrid" --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    env:
+      # DATABASE_URL carries the URL-ENCODED password (prisma's parser uses this);
+      # DB_PASSWORD carries it RAW (the backup probe/pg_dump use discrete libpq params,
+      # never the URL — that's the #83 fix). %25=% %40=@ %23=# %24=$
+      DATABASE_URL: postgresql://ngrid:p%25a%40s%23s%24@localhost:5432/ngrid
+      DB_USER: ngrid
+      DB_NAME: ngrid
+      DB_PASSWORD: p%a@s#s$
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # tags, in case the schema-delta setup wants prior releases
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Postgres 16 client (psql + pg_dump) from PGDG
+        # pg_dump REFUSES to dump a server newer than itself, so the client MUST be
+        # >= the postgres:16 service. ubuntu-latest's default postgresql-client can lag
+        # a major behind the service image, which would fail with a version-mismatch
+        # error mid-backup. Pin to postgresql-client-16 from the official PGDG apt repo
+        # to make pg_dump version-skew deterministic (classic CI footgun — see #84).
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends curl ca-certificates gnupg lsb-release
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            | sudo gpg --dearmor -o /usr/share/keyrings/pgdg.gpg
+          echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends postgresql-client-16
+          echo "psql:    $(psql --version)"
+          echo "pg_dump: $(pg_dump --version)"
+
+      - name: Install prisma CLI (app deps)
+        # The entrypoint runs `npx prisma migrate diff`/`db push` from app/, so install
+        # the app's deps there — same as the migration-safety job.
+        run: cd app && npm install --no-audit --no-fund
+
+      - name: Backup dir
+        run: echo "BACKUP_DIR=$RUNNER_TEMP/ngrid-backups" >> "$GITHUB_ENV"
+
+      # ── Assertion 1: fresh DB → no dump ────────────────────────────────────────
+      - name: "Assert: fresh DB writes no backup"
+        run: |
+          psql "$DATABASE_URL" -q -c 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;'
+          rm -rf "$BACKUP_DIR"; mkdir -p "$BACKUP_DIR"
+          set +e
+          out="$(cd app && bash docker-entrypoint.sh --pre-migrate-backup-only 2>&1)"; rc=$?
+          set -e
+          echo "$out"; echo "exit=$rc"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::fresh-DB backup hook exited $rc (expected 0)"; exit 1
+          fi
+          if ! echo "$out" | grep -q "fresh database — no pre-migrate backup needed"; then
+            echo "::error::fresh-DB hook did not print the 'fresh database' message"; exit 1
+          fi
+          if [ -n "$(ls -A "$BACKUP_DIR")" ]; then
+            echo "::error::fresh DB produced a backup file but should not have:"; ls -la "$BACKUP_DIR"; exit 1
+          fi
+          echo "OK: fresh DB → no file, exit 0"
+
+      # ── Assertion 2: populated DB + schema delta → one non-empty *.sql.gz ───────
+      - name: "Assert: populated DB with schema delta writes one valid backup"
+        run: |
+          # Apply the CURRENT schema so all app tables (incl. Account) exist, then seed
+          # a representative row so the probe sees a populated DB. Reuse the
+          # migration-safety seed rather than inventing a parallel one.
+          psql "$DATABASE_URL" -q -c 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;'
+          ( cd app && npx prisma db push --skip-generate --accept-data-loss >/dev/null )
+          psql "$DATABASE_URL" -q -v ON_ERROR_STOP=1 -f .github/migration-safety/seed.sql >/dev/null
+          # Manufacture a GUARANTEED schema delta vs prisma/schema.prisma: add a column
+          # the target schema does not have, so `migrate diff` reports a change and the
+          # backup branch fires. This is deterministic regardless of tag history —
+          # diffing the previous release can be a no-op when the schema is unchanged
+          # between releases (it currently is), which would skip the backup. The
+          # extra column is dropped by the later db push anyway.
+          psql "$DATABASE_URL" -q -c 'ALTER TABLE "Account" ADD COLUMN "ci_extra_col" text;'
+          rm -rf "$BACKUP_DIR"; mkdir -p "$BACKUP_DIR"
+          set +e
+          out="$(cd app && bash docker-entrypoint.sh --pre-migrate-backup-only 2>&1)"; rc=$?
+          set -e
+          echo "$out"; echo "exit=$rc"
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::populated-DB backup hook exited $rc (expected 0)"; exit 1
+          fi
+          if ! echo "$out" | grep -q "schema change detected — backing up"; then
+            echo "::error::expected 'schema change detected' branch, got something else"; exit 1
+          fi
+          count="$(ls -1 "$BACKUP_DIR"/ngrid-pre-migrate-*.sql.gz 2>/dev/null | wc -l)"
+          if [ "$count" -ne 1 ]; then
+            echo "::error::expected exactly 1 ngrid-pre-migrate-*.sql.gz, found $count"; ls -la "$BACKUP_DIR"; exit 1
+          fi
+          f="$(ls -1 "$BACKUP_DIR"/ngrid-pre-migrate-*.sql.gz)"
+          if [ ! -s "$f" ]; then
+            echo "::error::backup file is empty: $f"; exit 1
+          fi
+          if ! gunzip -t "$f"; then
+            echo "::error::backup file is not a valid gzip: $f"; exit 1
+          fi
+          # The dump must actually contain the seeded data, not just be a valid-but-empty
+          # dump (gzip of an empty pg_dump would still pass gunzip -t).
+          if ! gunzip -c "$f" | grep -q "ACC-123"; then
+            echo "::error::backup does not contain the seeded Account row (ACC-123)"; exit 1
+          fi
+          echo "OK: one valid, non-empty backup containing seeded data ($(stat -c%s "$f") bytes)"
+
+      # ── Assertion 3 is covered implicitly: the service password is p%a@s#s$, so
+      #    assertions 1, 2 and 4 ALL exercise the special-char password — the prisma
+      #    URL path (migrate diff/db push) AND the discrete-param path (probe/pg_dump).
+      #    A #83-style URL-parsing regression would fail assertion 2 above. Make it
+      #    explicit with a dedicated check that re-confirms the special-char dump path.
+      - name: "Assert: special-char DB_PASSWORD still backs up (#83 regression guard)"
+        run: |
+          # Sanity-check the password actually contains the #83 special chars, so this
+          # guard can't silently degrade if the service env above is ever changed.
+          case "$DB_PASSWORD" in
+            *%*@*\#*\$*) : ;;
+            *) echo "::error::DB_PASSWORD lost its %/@/#/\$ chars — #83 guard is not testing anything"; exit 1 ;;
+          esac
+          psql "$DATABASE_URL" -q -c 'DROP SCHEMA public CASCADE; CREATE SCHEMA public;'
+          ( cd app && npx prisma db push --skip-generate --accept-data-loss >/dev/null )
+          psql "$DATABASE_URL" -q -v ON_ERROR_STOP=1 -f .github/migration-safety/seed.sql >/dev/null
+          psql "$DATABASE_URL" -q -c 'ALTER TABLE "Account" ADD COLUMN "ci_extra_col" text;'
+          rm -rf "$BACKUP_DIR"; mkdir -p "$BACKUP_DIR"
+          set +e
+          out="$(cd app && bash docker-entrypoint.sh --pre-migrate-backup-only 2>&1)"; rc=$?
+          set -e
+          echo "$out"; echo "exit=$rc"
+          f="$(ls -1 "$BACKUP_DIR"/ngrid-pre-migrate-*.sql.gz 2>/dev/null | head -1)"
+          if [ "$rc" -ne 0 ] || [ -z "$f" ] || [ ! -s "$f" ] || ! gunzip -t "$f"; then
+            echo "::error::backup failed with a special-char password (a #83 URL-parsing regression)"; exit 1
+          fi
+          echo "OK: special-char password ($DB_PASSWORD) backs up cleanly"
+
+      # ── Assertion 4: connect failure → fail closed (locks in #85) ──────────────
+      - name: "Assert: bad creds fail closed (exit 1), not silent skip (#85)"
+        env:
+          # Bad password so the probe can't auth. The runner reaches the service over
+          # TCP (localhost:5432), which hits Postgres' scram-sha-256 host rule, so a
+          # wrong password is genuinely rejected. DB stays populated from above.
+          DATABASE_URL: postgresql://ngrid:wrongpw@localhost:5432/ngrid
+          DB_PASSWORD: wrongpw
+        run: |
+          rm -rf "$BACKUP_DIR"; mkdir -p "$BACKUP_DIR"
+          set +e
+          out="$(cd app && bash docker-entrypoint.sh --pre-migrate-backup-only 2>&1)"; rc=$?
+          set -e
+          echo "$out"; echo "exit=$rc"
+          if [ "$rc" -eq 0 ]; then
+            echo "::error::bad-creds backup hook exited 0 — it must FAIL CLOSED (#85 regression)"; exit 1
+          fi
+          if ! echo "$out" | grep -q "could not probe the database"; then
+            echo "::error::bad-creds hook did not print the fail-closed probe error"; exit 1
+          fi
+          if [ -n "$(ls -A "$BACKUP_DIR")" ]; then
+            echo "::error::bad-creds run wrote a backup file but should have refused"; ls -la "$BACKUP_DIR"; exit 1
+          fi
+          echo "OK: bad creds → exit $rc, fail-closed error, no file written"
+
   build-push:
-    # Gate the image publish on tests, the upgrade-safety check, AND the boot-health
-    # smoke test passing. PRs only run the test + migration-safety + smoke-boot jobs
-    # above (no publish — no secrets, and forks can't push to GHCR).
-    needs: [test, lint, migration-safety, smoke-boot]
+    # Gate the image publish on tests, the upgrade-safety check, the boot-health smoke
+    # test, AND the entrypoint backup-path coverage passing. PRs only run the test +
+    # migration-safety + smoke-boot + entrypoint-backup jobs above (no publish — no
+    # secrets, and forks can't push to GHCR).
+    needs: [test, lint, migration-safety, smoke-boot, entrypoint-backup]
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
