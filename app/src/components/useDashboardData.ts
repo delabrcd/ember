@@ -29,6 +29,15 @@ export interface Overview {
     annual: { point: number; low: number; high: number };
     basis: string;
   } | null;
+  // Trailing-12 carbon-footprint estimate (issue #49): per-fuel + combined kg
+  // CO2e plus friendly equivalences. Location-based ESTIMATE, not a real charge.
+  emissions?: {
+    elecKg: number;
+    gasKg: number;
+    totalKg: number;
+    gallonsGasoline: number;
+    treeYears: number;
+  } | null;
   latestBill?: { statementDate: string; totalDueAmount: number | null } | null;
   firstStatement?: string | null;
   schedule?: { predictedNextBillDate: string | null; nextCheckAt: string | null; lastCheckedAt: string | null } | null;

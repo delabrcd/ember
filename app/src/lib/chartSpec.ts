@@ -38,6 +38,14 @@ export interface MonthRow {
   projCost?: number | null; // projected period energy cost ($)
   projKwh?: number | null; // projected electric usage (kWh)
   projTherms?: number | null; // projected gas usage (therms)
+  // Carbon-footprint estimate (issue #49). LOCATION-BASED estimate: usage ×
+  // published average emission factors (electricity via eGRID subregion factor,
+  // gas via the EPA per-therm factor). Populated on historical rows by the pure
+  // estimateEmissions() (lib/emissions.ts); null when the fuel's usage is
+  // missing. kg CO2e. Has NO effect on any cost number or /api/verify.
+  co2eElec?: number | null; // estimated electricity emissions (kg CO2e)
+  co2eGas?: number | null; // estimated gas emissions (kg CO2e)
+  co2eTotal?: number | null; // combined estimated emissions (kg CO2e)
 }
 
 export type SeriesKey = Exclude<keyof MonthRow, 'ym' | 'label'>;
@@ -71,12 +79,15 @@ const HDD = '#fb7185';
 const CDD = '#38bdf8';
 const PROJ = '#a78bfa'; // forward seasonal projection (issue #52) — dashed, violet
 const PROJ_SOFT = '#c4b5fd';
+const CO2_ELEC = '#34d399'; // carbon estimate (issue #49) — green family
+const CO2_GAS = '#10b981';
 
 const money = (v: number) => `$${v}`;
 const money2 = (v: number) => `$${(+v).toFixed(2)}`;
 const deg = (v: number) => `${v}°`;
 const dd = (v: number) => `${Math.round(v)}`;
 const num3 = (v: number) => `${(+v).toFixed(3)}`;
+const kg = (v: number) => `${Math.round(v)} kg`;
 
 export const CHART_SPECS: ChartSpec[] = [
   {
@@ -156,6 +167,18 @@ export const CHART_SPECS: ChartSpec[] = [
     leftFmt: num3,
     rightFmt: num3,
     filter: (r) => r.kwhPerDegreeDay != null || r.thermsPerHdd != null,
+  },
+  {
+    id: 'emissions',
+    title: 'Carbon footprint (estimate)',
+    subtitle: 'Location-based CO₂e per fuel per month — usage × published EPA factors, not your actual plan',
+    series: [
+      { key: 'co2eElec', label: 'Electricity', color: CO2_ELEC, role: 'bar', axis: 'left' },
+      { key: 'co2eGas', label: 'Gas', color: CO2_GAS, role: 'bar', axis: 'left' },
+      { key: 'co2eTotal', label: 'Total', color: TOTAL, role: 'line', axis: 'left' },
+    ],
+    leftFmt: kg,
+    filter: (r) => r.co2eElec != null || r.co2eGas != null,
   },
 ];
 

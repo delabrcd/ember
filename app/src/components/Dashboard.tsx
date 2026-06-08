@@ -322,8 +322,8 @@ export function Dashboard() {
               explicit literal so the class string is visible to Tailwind's JIT. */}
           <div
             className={`grid shrink-0 grid-cols-2 gap-2 sm:grid-cols-3 ${
-              { 4: 'lg:grid-cols-4', 5: 'lg:grid-cols-5', 6: 'lg:grid-cols-6' }[
-                4 + (ov?.nextBillEstimate ? 1 : 0) + (seasonCard ? 1 : 0)
+              { 4: 'lg:grid-cols-4', 5: 'lg:grid-cols-5', 6: 'lg:grid-cols-6', 7: 'lg:grid-cols-7' }[
+                4 + (ov?.nextBillEstimate ? 1 : 0) + (seasonCard ? 1 : 0) + (ov?.emissions ? 1 : 0)
               ]
             } ${
               fit
@@ -396,6 +396,30 @@ export function Dashboard() {
                 <div className="stat text-2xl">~{usd(seasonCard.annual.point, 0)}</div>
                 <div className="sub mt-0.5 text-[11px] text-slate-500">
                   {usd(seasonCard.annual.low, 0)}–{usd(seasonCard.annual.high, 0)} · projection
+                </div>
+              </div>
+            ) : null}
+            {/* Carbon-footprint estimate (issue #49): trailing-12 combined CO2e in
+                kg, with a friendly equivalence and the location-based-ESTIMATE
+                caveat behind the ⓘ tooltip so the card stays compact. Never a
+                cost number. */}
+            {ov?.emissions ? (
+              <div className="card relative !p-3">
+                <div className="card-title flex items-center gap-1 text-xs">
+                  Carbon (12 mo)
+                  <span
+                    tabIndex={0}
+                    role="img"
+                    aria-label="Location-based estimate: your kWh and therms multiplied by published EPA average emission factors (electricity via the eGRID subregion grid factor, gas at 5.3 kg CO2e/therm). It reflects the regional grid mix, not your specific supply plan. Set gridEmissionFactor in Settings to override."
+                    title="Location-based estimate: your kWh and therms multiplied by published EPA average emission factors (electricity via the eGRID subregion grid factor, gas at 5.3 kg CO2e/therm). It reflects the regional grid mix, not your specific supply plan. Set gridEmissionFactor in Settings to override."
+                    className="inline-flex h-4 w-4 cursor-help items-center justify-center rounded-full border border-slate-600/70 text-[10px] font-semibold text-slate-400 transition hover:border-slate-400 hover:text-slate-200 focus:outline-none focus:ring-1 focus:ring-emerald-500/60"
+                  >
+                    i
+                  </span>
+                </div>
+                <div className="stat text-2xl">~{num(Math.round(ov.emissions.totalKg))}<span className="text-sm text-slate-500"> kg CO₂e</span></div>
+                <div className="sub mt-0.5 text-[11px] text-slate-500">
+                  ≈ {num(Math.round(ov.emissions.gallonsGasoline))} gal gas · {num(Math.round(ov.emissions.treeYears))} tree-yrs · estimate
                 </div>
               </div>
             ) : null}

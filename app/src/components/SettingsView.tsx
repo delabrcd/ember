@@ -19,6 +19,10 @@ interface ServerSettings {
   billCount: number;
   firstStatement: string | null;
   latestBill: { statementDate: string; totalDueAmount: number | null } | null;
+  // Carbon-footprint estimate (issue #49). The raw grid-factor override (empty
+  // when unset) and the effective factor actually used (region default or override).
+  gridEmissionFactor?: string;
+  effectiveGridFactor?: number;
 }
 interface Run {
   id: number;
@@ -49,6 +53,10 @@ export function SettingsView() {
   const [runs, setRuns] = useState<Run[]>([]);
   const [accounts, setAccounts] = useState<AccountSummary[]>([]);
   const [savingSched, setSavingSched] = useState(false);
+  // Carbon-footprint grid-factor override (issue #49). Local edit buffer for the
+  // input; seeded from the server value once loaded. Empty = use region default.
+  const [gridFactor, setGridFactor] = useState('');
+  const [savingGrid, setSavingGrid] = useState(false);
   const [verify, setVerify] = useState<{ ok: boolean; total: number; failed: number; bills: { statementDate: string; ok: boolean; checks: { name: string; ok: boolean; detail?: string }[] }[] } | null>(null);
   const [verifying, setVerifying] = useState(false);
   // Bill-PDF bulk-download range. Empty until the user (or the loaded account)
@@ -73,6 +81,7 @@ export function SettingsView() {
     setServer(s);
     setRuns(r.runs || []);
     setAccounts(a.accounts || []);
+    setGridFactor(s.gridEmissionFactor ?? '');
   }, []);
 
   // Match the dashboard's scoping so an export = what's on screen. Validate the
@@ -112,6 +121,20 @@ export function SettingsView() {
     setServer((s) => (s ? { ...s, schedulerEnabled: enabled } : s));
     await fetch('/api/settings', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ schedulerEnabled: enabled }) });
     setSavingSched(false);
+    loadServer();
+  };
+
+  // Save (or clear) the carbon-estimate grid-factor override. The server validates
+  // it's a positive number before storing; an empty value reverts to the region
+  // eGRID default. We reload so the displayed "effective" factor reflects the result.
+  const saveGridFactor = async () => {
+    setSavingGrid(true);
+    await fetch('/api/settings', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ gridEmissionFactor: gridFactor.trim() }),
+    });
+    setSavingGrid(false);
     loadServer();
   };
 
@@ -193,6 +216,45 @@ export function SettingsView() {
                 </button>
               ))}
             </div>
+          </div>
+        </div>
+
+        {/* Carbon-footprint estimate grid factor (issue #49). Server-side runtime
+            setting (AppSetting), not a browser pref, so it changes the estimate for
+            every viewer. A location-based ESTIMATE — never touches a cost number. */}
+        <div className="space-y-2">
+          <div>
+            <div className="text-sm font-medium text-slate-200">Carbon estimate — grid factor</div>
+            <div className="text-xs text-slate-500">
+              kg CO₂e per kWh for the electricity carbon estimate. Leave blank to use the region&apos;s
+              EPA eGRID default; set your own if you&apos;re on a green/renewable supply plan. Gas is fixed at the
+              EPA 5.3 kg CO₂e/therm combustion factor.
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 pl-3">
+            <input
+              type="number"
+              step="0.001"
+              min="0"
+              inputMode="decimal"
+              value={gridFactor}
+              placeholder={server?.account?.region ? 'region default' : ''}
+              onChange={(e) => setGridFactor(e.target.value)}
+              className="w-32 rounded-lg border border-slate-700 bg-slate-800/50 px-2 py-1 text-xs text-slate-200"
+            />
+            <button
+              onClick={saveGridFactor}
+              disabled={savingGrid || gridFactor === (server?.gridEmissionFactor ?? '')}
+              className="btn border border-slate-700/70 bg-slate-800/40 text-xs text-slate-200 transition hover:bg-slate-700 disabled:opacity-40"
+            >
+              {savingGrid ? 'Saving…' : 'Save'}
+            </button>
+            {server?.effectiveGridFactor != null && (
+              <span className="text-xs text-slate-500">
+                In use: <span className="text-slate-300">{server.effectiveGridFactor} kg/kWh</span>
+                {server.gridEmissionFactor ? '' : ' (region default)'}
+              </span>
+            )}
           </div>
         </div>
 

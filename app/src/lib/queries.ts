@@ -4,6 +4,7 @@
 import { prisma } from '@/lib/db';
 import type { MonthRow } from '@/lib/chartSpec';
 import { deriveMonthlySeries, type DegreeDayInput } from '@/lib/series';
+import { estimateEmissions, resolveEmissionFactors, trailing12Emissions } from '@/lib/emissions';
 import { sumDegreeDays } from '@/lib/weather/degreeDays';
 import { monthlyTempByYm } from '@/lib/weather/monthlyTemp';
 import { getSetting } from '@/lib/settings';
@@ -93,13 +94,14 @@ export async function resolveRequestAccount(
 
 export async function getMonthlySeries(accountId: number): Promise<MonthRow[]> {
   const account = await prisma.account.findUnique({ where: { id: accountId } });
-  const [usages, costs, weather, bills, daily, baseSetting] = await Promise.all([
+  const [usages, costs, weather, bills, daily, baseSetting, gridFactorSetting] = await Promise.all([
     prisma.usage.findMany({ where: { accountId } }),
     prisma.cost.findMany({ where: { accountId } }),
     account?.region ? prisma.weather.findMany({ where: { region: account.region } }) : Promise.resolve([]),
     prisma.bill.findMany({ where: { accountId } }),
     prisma.weatherDaily.findMany({ where: { accountId }, orderBy: { date: 'asc' } }),
     getSetting('degreeDayBaseF'),
+    getSetting('gridEmissionFactor'),
   ]);
 
   // One temp per month, resolved by monthlyTempByYm (pure): prefer the
@@ -135,7 +137,7 @@ export async function getMonthlySeries(accountId: number): Promise<MonthRow[]> {
     return { ym: ymOf(b.statementDate), hdd, cdd };
   });
 
-  return deriveMonthlySeries({
+  const rows = deriveMonthlySeries({
     usages: usages.map((u) => ({ periodYearMonth: u.periodYearMonth, usageType: u.usageType, quantity: u.quantity })),
     costs: costs.map((c) => ({ periodYearMonth: c.periodYearMonth, fuelType: c.fuelType, kind: c.kind, amount: c.amount })),
     weather: [...tempByYm].map(([ym, avgTemperature]) => ({ ym, avgTemperature })),
@@ -150,6 +152,14 @@ export async function getMonthlySeries(accountId: number): Promise<MonthRow[]> {
     })),
     degreeDays,
   });
+
+  // Carbon-footprint estimate (issue #49). Annotate each row with location-based
+  // CO2e (kg) per fuel + combined, after the cost/rate math so it can never feed a
+  // cost number or /api/verify. The electricity grid factor comes from the
+  // gridEmissionFactor AppSetting override if set, else the account region's eGRID
+  // subregion default. PURE — see lib/emissions.ts.
+  const factors = resolveEmissionFactors(account?.region, gridFactorSetting);
+  return estimateEmissions(rows, factors);
 }
 
 export async function getBills(accountId: number) {
@@ -217,6 +227,11 @@ export async function getOverview(accountId: number) {
   // total, both with horizon-widening bands. Climatological PROJECTION (degree-day
   // normals × all-in rates), never a forecast; never stored.
   const seasonProjection = await computeSeasonProjection(accountId, series);
+  // Trailing-12 carbon-footprint estimate (issue #49): per-fuel + combined kg CO2e
+  // over the most recent 12 estimated months, plus friendly equivalences. PURE
+  // (the series already carries per-row co2e). A location-based ESTIMATE only;
+  // never a cost number, never fed to /api/verify.
+  const emissions = trailing12Emissions(series);
   const latest = bills[0] ? shapeBill(bills[0]) : null;
   return {
     account: account
@@ -232,6 +247,7 @@ export async function getOverview(accountId: number) {
     lifetimeSpend,
     nextBillEstimate,
     seasonProjection,
+    emissions,
     latestBill: latest
       ? {
           statementDate: latest.statementDate,
