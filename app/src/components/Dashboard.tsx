@@ -24,8 +24,7 @@ import { ScrapeProgressBanner } from './ScrapeProgress';
 import { RangeControl } from './RangeControl';
 import { NgLoginsSection } from './NgLoginsSection';
 import { CockpitPager } from './CockpitPager';
-import { ComparePeriods } from './ComparePeriods';
-import { SupplyWhatIf } from './SupplyWhatIf';
+import { ToolsModal, type ToolsTab } from './ToolsModal';
 import { useDashboardData } from './useDashboardData';
 import { dateLabel, estimateTooltip, num, rate, relativeFromNow, signedPct, usd } from '@/lib/format';
 
@@ -145,6 +144,16 @@ export function Dashboard() {
   const yoyCard = ov?.latestYoy ?? null;
   const yoyCardFuels = yoyCard ? [yoyCard.elec, yoyCard.gas].filter((r) => r != null) : [];
   const showYoyCard = yoyCardFuels.length > 0;
+  // Green/red tint for a normalized YoY delta: LOWER usage than last year is BETTER
+  // (emerald), higher is WORSE (rose), ~flat or null is neutral (slate). A tiny
+  // epsilon around 0 counts as flat. Matches the budget card's emerald/rose tokens
+  // and the Compare tool's normalized-cost coloring. Presentation only.
+  const yoyDeltaClass = (pct: number | null | undefined): string =>
+    pct == null || Math.abs(pct) < 0.005
+      ? 'text-slate-200'
+      : pct < 0
+        ? 'text-emerald-300'
+        : 'text-rose-300';
 
   // Budget / annual-spend target card (issue #46). Always-visible when a target
   // is set: spent so far (currentCharges), the projected end-of-window total with
@@ -152,6 +161,17 @@ export function Dashboard() {
   // target is set (the subtle "set a budget" affordance covers that case). All the
   // arithmetic happened server-side (ov.budget); this only renders it.
   const budget = ov?.budget ?? null;
+
+  // On-demand Tools modal (UX refactor): the interactive Compare-periods (#47) and
+  // Supply what-if (#48) tools no longer sit always-visible below the strip — they
+  // live in a centered modal opened by the header "Tools" button or the
+  // vs-last-year card. `toolsTab` is the tab to open to (the card opens Compare).
+  const [toolsOpen, setToolsOpen] = useState(false);
+  const [toolsTab, setToolsTab] = useState<ToolsTab>('compare');
+  const openTools = (tab: ToolsTab) => {
+    setToolsTab(tab);
+    setToolsOpen(true);
+  };
 
   // Chart pagination (issue #38): in "fit" density at ≥xl we page through the
   // visible charts (in the user's chosen order) up to four at a time in a 2×2 grid
@@ -264,6 +284,21 @@ export function Dashboard() {
           )}
         </div>
         <div className="flex items-center gap-2">
+          {/* Tools button (UX refactor): opens the interactive Compare / what-if
+              tools in an on-demand modal instead of cluttering the dashboard body.
+              Hidden until there's data to analyse. */}
+          {!empty && (
+            <button
+              type="button"
+              onClick={() => openTools('compare')}
+              className="btn border border-slate-700/70 bg-slate-800/40 text-slate-200 hover:bg-slate-700"
+            >
+              <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18v3h3l6.3-6.3a4 4 0 0 0 5.4-5.4l-2.3 2.3a1.5 1.5 0 0 1-2.1-2.1z" />
+              </svg>
+              Tools
+            </button>
+          )}
           <Link href="/settings" className="btn border border-slate-700/70 bg-slate-800/40 text-slate-200 hover:bg-slate-700">
             <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <circle cx="12" cy="12" r="3" />
@@ -450,7 +485,21 @@ export function Dashboard() {
                 (intensity) change; the full breakdown lives in the Compare tool
                 below. Self-hides when no fuel has a prior-year match. */}
             {showYoyCard ? (
-              <div className="card relative !p-3">
+              // Clickable: opens the Tools modal straight to the Compare-periods
+              // tab for the full breakdown. role=button + keyboard activation so
+              // it's reachable without a mouse.
+              <div
+                role="button"
+                tabIndex={0}
+                onClick={() => openTools('compare')}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    openTools('compare');
+                  }
+                }}
+                className="card relative cursor-pointer !p-3 transition hover:border-slate-600 hover:bg-slate-800/60 focus:outline-none focus:ring-1 focus:ring-amber-500/60"
+              >
                 <div className="card-title flex items-center gap-1 text-xs">
                   vs last year
                   <span
@@ -465,13 +514,17 @@ export function Dashboard() {
                 </div>
                 <div className="stat flex items-baseline gap-2 text-2xl">
                   {yoyCard?.elec ? (
-                    <span><span className="text-sm text-amber-400">Elec</span> {signedPct(yoyCard.elec.normalizedPct)}</span>
+                    <span><span className="text-sm text-amber-400">Elec</span>{' '}
+                      <span className={yoyDeltaClass(yoyCard.elec.normalizedPct)}>{signedPct(yoyCard.elec.normalizedPct)}</span>
+                    </span>
                   ) : null}
                   {yoyCard?.gas ? (
-                    <span><span className="text-sm text-sky-400">Gas</span> {signedPct(yoyCard.gas.normalizedPct)}</span>
+                    <span><span className="text-sm text-sky-400">Gas</span>{' '}
+                      <span className={yoyDeltaClass(yoyCard.gas.normalizedPct)}>{signedPct(yoyCard.gas.normalizedPct)}</span>
+                    </span>
                   ) : null}
                 </div>
-                <div className="sub mt-0.5 text-[11px] text-slate-500">normalized vs last yr</div>
+                <div className="sub mt-0.5 text-[11px] text-slate-500">normalized vs last yr · click to compare</div>
               </div>
             ) : null}
             {/* Budget / annual-spend target (issue #46): always-visible when a
@@ -541,28 +594,11 @@ export function Dashboard() {
             </div>
           ) : null}
 
-          {/* Interactive "Compare periods" tool (issue #47): pick any two windows
-              (preset — trailing-12, this-winter-vs-last, YTD — or two custom range
-              pickers) and see the full weather-normalized per-fuel breakdown. This
-              REPLACES the old density-hidden YoyPanel; it renders in BOTH densities
-              so the YoY story is actually reachable (the top-strip card covers the
-              at-a-glance need; this is the deep dive). All period math is pure +
-              tested (comparePresets + compareYoY); the component just wires inputs
-              → helpers → display. In fit mode it sits below the strip and the page
-              may scroll — an accepted tradeoff for discoverability. */}
-          <ComparePeriods rows={rows} currencyDecimals={dp} />
-
-          {/* ESCO supply-rate what-if (issue #48): the supply rate is the biggest
-              controllable lever (delivery stays with the utility), so this lets
-              you enter a quoted fixed supply rate and back-test it against actual
-              historical usage over the on-screen range. All math is the pure
-              whatIfSupply (lib/series.ts); the panel only collects the rates and
-              renders the saved/lost figure. The supply-rate TREND itself lives on
-              the "Effective rates" chart (the dashed trailing-average series).
-              Rendered in ALL densities alongside the Compare-periods tool so a
-              default ("fit") user can actually find it — in fit the page may
-              scroll past the cockpit to reach it, an accepted tradeoff. */}
-          <SupplyWhatIf rows={ranged} currencyDecimals={dp} />
+          {/* The interactive Compare-periods (#47) and Supply what-if (#48) tools
+              no longer render inline here — they were powerful but rarely-used
+              clutter. They now live in the on-demand Tools modal (header "Tools"
+              button; the vs-last-year card opens it straight to Compare). The modal
+              itself is rendered once at the end of the component. */}
 
           {/* Main region: charts grid + bills rail. At ≥xl in "fit" density the
               charts carry explicit (100dvh-derived) heights so the three rows add
@@ -658,6 +694,19 @@ export function Dashboard() {
           </div>
         </>
       )}
+
+      {/* On-demand Tools modal: hosts the Compare-periods / Supply what-if tools as
+          tabs. ComparePeriods gets the full series (it windows internally); the
+          what-if back-tests the on-screen range — same data split as the old inline
+          renders, so the tools behave identically. */}
+      <ToolsModal
+        open={toolsOpen}
+        onClose={() => setToolsOpen(false)}
+        initialTab={toolsTab}
+        rows={rows}
+        rangedRows={ranged}
+        currencyDecimals={dp}
+      />
 
       {/* Footer only shows when the page can scroll (no point pinning it in fit mode). */}
       <footer className={`shrink-0 pt-1 text-center text-[11px] text-slate-600 ${fit ? 'xl:hidden' : ''}`}>
