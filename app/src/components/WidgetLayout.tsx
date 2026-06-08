@@ -43,6 +43,7 @@ import {
   pageCount as computePageCount,
   pageHeightPx,
   paginatePlacements,
+  placementsEqual,
   type Breakpoint,
   type Placement,
   type Placements,
@@ -287,14 +288,27 @@ export function WidgetLayout(props: WidgetLayoutProps) {
   // the stat strip is pinned, the grid only holds charts/panels, so we MERGE the
   // edited lg grid back over the pinned stats' saved placements (we don't want to
   // drop their geometry — the user may unpin later). Below fit, the grid is the
-  // whole set so we persist as-is. Skip while NOT customizing + the initial mount.
-  const mountedOnce = useRef(false);
-  const onLayoutChange = (_current: Layout[], all: Layouts) => {
-    if (!mountedOnce.current) {
-      mountedOnce.current = true;
-      return;
-    }
-    if (!customizing) return;
+  // whole set so we persist as-is.
+  //
+  // THE INFINITE-LOOP FIX (issue #73). RGL fires `onLayoutChange` not just on a
+  // genuine user drag/resize but on mount, breakpoint switch, vertical compaction,
+  // AND every time we feed it a new `layouts` prop. Persisting from THAT handler
+  // formed a feedback loop: persist → optimistic state update → re-feed RGL →
+  // `onLayoutChange` → persist … . It never settled because RGL's vertical
+  // compaction of an overlap-carrying layout can OSCILLATE between two equally-
+  // valid packings (a 2-cycle, not a fixed point), so each re-emit genuinely
+  // differs from the last → endless persists → React #185 ("maximum update depth
+  // exceeded"). The robust break (how RGL apps normally persist): persist ONLY on
+  // the actual user gestures — RGL's `onDragStop` / `onResizeStop` (and the
+  // explicit add/remove paths) — never on the noisy `onLayoutChange`. So we use
+  // `onLayoutChange` purely to CAPTURE the latest full layout into a ref (no
+  // setState, no persist), and the stop handlers persist from that ref. A
+  // structural-equality guard stays as a cheap belt-and-suspenders no-op filter.
+
+  // Build the persistable per-breakpoint blob from RGL's full `allLayouts`,
+  // applying the pinned-stat fold-back and the paged clamp (same transform the
+  // fed layout uses, so the persisted geometry and the view-mode partition agree).
+  const buildNext = (all: Layouts): Placements => {
     const next: Placements = {};
     for (const key of Object.keys(COLS) as Breakpoint[]) {
       const arr = all[key];
@@ -318,7 +332,32 @@ export function WidgetLayout(props: WidgetLayoutProps) {
       }
       next[key] = edited;
     }
+    return next;
+  };
+
+  // The latest full layout RGL has emitted (its post-compaction state), captured
+  // on every `onLayoutChange` so the drag/resize-STOP handlers persist exactly
+  // what RGL settled on — without persisting from `onLayoutChange` itself.
+  const latestAll = useRef<Layouts | null>(null);
+  const onLayoutChange = (_current: Layout[], all: Layouts) => {
+    latestAll.current = all;
+  };
+
+  // Persist the current layout — called ONLY from genuine user gestures (drag/
+  // resize stop). Bails if customizing is off or the blob is structurally equal
+  // to what's already in state (a gesture that ended where it began).
+  const persistFromGesture = (all: Layouts) => {
+    if (!customizing) return;
+    const next = buildNext(all);
+    if (placementsEqual(next, layouts)) return;
     onPlacementsChange(next);
+  };
+  // RGL passes the active-breakpoint layout to the stop handlers; we merge it into
+  // the latest captured `allLayouts` so every breakpoint still round-trips.
+  const onGestureStop = (current: Layout[]) => {
+    const bpKey = bp as string;
+    const all: Layouts = { ...(latestAll.current ?? {}), [bpKey]: current };
+    persistFromGesture(all);
   };
 
   // ---- The pinned stat strip (fixed band; not in RGL) ----
@@ -376,6 +415,8 @@ export function WidgetLayout(props: WidgetLayoutProps) {
       draggableCancel=".rgl-no-drag, button, a, input, label, select, textarea"
       compactType="vertical"
       onLayoutChange={onLayoutChange}
+      onDragStop={(layout) => onGestureStop(layout)}
+      onResizeStop={(layout) => onGestureStop(layout)}
       onBreakpointChange={(nbp) => setBp(nbp as Breakpoint)}
       measureBeforeMount={false}
       useCSSTransforms

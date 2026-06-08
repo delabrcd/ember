@@ -334,6 +334,58 @@ function mergeOneBreakpoint(saved: Placement[], def: Placement[]): Placement[] {
 }
 
 // ---------------------------------------------------------------------------
+// Structural equality — the Customize-mode persist guard (issue #73 fix).
+// ---------------------------------------------------------------------------
+//
+// RGL fires `onLayoutChange` for NON-user reasons too (mount, breakpoint switch,
+// vertical compaction, and — critically — any prop-driven `layouts` change we
+// feed it). In Customize mode the component persists from that handler, which
+// updates state, which re-feeds RGL, which fires `onLayoutChange` again: a
+// feedback loop that only terminates if the fed-back layout equals what we just
+// persisted. The transform pipeline (merge → rebase → clamp → sanitize) is NOT
+// a guaranteed fixed point, so the loop never converged → React #185 ("maximum
+// update depth exceeded"). The robust break (how RGL apps normally persist):
+// only `onPlacementsChange` when the new layout STRUCTURALLY DIFFERS from what's
+// already persisted — a no-op change can't trigger another persist→render cycle.
+//
+// We compare the placement GEOMETRY only (i/x/y/w/h, plus minW/minH when set),
+// order-independent per breakpoint (keyed by `i`), so a re-emit that merely
+// reorders the array or restamps RGL's transient `moved`/`static` fields reads
+// as equal. PURE — hand-calc unit-tested.
+
+// Canonicalize one placement to just its serializable, order-stable geometry, so
+// two placements with the same box compare equal regardless of extra RGL stamps
+// or key order. minW/minH are only included when present (mirrors `sanitize`).
+function canonPlacement(p: Placement): string {
+  const min = `${p.minW ?? ''},${p.minH ?? ''}`;
+  return `${p.i}:${p.x},${p.y},${p.w},${p.h}:${min}`;
+}
+
+// Are two breakpoint placement arrays the same SET of boxes (order-independent)?
+// Keyed by widget id so a re-emit in a different array order still matches.
+function bpEqual(a: Placement[], b: Placement[]): boolean {
+  if (a.length !== b.length) return false;
+  const map = new Map(a.map((p) => [p.i, canonPlacement(p)]));
+  for (const p of b) {
+    if (map.get(p.i) !== canonPlacement(p)) return false;
+  }
+  return true;
+}
+
+// Do two Placements blobs describe the SAME layout across every breakpoint? Used
+// to bail out of the Customize-mode persist when RGL re-emits a layout identical
+// to the one already in state (the infinite-render-loop fix, issue #73). A
+// breakpoint present-but-empty on one side and absent on the other counts as
+// equal (both render nothing there). PURE — hand-calc unit-tested.
+export function placementsEqual(a: Placements, b: Placements): boolean {
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]) as Set<Breakpoint>;
+  for (const bp of keys) {
+    if (!bpEqual(a[bp] ?? [], b[bp] ?? [])) return false;
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // No-scroll fit math — replaces ConfigurableChart's FILL_BODY_CLASSES constant.
 // ---------------------------------------------------------------------------
 //
@@ -471,38 +523,54 @@ export function pageCount(placements: Placement[] | undefined, rowsPerPage: numb
 // can still fit. We process in (y, x) order and track each page-band's next free
 // row so re-banded tiles stack instead of overlapping. This runs at generation
 // AND on a saved-blob repair, so a customized layout still paginates cleanly.
+//
+// IDEMPOTENT (issue #73): applying clampToPages to its own output yields the same
+// result — every tile is left wholly within a band, and we EMIT in the caller's
+// original array order (not the internal processing order) so the array shape is
+// stable too. That fixed-point property is what lets WidgetLayout's persist →
+// re-feed-RGL → onLayoutChange round-trip settle instead of looping (React #185).
 // PURE — hand-calc unit-tested.
 export function clampToPages(placements: Placement[], rowsPerPage: number): Placement[] {
   const rpp = Math.max(1, Math.floor(rowsPerPage));
-  // Sort by row then column so earlier-in-reading-order tiles are re-banded
-  // first; we copy so we never mutate the caller's array. We do NOT serialize
-  // side-by-side tiles — a tile that already fits its band keeps its (x, y);
-  // RGL's vertical compaction owns intra-page packing. We only move STRADDLERS.
-  const sorted = [...placements].sort((a, b) => a.y - b.y || a.x - b.x);
+  // Process STRADDLERS in (y, x) reading order so earlier tiles are re-banded
+  // first and later ones stack below them — but remember each tile's ORIGINAL
+  // index so we can emit the result in the caller's order (idempotency: a second
+  // pass must not reshuffle the array). We do NOT serialize side-by-side tiles —
+  // a tile that already fits its band keeps its (x, y); RGL's vertical compaction
+  // owns intra-page packing. We only move straddlers.
+  const order = placements.map((p, idx) => ({ p, idx })).sort((a, b) => a.p.y - b.p.y || a.p.x - b.p.x);
   // For tiles we PUSH onto a later page, track the next free top row of that
   // band SO re-banded tiles don't pile on the same row; tiles that fit in place
   // never consult/advance this (they keep their column position untouched).
   const pushedNextRow = new Map<number, number>();
-  const out: Placement[] = [];
-  for (const p of sorted) {
+  const byIndex: Placement[] = new Array(placements.length);
+  for (const { p, idx } of order) {
     // A tile can be at most a whole page tall (so it fits within one band).
     const h = Math.min(p.h, rpp);
     const page = Math.floor(p.y / rpp);
     const fitsInBand = p.y + h <= (page + 1) * rpp;
     if (fitsInBand) {
       // Already wholly within its page band: leave it where it is.
-      out.push({ ...p, h });
+      byIndex[idx] = { ...p, h };
       continue;
     }
-    // Straddler: push to the next page's band, at that band's next free row so
-    // multiple pushed tiles stack rather than overlap. (RGL compaction tidies
-    // any remaining same-column overlap on the next render, which re-saves.)
-    const next = page + 1;
-    const top = Math.max(next * rpp, pushedNextRow.get(next) ?? next * rpp);
-    pushedNextRow.set(next, top + h);
-    out.push({ ...p, y: top, h });
+    // Straddler: push to a later page's band, at that band's next free row so
+    // multiple pushed tiles stack rather than overlap. We advance band-by-band
+    // until the tile sits WHOLLY within one band — a single band may already be
+    // partly filled by earlier pushed tiles (so this tile's top + h would overrun
+    // it), in which case we move on to the next band. Settling the tile fully in
+    // ONE pass is what makes clampToPages idempotent: a second application finds
+    // every tile already within its band and changes nothing.
+    let band = page + 1;
+    let top = Math.max(band * rpp, pushedNextRow.get(band) ?? band * rpp);
+    while (top + h > (band + 1) * rpp) {
+      band += 1;
+      top = Math.max(band * rpp, pushedNextRow.get(band) ?? band * rpp);
+    }
+    pushedNextRow.set(band, top + h);
+    byIndex[idx] = { ...p, y: top, h };
   }
-  return out;
+  return byIndex;
 }
 
 // Partition placements into pages by their (clamped) row band: page index =

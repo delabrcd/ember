@@ -14,6 +14,7 @@ import {
   pageHeightPx,
   paginatePlacements,
   placementRows,
+  placementsEqual,
   type Placement,
   type Placements,
 } from '../src/lib/layoutEngine';
@@ -349,6 +350,75 @@ describe('paginatePlacements — partition into pages (hand-calculated)', () => 
   });
   it('an empty grid is a single empty page', () => {
     expect(paginatePlacements([], 7)).toEqual([[]]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The Customize-mode infinite-render-loop fix (issue #73): the persist guard.
+// ---------------------------------------------------------------------------
+//
+// The crash was a feedback loop — persist → re-feed RGL → onLayoutChange →
+// persist … — that never reached a fixed point. The component now breaks it by
+// persisting ONLY when the freshly-built blob structurally differs from what's
+// already in state. Two pure properties underwrite that being a correct break:
+//   1. clampToPages is IDEMPOTENT — applying it to its own output yields the same
+//      result, so feeding the persisted (clamped) grid back produces an identical
+//      fed layout (a true fixed point); and
+//   2. placementsEqual correctly detects no-change vs a real edit, so a genuine
+//      drag/resize still persists while a no-op re-emit short-circuits.
+describe('clampToPages is idempotent (the round-trip reaches a fixed point)', () => {
+  it('clamp(clamp(x)) === clamp(x) for a layout with straddlers + overflow', () => {
+    const ps: Placement[] = [
+      { i: 'a', x: 0, y: 0, w: 4, h: 7 }, // fits page 0
+      { i: 'b', x: 4, y: 4, w: 4, h: 7 }, // straddles → re-banded to page 1
+      { i: 'c', x: 0, y: 6, w: 4, h: 5 }, // straddles → page 1, stacks below b
+      { i: 'd', x: 0, y: 0, w: 4, h: 10 }, // taller than a page → height clamped
+    ];
+    const once = clampToPages(ps, 7);
+    const twice = clampToPages(once, 7);
+    // Applying the clamp to its already-clamped output changes nothing.
+    expect(twice).toEqual(once);
+  });
+  it('the real default cockpit grid is a clamp fixed point at the pinned budget', () => {
+    const lg = generateDefaultPlacements(INPUT).lg!;
+    const grid = lg.filter((p) => !p.i.startsWith('stat:'));
+    const once = clampToPages(grid, PINNED_PAGE_ROWS);
+    expect(clampToPages(once, PINNED_PAGE_ROWS)).toEqual(once);
+  });
+});
+
+describe('placementsEqual — the no-change detector that breaks the loop', () => {
+  const A: Placement[] = [
+    { i: 'chart:cost', x: 0, y: 0, w: 4, h: 7, minW: 2, minH: 2 },
+    { i: 'chart:usage', x: 4, y: 0, w: 4, h: 7, minW: 2, minH: 2 },
+  ];
+  it('equal regardless of array order (RGL may re-emit in any order)', () => {
+    const reordered = [A[1], A[0]];
+    expect(placementsEqual({ lg: A }, { lg: reordered })).toBe(true);
+  });
+  it('ignores extra RGL stamps not in the geometry (only i/x/y/w/h/min compared)', () => {
+    // A re-emit carrying transient `moved`/`static` flags is still "no change".
+    const stamped = A.map((p) => ({ ...p, moved: true, static: false }) as unknown as Placement);
+    expect(placementsEqual({ lg: A }, { lg: stamped })).toBe(true);
+  });
+  it('detects a moved tile (a real user drag → must persist)', () => {
+    const moved = [{ ...A[0], y: 7 }, A[1]];
+    expect(placementsEqual({ lg: A }, { lg: moved })).toBe(false);
+  });
+  it('detects a resized tile (a real user resize → must persist)', () => {
+    const resized = [{ ...A[0], h: 9 }, A[1]];
+    expect(placementsEqual({ lg: A }, { lg: resized })).toBe(false);
+  });
+  it('detects a removed tile (different length → must persist)', () => {
+    expect(placementsEqual({ lg: A }, { lg: [A[0]] })).toBe(false);
+  });
+  it('a present-but-empty breakpoint equals an absent one (both render nothing)', () => {
+    expect(placementsEqual({ lg: A, md: [] }, { lg: A })).toBe(true);
+  });
+  it('compares every breakpoint, not just lg', () => {
+    const md: Placement[] = [{ i: 'chart:cost', x: 0, y: 0, w: 4, h: 7 }];
+    const mdMoved: Placement[] = [{ i: 'chart:cost', x: 0, y: 7, w: 4, h: 7 }];
+    expect(placementsEqual({ lg: A, md }, { lg: A, md: mdMoved })).toBe(false);
   });
 });
 
