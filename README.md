@@ -100,7 +100,7 @@ unattended install. Full reference + comments live in [`.env.example`](.env.exam
 | Var | What |
 |---|---|
 | `DB_PASSWORD` | **Required.** Any long random string (used for the bundled Postgres). |
-| `DATABASE_URL` | **Required.** Pre-filled to point at the `ngrid_postgres` container — change the password to match `DB_PASSWORD`. **Using an external Postgres?** If its user/name aren't `ngrid`, also set `DB_USER`/`DB_NAME`/`DB_PASSWORD` to match — the pre-migrate backup probe connects with those discrete params (it can't safely parse them from the URL when the password has special characters), and now **fails closed** (refuses the schema sync) rather than silently skipping the backup if it can't connect. |
+| `DATABASE_URL` | **Required.** Pre-filled to point at the `ngrid_postgres` container — change the password to match `DB_PASSWORD`. **Using an external Postgres?** A single `DATABASE_URL` works (URL-encode the password). Setting `DB_USER`/`DB_NAME`/`DB_PASSWORD` (raw password) is **recommended when your password has special characters** — the pre-migrate backup then uses discrete libpq params instead of relying on URL-encoding. Either way the backup **fails closed** (refuses the schema sync) if it can't connect at all. |
 | `NGRID_USER` / `NGRID_PASS` | **Optional.** Your National Grid email + password. Leave unset and add the login in the browser instead; set them to **pre-seed/bootstrap** (e.g. unattended installs) — on first start they're imported into the encrypted store, with env as the ongoing fallback. |
 | `APP_PORT` | Host port for the UI (default 3000) |
 | `TZ` | Your timezone, e.g. `America/New_York` |

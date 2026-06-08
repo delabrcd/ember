@@ -2,6 +2,34 @@
 # Apply DB schema, start a background scheduler loop, then run Next.js.
 set -e
 
+# Drop Prisma-only query parameters from a postgres:// URL so it's a valid libpq
+# conninfo. libpq rejects ANY query parameter it doesn't recognize (psql/pg_dump exit
+# with `invalid URI query parameter: "..."`), but Prisma routinely appends its own —
+# e.g. ?schema=public (our .env.example default + the smoke-boot CI URL),
+# connection_limit, pool_timeout, pgbouncer, socket_timeout, statement_cache_size,
+# sslidentity. We strip those, keeping libpq-valid params (sslmode, connect_timeout,
+# sslcert, …) so external/TLS Postgres still connects. Echoes the cleaned URL.
+strip_prisma_url_params() {
+  local url="$1"
+  local base="${url%%\?*}"          # everything before the query string
+  if [ "$base" = "$url" ]; then     # no query string at all
+    printf '%s' "$url"
+    return 0
+  fi
+  local query="${url#*\?}"
+  local kept="" IFS='&'
+  local pair
+  for pair in $query; do
+    case "${pair%%=*}" in
+      schema|connection_limit|pool_timeout|pgbouncer|socket_timeout|statement_cache_size|sslidentity)
+        ;;  # Prisma-only — drop it
+      "") ;;  # empty fragment (e.g. trailing &) — drop it
+      *) kept="${kept:+$kept&}$pair" ;;
+    esac
+  done
+  printf '%s' "${base}${kept:+?$kept}"
+}
+
 # ── Pre-migrate backup ──────────────────────────────────────────────────────
 # The schema is applied with `prisma db push --accept-data-loss` and there is no
 # rollback, so a schema change could in principle drop data. Before applying it,
@@ -19,22 +47,45 @@ backup_before_migrate() {
     return 0
   fi
 
-  # Connect via discrete libpq params, NOT the DATABASE_URL. libpq parses URLs
-  # strictly, so a DB password containing %, @, etc. (all valid via env_file) makes
-  # psql/pg_dump fail to parse the URL even though Prisma's looser parser accepts
-  # it. The password comes straight from $DB_PASSWORD (any character, no parsing);
-  # host/port come from the URL authority — the slice after the LAST '@' and before
-  # the first '/', neither of which can contain the password's special characters.
-  # Known limitation: an IPv6 host literal (e.g. [::1]:5432) would mis-parse in the
-  # host:port split below — not supported here (use DB_USER/DB_NAME + a hostname).
-  local authority="${DATABASE_URL##*@}"   # host:port/db?params  (password stripped)
-  authority="${authority%%/*}"            # host:port
-  local pghost="${authority%%:*}"
-  local pgport="${authority##*:}"
-  [ "$pgport" = "$authority" ] && pgport=5432   # no explicit port in the URL
-  local pguser="${DB_USER:-ngrid}"
-  local pgdb="${DB_NAME:-ngrid}"
-  local -a pg_conn=(-h "$pghost" -p "$pgport" -U "$pguser" -d "$pgdb")
+  # Two connection modes for the psql probe / pg_dump, chosen by whether DB_PASSWORD
+  # is set:
+  #
+  #   DB_PASSWORD set  → discrete libpq params (-h/-p/-U/-d) + PGPASSWORD=$DB_PASSWORD.
+  #     libpq parses URLs strictly, so a password containing %, @, #, $ (all valid via
+  #     env_file) makes psql/pg_dump fail to parse a URL even though Prisma's looser
+  #     parser accepts it (issue #83). Taking the password RAW from $DB_PASSWORD (no
+  #     parsing) and the host/port from the URL authority sidesteps that. Host/port are
+  #     the slice after the LAST '@' and before the first '/', neither of which can
+  #     contain the password's special characters.
+  #     Known limitation: an IPv6 host literal (e.g. [::1]:5432) would mis-parse in the
+  #     host:port split below — not supported in this mode (use DB_PASSWORD + a hostname,
+  #     or leave DB_PASSWORD unset to use the URL conninfo path which handles it).
+  #
+  #   DB_PASSWORD unset → use $DATABASE_URL as a single libpq conninfo, with NO PGPASSWORD.
+  #     When DB_PASSWORD is empty the URL is the only credential source, and a URL-only
+  #     config is perfectly valid (Prisma handles it); libpq decodes the percent-encoded
+  #     password from the URL fine. (The discrete-param raw-password trick above is
+  #     irrelevant here — there's no raw password to feed it.) Caveat: libpq REJECTS any
+  #     query parameter it doesn't recognize, including the Prisma-only ones Prisma puts in
+  #     DATABASE_URL (e.g. ?schema=public — the default in our .env.example, also set by
+  #     the smoke-boot CI job). We strip those before handing the URL to libpq, leaving
+  #     libpq-valid params (sslmode, connect_timeout, …) intact so external/TLS DBs work.
+  local -a pg_conn
+  local pghost pgport pguser pgdb
+  if [ -n "${DB_PASSWORD:-}" ]; then
+    local authority="${DATABASE_URL##*@}"   # host:port/db?params  (password stripped)
+    authority="${authority%%/*}"            # host:port
+    pghost="${authority%%:*}"
+    pgport="${authority##*:}"
+    [ "$pgport" = "$authority" ] && pgport=5432   # no explicit port in the URL
+    pguser="${DB_USER:-ngrid}"
+    pgdb="${DB_NAME:-ngrid}"
+    pg_conn=(-h "$pghost" -p "$pgport" -U "$pguser" -d "$pgdb")
+    export PGPASSWORD="$DB_PASSWORD"
+  else
+    pg_conn=("$(strip_prisma_url_params "$DATABASE_URL")")   # URL conninfo; libpq decodes the encoded password
+    unset PGPASSWORD
+  fi
 
   # Probe for an app table to tell a fresh DB from a populated one. Distinguish the
   # probe's EXIT CODE from its output so a connect/auth/db-missing failure is NOT
@@ -45,19 +96,26 @@ backup_before_migrate() {
   # The discriminator is $rc, not stderr. `set -e` would abort on the failing probe
   # (a plain assignment whose command substitution fails does trip errexit), so turn
   # it off just around the probe and capture the real exit code into $rc.
+  # PGPASSWORD is already exported (DB_PASSWORD set) or unset (URL conninfo carries
+  # the credential) by the branch above — the call below is identical in both modes.
   local has_account rc
   set +e
-  has_account="$(PGPASSWORD="$DB_PASSWORD" psql "${pg_conn[@]}" -Atqc "SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='Account' LIMIT 1" 2>&1)"
+  has_account="$(psql "${pg_conn[@]}" -Atqc "SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name='Account' LIMIT 1" 2>&1)"
   rc=$?
   set -e
   if [ "$rc" -ne 0 ]; then
     echo "[entrypoint] ERROR: could not probe the database to decide on a pre-migrate backup."
-    echo "[entrypoint] psql exited $rc connecting as user='$pguser' db='$pgdb' to $pghost:$pgport:"
+    if [ -n "${DB_PASSWORD:-}" ]; then
+      echo "[entrypoint] psql exited $rc connecting as user='$pguser' db='$pgdb' to $pghost:$pgport:"
+    else
+      echo "[entrypoint] psql exited $rc connecting via DATABASE_URL:"
+    fi
     echo "[entrypoint]   $has_account"
-    echo "[entrypoint] If DATABASE_URL points at an EXTERNAL Postgres, also set DB_USER/DB_NAME/DB_PASSWORD"
-    echo "[entrypoint] to match it — the backup probe connects with those, not by parsing the URL."
-    echo "[entrypoint] Otherwise the connection is misconfigured. Refusing to apply schema changes"
-    echo "[entrypoint] without a verified backup. Set BACKUP_BEFORE_MIGRATE=false to override (NOT recommended)."
+    echo "[entrypoint] If DATABASE_URL points at an EXTERNAL Postgres with a special-char password,"
+    echo "[entrypoint] set DB_USER/DB_NAME/DB_PASSWORD (raw password) so the backup uses discrete"
+    echo "[entrypoint] libpq params instead of the URL. Otherwise the connection is misconfigured."
+    echo "[entrypoint] Refusing to apply schema changes without a verified backup."
+    echo "[entrypoint] Set BACKUP_BEFORE_MIGRATE=false to override (NOT recommended)."
     exit 1
   fi
   if [ "$has_account" != "1" ]; then
@@ -78,7 +136,7 @@ backup_before_migrate() {
   echo "[entrypoint] schema change detected — backing up database to $out"
   # pipefail so a pg_dump failure fails the pipeline (gzip alone would still
   # succeed on empty input and mask it — that would defeat the safety net).
-  if ! ( set -o pipefail; PGPASSWORD="$DB_PASSWORD" pg_dump "${pg_conn[@]}" | gzip > "$out" ); then
+  if ! ( set -o pipefail; pg_dump "${pg_conn[@]}" | gzip > "$out" ); then
     rm -f "$out"
     echo "[entrypoint] ERROR: pre-migrate backup FAILED — refusing to apply schema changes."
     echo "[entrypoint] Fix the backup target, or set BACKUP_BEFORE_MIGRATE=false to override (NOT recommended)."
