@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { CHART_SPECS } from '../src/lib/chartSpec';
 import type { Overview } from '../src/components/useDashboardData';
-import { WIDGETS, chartWidgetType, statWidgetType, getWidget } from '../src/lib/widgets/registry';
+import { WIDGETS, BILLS_PANEL_TYPE, chartWidgetType, statWidgetType, getWidget } from '../src/lib/widgets/registry';
 import type { MonthRow } from '../src/lib/chartSpec';
 import {
   STAT_IDS,
@@ -71,12 +71,21 @@ describe('widget registry completeness', () => {
     }
   });
 
-  it('has exactly chart+stat entries and no namespace collision', () => {
-    // 7 charts + 8 stats = 15 widgets; the prefixes keep them distinct.
+  it('has exactly chart+stat+panel entries and no namespace collision', () => {
+    // 7 charts + 8 stats + 1 panel (the bills rail, Phase E #73) = 16 widgets;
+    // the chart:/stat:/panel: prefixes keep them distinct.
     expect(CHART_SPECS.length).toBe(7);
     expect(STAT_IDS.length).toBe(8);
-    expect(Object.keys(WIDGETS).length).toBe(CHART_SPECS.length + STAT_IDS.length);
-    expect(new Set(Object.keys(WIDGETS)).size).toBe(15);
+    expect(Object.keys(WIDGETS).length).toBe(CHART_SPECS.length + STAT_IDS.length + 1);
+    expect(new Set(Object.keys(WIDGETS)).size).toBe(16);
+  });
+
+  it('registers the bills panel (Phase E #73) as a placeable panel widget', () => {
+    const w = WIDGETS[BILLS_PANEL_TYPE];
+    expect(w).toBeTruthy();
+    expect(w.category).toBe('panel');
+    expect(getWidget(BILLS_PANEL_TYPE)).toBe(w);
+    expect(w.dataDeps).toEqual(['bills']);
   });
 
   it('throws on an unknown widget type (a missing registration is a bug)', () => {

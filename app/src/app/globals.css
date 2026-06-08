@@ -34,3 +34,60 @@ body {
     @apply inline-flex items-center gap-1.5 rounded-full border border-slate-700/70 bg-slate-800/50 px-3 py-1 text-xs text-slate-300;
   }
 }
+
+/* ── react-grid-layout dark theme (Phase E, #73) ───────────────────────────
+   RGL ships a light default (a blue-ish placeholder, a tiny grey SE handle).
+   We re-skin it for the slate/amber theme and only inside `.ngrid-rgl` so the
+   rest of the app is untouched. Scoped, not !important-heavy — these win because
+   the base CSS is imported before globals.css (see layout.tsx). */
+
+/* The drop placeholder shown while dragging/resizing: an amber dashed ghost
+   instead of RGL's solid red/blue block, matching the Customize affordances. */
+.ngrid-rgl .react-grid-placeholder {
+  background: rgba(245, 158, 11, 0.18);
+  border: 1px dashed rgba(245, 158, 11, 0.6);
+  border-radius: 1rem; /* matches .card's rounded-2xl */
+  opacity: 1;
+  transition-duration: 100ms;
+}
+
+/* In Customize mode each item gets a faint draggable ring + grab cursor so it
+   reads as movable; view mode leaves items as plain cards. */
+.ngrid-rgl.is-customizing .ngrid-rgl-item {
+  cursor: grab;
+}
+.ngrid-rgl.is-customizing .ngrid-rgl-item .card {
+  outline: 1px dashed rgba(148, 163, 184, 0.35); /* slate-400/35 */
+  outline-offset: 2px;
+}
+.ngrid-rgl .react-grid-item.react-draggable-dragging {
+  cursor: grabbing;
+  z-index: 30;
+}
+.ngrid-rgl .react-grid-item.react-draggable-dragging .card {
+  outline-color: rgba(245, 158, 11, 0.7); /* amber while actively dragging */
+  box-shadow: 0 20px 40px -12px rgba(0, 0, 0, 0.6);
+}
+
+/* The SE resize handle: replace RGL's tiny grey corner image with a slate/amber
+   chevron drawn in CSS so we ship no light-theme asset. Only visible while
+   customizing (RGL only renders the handle when isResizable). */
+.ngrid-rgl .react-resizable-handle {
+  background-image: none;
+  width: 18px;
+  height: 18px;
+  right: 2px;
+  bottom: 2px;
+  padding: 0;
+}
+.ngrid-rgl .react-resizable-handle::after {
+  content: '';
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  width: 9px;
+  height: 9px;
+  border-right: 2px solid rgba(245, 158, 11, 0.85); /* amber-500 */
+  border-bottom: 2px solid rgba(245, 158, 11, 0.85);
+  border-bottom-right-radius: 2px;
+}

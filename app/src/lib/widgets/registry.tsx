@@ -22,6 +22,7 @@ import type { DatasetId, DatasetResolver } from '@/lib/datasets';
 import { getVizRenderer } from '@/lib/widgets/vizRenderers';
 import { STAT_SPECS, type StatData, type StatSpec } from '@/lib/widgets/statSpec';
 import { BudgetStatCard, StatCard, YoyStatCard } from '@/components/widgets/StatCard';
+import { BillsPanel, type BillsPanelData } from '@/components/widgets/BillsPanel';
 import type { ChartConfig } from '@/lib/prefs';
 import type { ToolsTab } from '@/components/ToolsModal';
 
@@ -59,11 +60,18 @@ export interface WidgetHost {
   // Stat inputs.
   statData: StatData;
   openTools: (tab: ToolsTab) => void;
+  // Panel inputs (Phase E, #73): the bills rail is now a placeable `panel`
+  // widget, fed the SAME range-filtered bills + export-scope query fragments the
+  // inline rail read in Dashboard.tsx, so it renders byte-identically.
+  billsData: BillsPanelData;
 }
 
-// Minimal WidgetDef for Phase A (RFC §3.1, trimmed). `defaultSize` is a stub
-// placeholder for the layout engine (Phase E) — present so the shape is forward-
-// compatible, unused today.
+// WidgetDef (RFC §3.1). `defaultSize` is now REAL (Phase E, #73): the grid size
+// the widget palette uses when ADDING the widget back to the lg grid, in 12-col
+// units + grid rows, with sensible min bounds so a widget can't be resized into
+// uselessness. (The default DASHBOARD arrangement comes from the layoutEngine
+// generator, not these per-widget sizes — `defaultSize` is the add-one-widget
+// fallback.)
 export interface WidgetDef {
   type: string; // registry key
   category: 'chart' | 'stat' | 'tool' | 'panel';
@@ -73,7 +81,7 @@ export interface WidgetDef {
   // resolver. Stat widgets read the `ov` bag off the host directly in Phase A,
   // so they declare none yet (`[]`).
   dataDeps: DatasetId[];
-  defaultSize: { w: number; h: number };
+  defaultSize: { w: number; h: number; minW: number; minH: number };
   render: (host: WidgetHost) => ReactNode;
 }
 
@@ -92,7 +100,9 @@ function chartWidget(spec: ChartSpec): WidgetDef {
     category: 'chart',
     title: spec.title,
     dataDeps: [spec.dataset],
-    defaultSize: { w: 1, h: 1 },
+    // A chart fills half the lg chart block (4 of 12 cols) and is tall (7 rows,
+    // = CHART_ROWS); mirrors the default generator's two-up chart placement.
+    defaultSize: { w: 4, h: 7, minW: 2, minH: 3 },
     render: (host) => {
       const drawn = host.specFor(spec.id);
       const rows = host.resolveDataset(drawn.dataset, spec.id);
@@ -124,7 +134,8 @@ function statWidget(spec: StatSpec): WidgetDef {
     // Stat widgets read the `ov` bag off the host directly (Phase A); routing
     // them through the dataset layer is a later, opt-in change. No deps yet.
     dataDeps: [],
-    defaultSize: { w: 1, h: 1 },
+    // A KPI card is short and narrow (≈1.5 of 12 cols → use 2; 2 rows = STAT_ROWS).
+    defaultSize: { w: 2, h: 2, minW: 1, minH: 1 },
     render: (host) => {
       const d = host.statData;
       if (spec.kind === 'simple') return <StatCard model={spec.select(d)} />;
@@ -134,12 +145,26 @@ function statWidget(spec: StatSpec): WidgetDef {
   };
 }
 
-// The registry: every chart id and every stat id, keyed by widget type. The
-// `chart:`/`stat:` prefixes keep the two namespaces distinct in one record (RFC
-// §3.1's `type` examples, e.g. 'tool:compare').
+// The bills rail as a `panel` widget (Phase E, #73). One instance, id
+// 'panel:bills'. Renders the BillsPanel from the host's range-filtered bills +
+// export scopes (byte-identical to the old inline rail). It's wide (4 of 12 cols
+// at lg → the right rail) and tall so it stretches the cockpit like before.
+const BILLS_PANEL: WidgetDef = {
+  type: 'panel:bills',
+  category: 'panel',
+  title: 'Bills',
+  dataDeps: ['bills'],
+  defaultSize: { w: 4, h: 14, minW: 2, minH: 4 },
+  render: (host) => <BillsPanel data={host.billsData} />,
+};
+
+// The registry: every chart id, every stat id, plus the bills panel — keyed by
+// widget type. The `chart:`/`stat:`/`panel:` prefixes keep the namespaces
+// distinct in one record (RFC §3.1's `type` examples, e.g. 'tool:compare').
 export const WIDGETS: Record<string, WidgetDef> = Object.fromEntries([
   ...CHART_SPECS.map((s) => [`chart:${s.id}`, chartWidget(s)] as const),
   ...STAT_SPECS.map((s) => [`stat:${s.id}`, statWidget(s)] as const),
+  [BILLS_PANEL.type, BILLS_PANEL] as const,
 ]);
 
 // Type-keyed accessors so callers don't hand-build the prefixed string. A
@@ -147,6 +172,9 @@ export const WIDGETS: Record<string, WidgetDef> = Object.fromEntries([
 // silent no-render (the registry-completeness test guards this).
 export const chartWidgetType = (id: string) => `chart:${id}`;
 export const statWidgetType = (id: string) => `stat:${id}`;
+// The single bills panel's widget type — exported so the dashboard's default
+// placement input and the palette can reference it without string-building.
+export const BILLS_PANEL_TYPE = BILLS_PANEL.type;
 
 export function getWidget(type: string): WidgetDef {
   const w = WIDGETS[type];

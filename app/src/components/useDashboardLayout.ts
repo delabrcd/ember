@@ -8,6 +8,7 @@ import {
   importFromLocalPrefs,
   mergeDashboardLayout,
 } from '@/lib/dashboardLayout';
+import type { Placements } from '@/lib/layoutEngine';
 
 // Client owner of the SERVER-SIDE dashboard definition (Phase D, issue #96; RFC
 // §3.4). This is the server counterpart to prefs.tsx: prefs.tsx keeps owning the
@@ -40,6 +41,11 @@ export interface DashboardLayoutState {
   updateChart: (id: string, c: Partial<ChartConfig>) => void;
   // Replace the chart order (Settings reorder). Optimistic + PUT.
   reorder: (order: string[]) => void;
+  // Replace the per-breakpoint RGL placements (Phase E, #73): drag/resize/add/
+  // remove all funnel through here — optimistic local update + a THROTTLED PUT so
+  // a drag doesn't fire a request per pixel. The placements live on the same blob
+  // as order/config (RFC §3.4), so this writes the whole DashboardLayout back.
+  setPlacements: (layouts: Placements) => void;
 }
 
 // Read the legacy v1 localStorage prefs blob for the one-time import. Returns
@@ -181,5 +187,36 @@ export function useDashboardLayout(selectedAccountId: number | null, ready: bool
     [persist]
   );
 
-  return { layout, layoutLoading, setLayout, updateChart, reorder };
+  // Placement edits (Phase E, #73). A drag/resize fires RGL's onLayoutChange
+  // many times in quick succession, so we update local state IMMEDIATELY
+  // (optimistic, keeps the grid responsive) but DEBOUNCE the PUT — only the last
+  // placement in a burst hits the server. The timer is cleared on unmount /
+  // account change so a stale write can't land after we've moved on.
+  const placeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const setPlacements = useCallback((layouts: Placements) => {
+    const cur = layoutRef.current;
+    if (!cur) return;
+    const next: DashboardLayout = { ...cur, layouts };
+    setLayoutState(next); // optimistic, no flicker mid-drag
+    if (placeTimer.current) clearTimeout(placeTimer.current);
+    placeTimer.current = setTimeout(() => {
+      fetch(`/api/dashboard/layout${scope}`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(next),
+      }).catch(() => {
+        /* keep optimistic state; a later save/reload reconciles */
+      });
+    }, 400);
+  }, [scope]);
+
+  // Flush/clear the debounce timer when the account scope changes or on unmount,
+  // so a pending PUT for the previous account never lands on the new one.
+  useEffect(() => {
+    return () => {
+      if (placeTimer.current) clearTimeout(placeTimer.current);
+    };
+  }, [scope]);
+
+  return { layout, layoutLoading, setLayout, updateChart, reorder, setPlacements };
 }
