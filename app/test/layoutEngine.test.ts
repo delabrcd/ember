@@ -143,18 +143,40 @@ describe('generateDefaultPlacements (hand-calculated)', () => {
     expect(bills.y).toBeGreaterThanOrEqual(lastChartBottom);
   });
 
-  it('xs (mobile): a single column — every widget at x=0, w=1, stacked in order', () => {
+  it('xs (mobile): stat cards 2-up (w=1, x∈{0,1}), charts/panels full-width (w=2)', () => {
     const xs = placements.xs!;
-    expect(xs.every((p) => p.x === 0 && p.w === 1)).toBe(true);
-    // Order is stats → charts → panels, each below the previous (monotonic y).
+    const stats = xs.filter((p) => p.i.startsWith('stat:'));
+    const charts = xs.filter((p) => p.i.startsWith('chart:'));
+    const panels = xs.filter((p) => p.i.startsWith('panel:'));
+
+    // Stat cards: half-width, paired in two columns.
+    expect(stats.every((p) => p.w === 1)).toBe(true);
+    expect(stats.every((p) => p.x === 0 || p.x === 1)).toBe(true);
+    // First two stats share the same y (row 0), one at x=0 and one at x=1.
+    expect(stats[0].y).toBe(stats[1].y);
+    expect(stats[0].x).toBe(0);
+    expect(stats[1].x).toBe(1);
+    // Each (x, y) cell is unique — no two stat tiles overlap.
+    const cells = stats.map((p) => `${p.x},${p.y}`);
+    expect(new Set(cells).size).toBe(stats.length);
+
+    // Charts and panels: full-width, each spanning both columns.
+    expect(charts.every((p) => p.w === COLS.xs && p.x === 0)).toBe(true);
+    expect(panels.every((p) => p.w === COLS.xs && p.x === 0)).toBe(true);
+
+    // Overall order stats → charts → panels with non-decreasing y.
+    const statBottom = Math.max(...stats.map((p) => p.y + p.h));
+    expect(charts.every((p) => p.y >= statBottom - 1)).toBe(true); // charts start at or after stat block
+    const chartBottom = charts.length > 0 ? Math.max(...charts.map((p) => p.y + p.h)) : statBottom;
+    expect(panels.every((p) => p.y >= chartBottom - 1)).toBe(true); // panels start at or after charts
+
+    // Monotonically non-decreasing y across the whole array (stats → charts → panels).
     const ys = xs.map((p) => p.y);
     for (let k = 1; k < ys.length; k++) expect(ys[k]).toBeGreaterThanOrEqual(ys[k - 1]);
-    // No two widgets overlap vertically (a clean stack).
-    expect(new Set(ys).size).toBe(xs.length);
   });
 
-  it('xs: column count is 1 so RGL collapses to a single column on mobile', () => {
-    expect(COLS.xs).toBe(1);
+  it('xs: 2 columns so stat cards pair up 2-up on mobile', () => {
+    expect(COLS.xs).toBe(2);
   });
 });
 
@@ -172,8 +194,9 @@ describe('default placements never fall below a widget min (issue #73)', () => {
     for (const bp of ['lg', 'md', 'sm', 'xs'] as const) {
       const cols = COLS[bp];
       for (const p of placements[bp]!) {
-        // At xs the grid is one column, so minW collapses to 1 (a 2-/3-col min is
-        // meaningless in a 1-col grid); above xs the registry min applies.
+        // At xs the grid is two columns, so minW is clamped to min(regMin, 2);
+        // wide registry mins (e.g. chart minW=3) still collapse to 1 here because
+        // generateXs hard-floors all xs minW to 1 (wider mins are meaningless).
         const expectMinW = Math.min(MINS[p.i].minW, cols);
         expect(p.w, `${bp} ${p.i} w`).toBeGreaterThanOrEqual(expectMinW);
         // h ≥ the stamped minH (the tile is never defaulted below its own height
