@@ -28,7 +28,8 @@
 //   • md  ≥ 996 — wide-but-not-fit; page scrolls (today's 768–1280 two-up band's
 //                 upper half).
 //   • sm  ≥ 768 — the old two-column band's lower half; page scrolls.
-//   • xs  < 768 — MOBILE: a single column, page scrolls (today's <768 stack).
+//   • xs  < 768 — MOBILE: TWO columns, page scrolls. Stat cards pair 2-up; charts
+//                 and panels span full width. (issue #110 — was 1 col/1-up)
 //
 // THE lg THRESHOLD IS 1232, NOT 1280 (the page-lock boundary fix): the chrome
 // pins the page to the viewport at Tailwind's `xl` (≥1280 VIEWPORT px), but RGL's
@@ -45,9 +46,11 @@ export const BREAKPOINTS: Record<Breakpoint, number> = { lg: 1232, md: 996, sm: 
 
 // Column count per breakpoint. lg uses a fine 12-col grid so the stat band (8
 // cards) and the chart/bills split land cleanly; the narrower breakpoints use
-// fewer columns, and xs is a SINGLE column so mobile collapses to a stack
-// (acceptance #3). RGL maps a placement's `x`/`w` against these.
-export const COLS: Record<Breakpoint, number> = { lg: 12, md: 8, sm: 6, xs: 1 };
+// fewer columns. xs is TWO columns (issue #110): stat cards pair up 2-up on
+// mobile (~195px each on a 390px phone) while charts/panels stay full-width
+// (w=2), so the stat band is more scannable without clipping. RGL maps a
+// placement's `x`/`w` against these.
+export const COLS: Record<Breakpoint, number> = { lg: 12, md: 8, sm: 6, xs: 2 };
 
 // `lg` is the only breakpoint that runs the no-scroll fit (it's the old `xl`
 // cockpit). Everything below it scrolls the page (today's behaviour). Exported
@@ -186,8 +189,8 @@ function withMins(p: Placement, mins: WidgetMins | undefined): Placement {
 //   • md (8 cols): stat band 4-up (2 cols each), charts two-up (4 cols each),
 //     bills full-width below — the page scrolls.
 //   • sm (6 cols): stats 3-up (2 cols), charts two-up (3 cols), bills full width.
-//   • xs (1 col): EVERYTHING single-column in order stats → charts → bills, the
-//     mobile stack (acceptance #3).
+//   • xs (2 col): stat cards 2-up (w=1 each), charts + panels full-width (w=2),
+//     order stats → charts → panels, mobile scrolls (issue #110).
 //
 // Heights are in grid rows; the component's runtime rowHeight (computeFitRowHeight
 // at lg, a fixed rowHeight below) turns rows into pixels. Stat cards are short
@@ -497,28 +500,41 @@ function generateScrolling(input: DefaultLayoutInput, cols: number, statW: numbe
   return out;
 }
 
-// Generate the xs (mobile) SINGLE-COLUMN stack: every widget full-width (w=1 of
-// 1 col) in order stats → charts → panels, so mobile collapses to one column and
-// scrolls (acceptance #3). Stat cards stay short; charts/panels are taller.
+// Generate the xs (mobile) layout: stat cards 2-up (half-width each), charts and
+// panels full-width, in order stats → charts → panels, page scrolls (issue #110).
+//
+// STAT CARDS 2-UP (issue #110): xs is a 2-col grid (COLS.xs = 2), so the stat band
+// pairs cards side by side — stat k at x = k%2, w=1, y = base + floor(k/2)*STAT_ROWS.
+// At ~195px each on a 390px phone the compact title+headline still reads clearly, and
+// the stat band takes half the vertical space it did at 1-up. minW is 1 regardless of
+// the registry's wider mins (a chart's 3-col min is meaningless on a 2-col grid).
+//
+// CHARTS AND PANELS FULL-WIDTH: each spans the whole 2-col grid (x=0, w=COLS.xs),
+// stacked one per row after the stat band, monotonically increasing y. The same
+// minW=1 floor (registry-wide mins don't apply on xs). Per-widget minH is honoured
+// (clamped to the tile's own height) so a tile can't be dragged below its content.
+// PURE.
 function generateXs(input: DefaultLayoutInput): Placement[] {
   const mins = input.mins;
+  const cols = COLS.xs; // 2
   const out: Placement[] = [];
-  let y = 0;
-  // At xs the grid is ONE column, so every tile is full-width (w=1) and its minW
-  // floor is 1 regardless of the registry's wider minW (a 2-/3-col min is
-  // meaningless in a 1-col grid and would make RGL reject the placement). We still
-  // honour the per-widget minH (clamped to the tile's own height) so a short tile
-  // can't be dragged below its content. PURE.
-  const push = (ids: string[], h: number) => {
-    for (const i of ids) {
-      const minH = Math.min(h, minHOf(i, mins));
-      out.push({ i, x: 0, y, w: 1, h, minW: 1, minH });
-      y += h;
-    }
-  };
-  push(input.statIds, STAT_ROWS);
-  push(input.chartIds, CHART_ROWS);
-  push(input.panelIds, CHART_ROWS);
+
+  // Stat cards: 2-up — pair at (x=0,y) and (x=1,y), each half the grid wide.
+  input.statIds.forEach((i, k) => {
+    const minH = Math.min(STAT_ROWS, minHOf(i, mins));
+    out.push({ i, x: k % 2, y: Math.floor(k / 2) * STAT_ROWS, w: 1, h: STAT_ROWS, minW: 1, minH });
+  });
+
+  // Running y after the stat block; ceil handles an odd stat count.
+  let y = Math.ceil(input.statIds.length / 2) * STAT_ROWS;
+
+  // Charts and panels: full-width (span both columns), stacked one per row.
+  for (const i of [...input.chartIds, ...input.panelIds]) {
+    const minH = Math.min(CHART_ROWS, minHOf(i, mins));
+    out.push({ i, x: 0, y, w: cols, h: CHART_ROWS, minW: 1, minH });
+    y += CHART_ROWS;
+  }
+
   return out;
 }
 
@@ -555,7 +571,16 @@ export function generateDefaultPlacements(input: DefaultLayoutInput): Placements
 export function mergePlacements(saved: unknown, def: Placements): Placements {
   const out: Placements = {};
   for (const bp of Object.keys(def) as Breakpoint[]) {
-    out[bp] = mergeOneBreakpoint(readSavedBp(saved, bp), def[bp] ?? []);
+    let savedBp = readSavedBp(saved, bp);
+    // #110 migration: a saved xs layout where EVERY tile is x=0,w=1 is the legacy
+    // single-column stack (COLS.xs was 1, so no other arrangement was possible — it
+    // can't be a deliberate customization). Discard it so the 2-up generateXs default
+    // applies. The new default places charts/panels at w=2, so a current/2-up xs
+    // layout never matches this signature → real customizations are preserved.
+    if (bp === 'xs' && savedBp.length > 0 && savedBp.every((p) => p.x === 0 && p.w === 1)) {
+      savedBp = [];
+    }
+    out[bp] = mergeOneBreakpoint(savedBp, def[bp] ?? []);
   }
   return out;
 }

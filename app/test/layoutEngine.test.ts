@@ -143,18 +143,40 @@ describe('generateDefaultPlacements (hand-calculated)', () => {
     expect(bills.y).toBeGreaterThanOrEqual(lastChartBottom);
   });
 
-  it('xs (mobile): a single column — every widget at x=0, w=1, stacked in order', () => {
+  it('xs (mobile): stat cards 2-up (w=1, x∈{0,1}), charts/panels full-width (w=2)', () => {
     const xs = placements.xs!;
-    expect(xs.every((p) => p.x === 0 && p.w === 1)).toBe(true);
-    // Order is stats → charts → panels, each below the previous (monotonic y).
+    const stats = xs.filter((p) => p.i.startsWith('stat:'));
+    const charts = xs.filter((p) => p.i.startsWith('chart:'));
+    const panels = xs.filter((p) => p.i.startsWith('panel:'));
+
+    // Stat cards: half-width, paired in two columns.
+    expect(stats.every((p) => p.w === 1)).toBe(true);
+    expect(stats.every((p) => p.x === 0 || p.x === 1)).toBe(true);
+    // First two stats share the same y (row 0), one at x=0 and one at x=1.
+    expect(stats[0].y).toBe(stats[1].y);
+    expect(stats[0].x).toBe(0);
+    expect(stats[1].x).toBe(1);
+    // Each (x, y) cell is unique — no two stat tiles overlap.
+    const cells = stats.map((p) => `${p.x},${p.y}`);
+    expect(new Set(cells).size).toBe(stats.length);
+
+    // Charts and panels: full-width, each spanning both columns.
+    expect(charts.every((p) => p.w === COLS.xs && p.x === 0)).toBe(true);
+    expect(panels.every((p) => p.w === COLS.xs && p.x === 0)).toBe(true);
+
+    // Overall order stats → charts → panels with non-decreasing y.
+    const statBottom = Math.max(...stats.map((p) => p.y + p.h));
+    expect(charts.every((p) => p.y >= statBottom - 1)).toBe(true); // charts start at or after stat block
+    const chartBottom = charts.length > 0 ? Math.max(...charts.map((p) => p.y + p.h)) : statBottom;
+    expect(panels.every((p) => p.y >= chartBottom - 1)).toBe(true); // panels start at or after charts
+
+    // Monotonically non-decreasing y across the whole array (stats → charts → panels).
     const ys = xs.map((p) => p.y);
     for (let k = 1; k < ys.length; k++) expect(ys[k]).toBeGreaterThanOrEqual(ys[k - 1]);
-    // No two widgets overlap vertically (a clean stack).
-    expect(new Set(ys).size).toBe(xs.length);
   });
 
-  it('xs: column count is 1 so RGL collapses to a single column on mobile', () => {
-    expect(COLS.xs).toBe(1);
+  it('xs: 2 columns so stat cards pair up 2-up on mobile', () => {
+    expect(COLS.xs).toBe(2);
   });
 });
 
@@ -172,8 +194,9 @@ describe('default placements never fall below a widget min (issue #73)', () => {
     for (const bp of ['lg', 'md', 'sm', 'xs'] as const) {
       const cols = COLS[bp];
       for (const p of placements[bp]!) {
-        // At xs the grid is one column, so minW collapses to 1 (a 2-/3-col min is
-        // meaningless in a 1-col grid); above xs the registry min applies.
+        // At xs the grid is two columns, so minW is clamped to min(regMin, 2);
+        // wide registry mins (e.g. chart minW=3) still collapse to 1 here because
+        // generateXs hard-floors all xs minW to 1 (wider mins are meaningless).
         const expectMinW = Math.min(MINS[p.i].minW, cols);
         expect(p.w, `${bp} ${p.i} w`).toBeGreaterThanOrEqual(expectMinW);
         // h ≥ the stamped minH (the tile is never defaulted below its own height
@@ -305,6 +328,97 @@ describe('mergePlacements (hand-calculated)', () => {
     // Neither malformed entry is kept as a saved override; chart:cost falls back
     // to its default placement (appended), and the whole set is still complete.
     expect(merged.lg!.map((p) => p.i).sort()).toEqual(def.lg!.map((p) => p.i).sort());
+  });
+
+  // -------------------------------------------------------------------------
+  // #110 migration: legacy single-column xs detection + discard
+  // -------------------------------------------------------------------------
+
+  it('#110: a legacy all-(x=0,w=1) xs is discarded so the 2-up default applies', () => {
+    // Build a saved blob whose xs is the legacy single-column stack: every tile
+    // at x=0, w=1 (COLS.xs was 1, so no other arrangement was possible).
+    const legacyXs: Placement[] = [
+      ...STATS.map((i, k) => ({ i, x: 0, y: k * 2, w: 1, h: 2 })),
+      ...CHARTS.map((i, k) => ({ i, x: 0, y: STATS.length * 2 + k * 7, w: 1, h: 7 })),
+      { i: 'panel:bills', x: 0, y: STATS.length * 2 + CHARTS.length * 7, w: 1, h: 7 },
+    ];
+    // Give lg a customized placement to prove other breakpoints are untouched.
+    const customLg: Placement[] = [{ i: 'chart:cost', x: 7, y: 3, w: 5, h: 9 }];
+    const saved = { xs: legacyXs, lg: customLg };
+
+    const merged = mergePlacements(saved, def);
+
+    // xs must equal the 2-up default (legacy discarded).
+    expect(merged.xs).toEqual(def.xs);
+
+    // Spot-check 2-up layout: first two stats are on the same row at x=0 and x=1.
+    const xs = merged.xs!;
+    const stats = xs.filter((p) => p.i.startsWith('stat:'));
+    expect(stats[0].y).toBe(stats[1].y);
+    expect(stats[0].x).toBe(0);
+    expect(stats[1].x).toBe(1);
+
+    // Charts and panels are full-width on the 2-col grid.
+    const charts = xs.filter((p) => p.i.startsWith('chart:'));
+    const panels = xs.filter((p) => p.i.startsWith('panel:'));
+    expect(charts.every((p) => p.w === COLS.xs && p.x === 0)).toBe(true);
+    expect(panels.every((p) => p.w === COLS.xs && p.x === 0)).toBe(true);
+
+    // The customized lg placement survived.
+    const cost = merged.lg!.find((p) => p.i === 'chart:cost')!;
+    expect(cost).toMatchObject({ x: 7, y: 3, w: 5, h: 9 });
+    // All widgets are present in lg too.
+    expect(merged.lg!.map((p) => p.i).sort()).toEqual(def.lg!.map((p) => p.i).sort());
+  });
+
+  it('#110: a real 2-up/customized xs (tile at x=1) is NOT discarded', () => {
+    // A saved xs that already has a tile at x=1 is NOT the legacy signature —
+    // the user deliberately placed it there. The migration must leave it alone.
+    const twoUpXs: Placement[] = [
+      { i: 'stat:a', x: 0, y: 0, w: 1, h: 2 },
+      { i: 'stat:b', x: 1, y: 0, w: 1, h: 2 }, // x=1 → breaks the all-(x=0,w=1) test
+      { i: 'stat:c', x: 0, y: 2, w: 1, h: 2 },
+      { i: 'stat:d', x: 1, y: 2, w: 1, h: 2 },
+      { i: 'stat:e', x: 0, y: 4, w: 1, h: 2 },
+      { i: 'stat:f', x: 1, y: 4, w: 1, h: 2 },
+      { i: 'stat:g', x: 0, y: 6, w: 1, h: 2 },
+      { i: 'stat:h', x: 1, y: 6, w: 1, h: 2 },
+      // One chart moved to a custom position.
+      { i: 'chart:usage', x: 0, y: 8, w: 2, h: 7 },
+    ];
+    const saved = { xs: twoUpXs };
+    const merged = mergePlacements(saved, def);
+
+    // The xs is NOT discarded: the deliberately-placed stat:b at x=1 survives.
+    const b = merged.xs!.find((p) => p.i === 'stat:b')!;
+    expect(b).toMatchObject({ x: 1, y: 0, w: 1, h: 2 });
+
+    // chart:usage at its custom position is kept.
+    const usage = merged.xs!.find((p) => p.i === 'chart:usage')!;
+    expect(usage).toMatchObject({ x: 0, y: 8, w: 2, h: 7 });
+  });
+
+  it('#110: a legacy xs with a chart at w=2 (not all-w=1) is NOT discarded', () => {
+    // If any tile has w≠1 (e.g. already migrated to w=2 for a chart), the
+    // signature check fails and we treat it as a real/current layout.
+    const mixedXs: Placement[] = [
+      { i: 'stat:a', x: 0, y: 0, w: 1, h: 2 },
+      { i: 'chart:usage', x: 0, y: 2, w: 2, h: 7 }, // w=2 → not legacy
+    ];
+    const saved = { xs: mixedXs };
+    const merged = mergePlacements(saved, def);
+
+    // chart:usage kept at its saved w=2 position.
+    const usage = merged.xs!.find((p) => p.i === 'chart:usage')!;
+    expect(usage).toMatchObject({ x: 0, y: 2, w: 2, h: 7 });
+  });
+
+  it('#110: an empty saved xs (no tiles) is NOT treated as legacy — falls back to default', () => {
+    // The guard checks savedBp.length > 0, so an empty xs goes through mergeOneBreakpoint
+    // normally (falls back to the full default), not via the migration path.
+    const saved = { xs: [] };
+    const merged = mergePlacements(saved, def);
+    expect(merged.xs).toEqual(def.xs);
   });
 });
 
