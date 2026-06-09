@@ -69,7 +69,7 @@ import {
   type Placements,
 } from '@/lib/layoutEngine';
 import { clampPage } from '@/lib/cockpit';
-import { getWidget, type WidgetHost } from '@/lib/widgets/registry';
+import { getWidget, widgetMins, type WidgetHost } from '@/lib/widgets/registry';
 
 // WidthProvider measures the container width for us so the grid is responsive
 // without a hardcoded width (the standard RGL setup). Memoized at module scope so
@@ -176,8 +176,12 @@ export function WidgetLayout(props: WidgetLayoutProps) {
   // The default placements that reproduce today's dashboard for the CURRENT
   // visible set. Recomputed when the set changes (a chart toggled, a card
   // appeared) so a newly-shown widget always has a default slot to fall into.
+  // `mins` (the registry's per-widget minW/minH) is threaded into the PURE
+  // generator so no default placement falls below a widget's floor — the issue #73
+  // fix (the crushed stat strip). It also lets mergePlacements self-heal a
+  // previously-persisted crushed default up to the min.
   const defaults = useMemo(
-    () => generateDefaultPlacements({ statIds, chartIds, panelIds }),
+    () => generateDefaultPlacements({ statIds, chartIds, panelIds, mins: widgetMins([...statIds, ...chartIds, ...panelIds]) }),
     [statIds, chartIds, panelIds]
   );
 
@@ -358,17 +362,27 @@ export function WidgetLayout(props: WidgetLayoutProps) {
     // The default (pre-customization) strip = today's stat band; once __strip is
     // explicitly saved, IT is the authority (an empty saved __strip means "nothing
     // pinned", NOT "fall back to stats").
-    const source = saved ?? generateStripPlacements(statIds);
+    // The default strip is generated WITH the registry mins so the stat band wraps
+    // to respect each card's minW (issue #73 fix: 8 cards × minW=2 → 6 per row +
+    // 2, never the old four crushed w=1 cards) and carries its min floor.
+    const source = saved ?? generateStripPlacements(statIds, widgetMins(statIds));
     // Repair against the placed universe: a pinned widget must still be a placed,
     // available widget (its page-grid counterpart was removed → drop the pin too).
     const known = new Set(placedIds);
     const kept = source.filter((p) => known.has(p.i));
     // Stamp each tile's content-fit min bounds from the registry so it can't be
-    // dragged uselessly small (the registry's defaultSize owns the per-widget
-    // minimums; we only carry geometry in the saved blob / pure generator).
+    // dragged uselessly small, and lift a sub-min width UP to the floor so a
+    // SAVED strip persisted by the buggy generator (a crushed w=1 stat) self-heals
+    // instead of staying below the minW RGL enforces on resize.
     return kept.map((p) => {
       const { defaultSize } = getWidget(p.i);
-      return { ...p, minW: defaultSize.minW, minH: defaultSize.minH };
+      return {
+        ...p,
+        minW: defaultSize.minW,
+        minH: defaultSize.minH,
+        w: Math.max(p.w, defaultSize.minW),
+        h: Math.max(p.h, defaultSize.minH),
+      };
     });
   }, [statIds, placedIds, savedPlacements]);
 

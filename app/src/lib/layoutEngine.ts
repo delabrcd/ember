@@ -120,6 +120,51 @@ export interface DefaultLayoutInput {
   // Panel widget ids (the bills rail), e.g. 'panel:bills'. The right rail at lg;
   // appended to the stack below charts at narrower breakpoints.
   panelIds: string[];
+  // Per-widget minimum grid bounds, keyed by widget id (registry `defaultSize`'s
+  // minW/minH). THREADED IN from the caller (WidgetLayout/Dashboard, which own the
+  // registry) so this module stays pure + registry-free. The DEFAULT-PLACEMENT
+  // INVARIANT (issue #73 fix): no emitted default placement may have `w < minW` or
+  // `h < minH` for its widget — otherwise the factory default is below the floor
+  // RGL enforces on resize, so it crushes the tile (content clips) and the user
+  // can never recreate it without resetting. Optional so a caller without the
+  // registry (a test of pure geometry) can omit it; absent → no min floor, the
+  // legacy behaviour (and emitted placements carry no minW/minH stamp).
+  mins?: WidgetMins;
+}
+
+// A per-widget-id min-bounds lookup the caller supplies to the generator. Keeps
+// layoutEngine pure: the registry-derived mins are passed in, never imported.
+export type WidgetMins = Record<string, { minW?: number; minH?: number } | undefined>;
+
+// The min columns a widget id needs, from the supplied lookup (≥1, default 1 when
+// the widget or its minW is absent). PURE.
+function minWOf(id: string, mins: WidgetMins | undefined): number {
+  return Math.max(1, mins?.[id]?.minW ?? 1);
+}
+
+// The min rows a widget id needs, from the supplied lookup (≥1, default 1). PURE.
+function minHOf(id: string, mins: WidgetMins | undefined): number {
+  return Math.max(1, mins?.[id]?.minH ?? 1);
+}
+
+// Stamp a placement with its widget's min bounds (only when the lookup provides
+// them, so a registry-free caller's placements stay un-stamped — matching the
+// legacy shape). The DEFAULT-PLACEMENT INVARIANT also lifts `w`/`h` UP to the min
+// when the requested size is below it, so a default tile and a user-resized tile
+// share the same floor (acceptance: a fresh default is never sub-min). PURE.
+function withMins(p: Placement, mins: WidgetMins | undefined): Placement {
+  const entry = mins?.[p.i];
+  if (!entry) return p;
+  const out: Placement = { ...p };
+  if (typeof entry.minW === 'number') {
+    out.minW = entry.minW;
+    if (out.w < entry.minW) out.w = entry.minW;
+  }
+  if (typeof entry.minH === 'number') {
+    out.minH = entry.minH;
+    if (out.h < entry.minH) out.h = entry.minH;
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -178,58 +223,95 @@ export const PINNED_PAGE_ROWS = 2 * CHART_ROWS;
 // Lay a list of ids into a band of equal-width cells that wrap across `cols`,
 // each `w` wide and `h` tall, starting at row `y0`. Returns the placements and
 // the next free row. Pure helper for the per-breakpoint bands below.
-function band(ids: string[], cols: number, w: number, h: number, y0: number): { items: Placement[]; nextY: number } {
-  const perRow = Math.max(1, Math.floor(cols / w));
-  const items: Placement[] = ids.map((i, idx) => ({
-    i,
-    x: (idx % perRow) * w,
-    y: y0 + Math.floor(idx / perRow) * h,
-    w,
-    h,
-  }));
+//
+// MIN-FLOOR (issue #73 fix): the requested `w` is capped so a card never gets
+// fewer than its widest member's `minW` columns — `perRow` is bounded by
+// floor(cols / maxMinW), and each emitted tile is stamped with (and lifted to) its
+// own min via withMins. So a default tile is never below the floor RGL enforces.
+function band(
+  ids: string[],
+  cols: number,
+  w: number,
+  h: number,
+  y0: number,
+  mins?: WidgetMins
+): { items: Placement[]; nextY: number } {
+  if (ids.length === 0) return { items: [], nextY: y0 };
+  // Each card needs at least the widest member's minW columns; cap the per-row
+  // count so no card falls below it (cards-per-row ≤ floor(cols / maxMinW)).
+  const maxMinW = Math.max(1, ...ids.map((i) => minWOf(i, mins)));
+  const cellW = Math.max(w, maxMinW);
+  const perRow = Math.max(1, Math.floor(cols / cellW));
+  const items: Placement[] = ids.map((i, idx) =>
+    withMins(
+      {
+        i,
+        x: (idx % perRow) * cellW,
+        y: y0 + Math.floor(idx / perRow) * h,
+        w: cellW,
+        h,
+      },
+      mins
+    )
+  );
   const rows = Math.ceil(ids.length / perRow) * h;
-  return { items, nextY: y0 + (ids.length ? rows : 0) };
+  return { items, nextY: y0 + rows };
 }
 
-// Lay the stat cards as a FULL-WIDTH band that fills `cols` exactly. Each card
-// gets floor(cols/n) columns; the first (cols % n) cards get +1 col, so the row
-// of n cards spans all `cols` with no gap (reproducing today's even stat strip).
-// If n > cols the cards wrap to further STAT_ROWS-tall rows. Pure helper.
-function statBand(ids: string[], cols: number): { items: Placement[]; nextY: number } {
+// Lay the stat cards as a FULL-WIDTH band that fills `cols` exactly, wrapping so
+// EVERY card gets at least its `minW` columns (the issue #73 fix: the old code
+// split 12 cols across 8 cards → four w=1 cards below the minW=2 floor, which
+// RGL/CSS crushed and the user couldn't recreate).
+//
+//   • Cards-per-row is capped at floor(cols / maxMinW) so a single row never packs
+//     more cards than fit at ≥ minW each. 8 cards × minW=2 on 12 cols → 6 per row
+//     → 6 + 2 (two rows).
+//   • Each ROW is then filled edge to edge among ITS cards: a row of `rowCount`
+//     cards gets baseW = floor(cols/rowCount) each, the first (cols % rowCount)
+//     getting +1, so every row SUMS TO `cols` (no ragged gap) AND every card stays
+//     ≥ minW (because rowCount ≤ maxPerRow ⇒ floor(cols/rowCount) ≥ minW). So the
+//     short last row (2 cards) spreads to w=6 each rather than leaving 8 cols empty.
+//   • Each tile is stamped with (and never dropped below) its widget's min.
+// PURE.
+function statBand(ids: string[], cols: number, mins?: WidgetMins): { items: Placement[]; nextY: number } {
   const n = ids.length;
   if (n === 0) return { items: [], nextY: 0 };
-  const perRow = Math.min(n, cols);
-  const baseW = Math.floor(cols / perRow);
-  const extra = cols % perRow; // the first `extra` cards in each row get +1 col
+  // The widest min among the cards bounds how many fit in one row at ≥ minW each.
+  const maxMinW = Math.max(1, ...ids.map((i) => minWOf(i, mins)));
+  const perRow = Math.min(n, Math.max(1, Math.floor(cols / maxMinW)));
   const items: Placement[] = [];
-  let x = 0;
   let y = 0;
-  let col = 0; // index within the current row
-  for (const i of ids) {
-    if (col === perRow) {
-      // wrap to the next band row
-      col = 0;
-      x = 0;
-      y += STAT_ROWS;
-    }
-    const w = baseW + (col < extra ? 1 : 0);
-    items.push({ i, x, y, w, h: STAT_ROWS });
-    x += w;
-    col += 1;
+  // Process one row (a slice of up to `perRow` cards) at a time, distributing the
+  // full `cols` width across exactly that row's cards so it fills edge to edge.
+  for (let start = 0; start < n; start += perRow) {
+    const row = ids.slice(start, start + perRow);
+    const rowCount = row.length;
+    const baseW = Math.floor(cols / rowCount);
+    const extra = cols % rowCount; // the first `extra` cards in this row get +1 col
+    let x = 0;
+    row.forEach((i, col) => {
+      const w = baseW + (col < extra ? 1 : 0);
+      items.push(withMins({ i, x, y, w, h: STAT_ROWS }, mins));
+      x += w;
+    });
+    y += STAT_ROWS;
   }
-  return { items, nextY: y + STAT_ROWS };
+  return { items, nextY: y };
 }
 
 // Generate the PINNED STRIP's own placements (issue #73 iteration). The strip is
 // an independent 12-col RGL grid of the stat cards, pinned above every page. Its
 // default is today's full-width 8-across band — reusing statBand so it's byte-
 // identical to the stat row the lg default cockpit lays out (widths summing to 12,
-// each STAT_ROWS tall, on a single row). Each card carries the same content-fit
-// min bounds the registry's defaultSize uses so it can't be dragged uselessly
-// small; minW/minH are filled by the component from the registry, not here (this
-// stays pure + dependency-free), so we emit only geometry. PURE — unit-tested.
-export function generateStripPlacements(statIds: string[]): Placement[] {
-  return statBand(statIds, STRIP_COLS).items;
+// each STAT_ROWS tall), wrapping to a SECOND row when more cards than fit at ≥
+// minW each (issue #73 fix: 8 cards × minW=2 → max 6 per row → 6 + 2). Each card
+// carries the same content-fit min bounds the registry's defaultSize uses so it
+// can't be dragged (or DEFAULTED) uselessly small. The min lookup is passed in by
+// the component (this module stays pure + registry-free); when supplied, the strip
+// is wrapped to respect minW and each tile is stamped with its min. PURE —
+// unit-tested.
+export function generateStripPlacements(statIds: string[], mins?: WidgetMins): Placement[] {
+  return statBand(statIds, STRIP_COLS, mins).items;
 }
 
 // Generate the lg (12-col) cockpit: stat band on top, then a 2×2 chart GRID
@@ -253,33 +335,38 @@ export function generateStripPlacements(statIds: string[]): Placement[] {
 // scrolls, so the panel just stacks under the charts as before.
 function generateLg(input: DefaultLayoutInput): Placement[] {
   const cols = COLS.lg;
+  const mins = input.mins;
   const out: Placement[] = [];
 
-  // Stat band: reproduce today's full-width 8-up row. 8 cards across 12 cols
-  // isn't an even split, so we distribute the columns: each card gets
-  // floor(cols/n), and the first (cols % n) cards get one extra column, so the
-  // widths SUM TO `cols` exactly and the band fills the row edge-to-edge (no
-  // ragged gap) — the faithful reproduction of `lg:grid-cols-8` (acceptance #1).
-  // Cards wrap to a second row only if there are more than `cols` of them.
-  const stat = statBand(input.statIds, cols);
+  // Stat band: reproduce today's full-width 8-up row, but cards-per-row capped at
+  // floor(cols / minW) so EVERY card gets at least its minW columns (issue #73
+  // fix). Each card gets floor(cols/perRow), the first (cols % perRow) get +1, so
+  // a row's widths SUM TO `cols` (fills edge to edge); surplus cards wrap to a
+  // second STAT_ROWS-tall row. 8 cards × minW=2 on 12 cols → 6 per row → 6 + 2.
+  const stat = statBand(input.statIds, cols, mins);
   out.push(...stat.items);
   const afterStats = stat.nextY;
 
   // Charts: a full-width 2×2 grid — each chart is HALF the grid (6 of 12 cols),
   // two per row at x=0 / x=6, so two chart rows = four charts fill one page band
-  // (PINNED_PAGE_ROWS). minH keeps a chart from being resized uselessly short;
-  // minW=3 keeps a chart at least a quarter-width so a row of two stays sane.
+  // (PINNED_PAGE_ROWS). withMins stamps the registry's per-widget min (default
+  // minW=3 / minH=2 here when no lookup is supplied) and lifts the size to it.
   const chartW = cols / 2; // 6 of 12 — half width, two-up
   input.chartIds.forEach((i, idx) => {
-    out.push({
-      i,
-      x: (idx % 2) * chartW,
-      y: afterStats + Math.floor(idx / 2) * CHART_ROWS,
-      w: chartW,
-      h: CHART_ROWS,
-      minW: 3,
-      minH: 2,
-    });
+    out.push(
+      withMins(
+        {
+          i,
+          x: (idx % 2) * chartW,
+          y: afterStats + Math.floor(idx / 2) * CHART_ROWS,
+          w: chartW,
+          h: CHART_ROWS,
+          minW: 3,
+          minH: 2,
+        },
+        mins
+      )
+    );
   });
   // How many chart rows the 2-up block occupies (≥ one so the panel still lands
   // below charts even with 0–2 charts). The bills panel goes on the row AFTER the
@@ -293,7 +380,7 @@ function generateLg(input: DefaultLayoutInput): Placement[] {
   // unpinned budget (DEFAULT_FIT_ROWS) it still fits within a band; clampToPages
   // re-bands it whole if a partly-filled chart band would otherwise straddle.
   input.panelIds.forEach((i) => {
-    out.push({ i, x: 0, y: afterCharts, w: cols, h: PINNED_PAGE_ROWS, minW: 3, minH: 2 });
+    out.push(withMins({ i, x: 0, y: afterCharts, w: cols, h: PINNED_PAGE_ROWS, minW: 3, minH: 2 }, mins));
   });
   return out;
 }
@@ -302,27 +389,39 @@ function generateLg(input: DefaultLayoutInput): Placement[] {
 // panels full-width below. The page scrolls so heights need not sum to a
 // viewport — we just stack the bands.
 function generateScrolling(input: DefaultLayoutInput, cols: number, statW: number, chartW: number): Placement[] {
+  const mins = input.mins;
   const out: Placement[] = [];
-  const stat = band(input.statIds, cols, statW, STAT_ROWS, 0);
+  // The stat band wraps so no card falls below its minW (issue #73 fix); `band`
+  // caps cards-per-row at floor(cols / maxMinW) and stamps each tile's min.
+  const stat = band(input.statIds, cols, statW, STAT_ROWS, 0, mins);
   out.push(...stat.items);
 
   let y = stat.nextY;
+  // Two-up charts, each at least its registry minW (a chart whose half-width would
+  // be below minW is widened by withMins, and the chart can't be resized below it).
+  const effChartW = Math.min(cols, Math.max(chartW, ...input.chartIds.map((i) => minWOf(i, mins)), 1));
+  const chartsPerRow = Math.max(1, Math.floor(cols / effChartW));
   input.chartIds.forEach((i, idx) => {
-    out.push({
-      i,
-      x: (idx % 2) * chartW,
-      y: y + Math.floor(idx / 2) * CHART_ROWS,
-      w: chartW,
-      h: CHART_ROWS,
-      minW: 2,
-      minH: 2,
-    });
+    out.push(
+      withMins(
+        {
+          i,
+          x: (idx % chartsPerRow) * effChartW,
+          y: y + Math.floor(idx / chartsPerRow) * CHART_ROWS,
+          w: effChartW,
+          h: CHART_ROWS,
+          minW: 2,
+          minH: 2,
+        },
+        mins
+      )
+    );
   });
-  y += Math.ceil(Math.max(input.chartIds.length, 1) / 2) * CHART_ROWS;
+  y += Math.ceil(Math.max(input.chartIds.length, 1) / chartsPerRow) * CHART_ROWS;
 
   // Panels full-width below the charts.
   input.panelIds.forEach((i) => {
-    out.push({ i, x: 0, y, w: cols, h: CHART_ROWS + 1, minW: 1, minH: 2 });
+    out.push(withMins({ i, x: 0, y, w: cols, h: CHART_ROWS + 1, minW: 1, minH: 2 }, mins));
     y += CHART_ROWS + 1;
   });
   return out;
@@ -332,11 +431,18 @@ function generateScrolling(input: DefaultLayoutInput, cols: number, statW: numbe
 // 1 col) in order stats → charts → panels, so mobile collapses to one column and
 // scrolls (acceptance #3). Stat cards stay short; charts/panels are taller.
 function generateXs(input: DefaultLayoutInput): Placement[] {
+  const mins = input.mins;
   const out: Placement[] = [];
   let y = 0;
+  // At xs the grid is ONE column, so every tile is full-width (w=1) and its minW
+  // floor is 1 regardless of the registry's wider minW (a 2-/3-col min is
+  // meaningless in a 1-col grid and would make RGL reject the placement). We still
+  // honour the per-widget minH (clamped to the tile's own height) so a short tile
+  // can't be dragged below its content. PURE.
   const push = (ids: string[], h: number) => {
     for (const i of ids) {
-      out.push({ i, x: 0, y, w: 1, h, minW: 1, minH: 1 });
+      const minH = Math.min(h, minHOf(i, mins));
+      out.push({ i, x: 0, y, w: 1, h, minW: 1, minH });
       y += h;
     }
   };
@@ -350,6 +456,10 @@ function generateXs(input: DefaultLayoutInput): Placement[] {
 // dashboard. PURE — unit-tested. The component calls this whenever a breakpoint
 // has no saved placements (and on first load, persisting the result).
 export function generateDefaultPlacements(input: DefaultLayoutInput): Placements {
+  // `input.mins` (the registry min lookup, supplied by the caller) flows into every
+  // breakpoint generator so NO emitted default placement is below its widget's
+  // minW/minH — the issue #73 root-cause fix. Omitting mins keeps the legacy
+  // geometry (no min stamp), which the pure-geometry tests rely on.
   return {
     lg: generateLg(input),
     md: generateScrolling(input, COLS.md, 2, 4),
@@ -405,12 +515,36 @@ function isPlacement(v: unknown): v is Placement {
 // Merge one breakpoint: keep saved placements for still-known widgets (with
 // their user-edited x/y/w/h), then append any known widget the save lacks at its
 // default placement. Unknown saved ids (a removed/renamed widget) are dropped.
+//
+// SELF-HEAL (issue #73): a layout PERSISTED by the buggy generator can carry a
+// sub-min `w`/`h` (the crushed stat cards). We repair each kept placement against
+// the freshly-generated default's min for that widget — clamping `w`/`h` UP to the
+// default's minW/minH and stamping those mins — so an existing dev/staging layout
+// on the crushed default heals on the next merge without a factory reset. This is
+// SAFE: it only ever GROWS a tile to a floor RGL would itself enforce on the first
+// resize (it never shrinks a user's deliberate larger size, never moves x/y), and
+// it's a no-op once the layout already satisfies the mins (idempotent). When the
+// default carries no min (a registry-free caller), nothing is clamped.
 function mergeOneBreakpoint(saved: Placement[], def: Placement[]): Placement[] {
-  const known = new Set(def.map((p) => p.i));
-  const kept = saved.filter((p) => known.has(p.i));
+  const defByI = new Map(def.map((p) => [p.i, p]));
+  const kept = saved.filter((p) => defByI.has(p.i)).map((p) => healMins(p, defByI.get(p.i)!));
   const have = new Set(kept.map((p) => p.i));
   const appended = def.filter((p) => !have.has(p.i));
   return [...kept, ...appended];
+}
+
+// Clamp a saved placement up to the default's min bounds (and stamp those mins),
+// leaving a placement that already meets them untouched. Only grows; never shrinks
+// or moves. PURE.
+function healMins(saved: Placement, def: Placement): Placement {
+  let out = saved;
+  if (typeof def.minW === 'number' && (out.minW !== def.minW || out.w < def.minW)) {
+    out = { ...out, minW: def.minW, w: Math.max(out.w, def.minW) };
+  }
+  if (typeof def.minH === 'number' && (out.minH !== def.minH || out.h < def.minH)) {
+    out = { ...out, minH: def.minH, h: Math.max(out.h, def.minH) };
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------

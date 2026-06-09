@@ -37,6 +37,18 @@ const CHARTS = ['chart:usage', 'chart:cost', 'chart:rates', 'chart:weather', 'ch
 const PANELS = ['panel:bills'];
 const INPUT = { statIds: STATS, chartIds: CHARTS, panelIds: PANELS };
 
+// The REAL registry mins for the default widget set (mirrors registry.tsx's
+// defaultSize.minW/minH; kept hand-written here so the layout-engine test stays
+// PURE — no React/registry import). Stat cards minW=2 (the issue #73 offender),
+// charts minW=3, the bills panel minW=3. minH values aren't load-bearing for the
+// width-crush invariant but are included so the no-sub-min check covers H too.
+const MINS: Record<string, { minW: number; minH: number }> = {
+  ...Object.fromEntries(STATS.map((i) => [i, { minW: 2, minH: 3 }])),
+  ...Object.fromEntries(CHARTS.map((i) => [i, { minW: 3, minH: 3 }])),
+  'panel:bills': { minW: 3, minH: 4 },
+};
+const INPUT_WITH_MINS = { ...INPUT, mins: MINS };
+
 // ---------------------------------------------------------------------------
 // 1. computeFitRowHeight — the no-scroll fit formula (replaces the magic const)
 // ---------------------------------------------------------------------------
@@ -141,6 +153,98 @@ describe('generateDefaultPlacements (hand-calculated)', () => {
 
   it('xs: column count is 1 so RGL collapses to a single column on mobile', () => {
     expect(COLS.xs).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 2b. THE REGRESSION GUARD (issue #73): a DEFAULT placement is NEVER below a
+//     widget's minW/minH. The buggy statBand split 12 cols across 8 stat cards →
+//     four w=1 cards BELOW the minW=2 floor, so the factory default was a size RGL
+//     would reject on resize → crushed, clipped, un-recreatable. With the registry
+//     mins threaded in, no emitted default may be sub-min, at any breakpoint.
+// ---------------------------------------------------------------------------
+describe('default placements never fall below a widget min (issue #73)', () => {
+  const placements = generateDefaultPlacements(INPUT_WITH_MINS);
+
+  it('no placement at any breakpoint has w < minW or h < minH', () => {
+    for (const bp of ['lg', 'md', 'sm', 'xs'] as const) {
+      const cols = COLS[bp];
+      for (const p of placements[bp]!) {
+        // At xs the grid is one column, so minW collapses to 1 (a 2-/3-col min is
+        // meaningless in a 1-col grid); above xs the registry min applies.
+        const expectMinW = Math.min(MINS[p.i].minW, cols);
+        expect(p.w, `${bp} ${p.i} w`).toBeGreaterThanOrEqual(expectMinW);
+        // h ≥ the stamped minH (the tile is never defaulted below its own height
+        // floor). The xs tiles clamp minH to the tile height, so this holds there too.
+        if (typeof p.minH === 'number') {
+          expect(p.h, `${bp} ${p.i} h`).toBeGreaterThanOrEqual(p.minH);
+        }
+        // The placement also CARRIES the min so RGL enforces the same floor.
+        if (bp !== 'xs') {
+          expect(p.minW, `${bp} ${p.i} minW stamp`).toBe(MINS[p.i].minW);
+        }
+      }
+    }
+  });
+
+  it('every emitted minW/minH is itself satisfied by the tile (w≥minW, h≥minH)', () => {
+    for (const bp of ['lg', 'md', 'sm', 'xs'] as const) {
+      for (const p of placements[bp]!) {
+        if (typeof p.minW === 'number') expect(p.w).toBeGreaterThanOrEqual(p.minW);
+        if (typeof p.minH === 'number') expect(p.h).toBeGreaterThanOrEqual(p.minH);
+      }
+    }
+  });
+
+  it('lg stat strip WRAPS to 2 rows (8 cards × minW=2 on 12 cols → 6 + 2)', () => {
+    const stats = placements.lg!.filter((p) => p.i.startsWith('stat:'));
+    // Two distinct band rows (no longer one crushed full-width row).
+    const rowYs = [...new Set(stats.map((p) => p.y))].sort((a, b) => a - b);
+    expect(rowYs.length).toBe(2);
+    // Row 1: 6 cards, each w=2 → sums to 12. Row 2: 2 cards, each w=6 → sums to 12.
+    const row1 = stats.filter((p) => p.y === rowYs[0]);
+    const row2 = stats.filter((p) => p.y === rowYs[1]);
+    expect(row1.length).toBe(6);
+    expect(row2.length).toBe(2);
+    expect(row1.reduce((s, p) => s + p.w, 0)).toBe(COLS.lg);
+    expect(row2.reduce((s, p) => s + p.w, 0)).toBe(COLS.lg);
+    // EVERY card is ≥ minW=2 (the bug was four w=1 cards).
+    expect(stats.every((p) => p.w >= 2)).toBe(true);
+    expect(row1.every((p) => p.w === 2)).toBe(true);
+    expect(row2.every((p) => p.w === 6)).toBe(true);
+  });
+
+  it('the strip default (generateStripPlacements) likewise wraps, no sub-min card', () => {
+    const strip = generateStripPlacements(STATS, MINS);
+    const rowYs = [...new Set(strip.map((p) => p.y))];
+    expect(rowYs.length).toBe(2); // 6 + 2
+    expect(strip.every((p) => p.w >= 2)).toBe(true);
+    expect(strip.every((p) => p.minW === 2)).toBe(true);
+    // Each row still fills the 12-col strip edge to edge.
+    for (const y of rowYs) {
+      const sum = strip.filter((p) => p.y === y).reduce((s, p) => s + p.w, 0);
+      expect(sum).toBe(STRIP_COLS);
+    }
+  });
+
+  it('mergePlacements self-heals a previously-persisted crushed default (w<minW → minW)', () => {
+    // Simulate a layout the BUGGY generator persisted: a stat card stamped with the
+    // min but with a crushed w=1 (below minW=2). The merge against the correct
+    // default must lift it up to the floor and stamp the min.
+    const def = generateDefaultPlacements(INPUT_WITH_MINS);
+    const crushed: Placements = {
+      lg: [{ i: 'stat:a', x: 0, y: 0, w: 1, h: 1 }], // crushed below minW=2 / minH
+    };
+    const merged = mergePlacements(crushed, def);
+    const a = merged.lg!.find((p) => p.i === 'stat:a')!;
+    expect(a.w).toBeGreaterThanOrEqual(2); // healed up to minW
+    expect(a.minW).toBe(2);
+    expect(a.h).toBeGreaterThanOrEqual(a.minH ?? 0);
+    // A user's DELIBERATELY larger size is never shrunk by the heal.
+    const big: Placements = { lg: [{ i: 'stat:a', x: 0, y: 0, w: 5, h: 9 }] };
+    const bigMerged = mergePlacements(big, def).lg!.find((p) => p.i === 'stat:a')!;
+    expect(bigMerged.w).toBe(5);
+    expect(bigMerged.h).toBe(9);
   });
 });
 

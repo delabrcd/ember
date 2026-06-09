@@ -217,3 +217,18 @@ export function getWidget(type: string): WidgetDef {
   if (!w) throw new Error(`Unknown widget type: ${type}`);
   return w;
 }
+
+// The per-widget min grid bounds (minW/minH from each widget's `defaultSize`) for
+// the given ids, keyed by widget type. Threaded into the pure layout generator
+// (`generateDefaultPlacements`/`generateStripPlacements`) so it can guarantee no
+// default placement falls below a widget's min — without importing the registry
+// into the pure engine (issue #73 fix: the crushed-stat-card default). Unknown ids
+// are skipped (the generator defaults their floor to 1).
+export function widgetMins(ids: string[]): Record<string, { minW: number; minH: number }> {
+  const out: Record<string, { minW: number; minH: number }> = {};
+  for (const id of ids) {
+    const w = WIDGETS[id];
+    if (w) out[id] = { minW: w.defaultSize.minW, minH: w.defaultSize.minH };
+  }
+  return out;
+}

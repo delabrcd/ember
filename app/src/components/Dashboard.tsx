@@ -31,6 +31,7 @@ import {
   chartWidgetType,
   getWidget,
   statWidgetType,
+  widgetMins,
   type WidgetHost,
 } from '@/lib/widgets/registry';
 import { WidgetLayout } from './WidgetLayout';
@@ -304,9 +305,12 @@ export function Dashboard() {
   // never-customized default. Reuses the pure engine generator so the
   // materialized blob is byte-identical to the default the grid was showing.
   const buildCurrentLgPlacements = (): Placement[] =>
-    generateDefaultPlacements({ statIds: availableStats, chartIds: availableCharts, panelIds: availablePanels })[
-      FIT_BREAKPOINT
-    ] ?? [];
+    generateDefaultPlacements({
+      statIds: availableStats,
+      chartIds: availableCharts,
+      panelIds: availablePanels,
+      mins: widgetMins([...availableStats, ...availableCharts, ...availablePanels]),
+    })[FIT_BREAKPOINT] ?? [];
 
   // ---- Pin / unpin a widget to the top bar (issue #73 polish #4) ----
   // The operator wants ANY widget (chart/panel/stat) movable to the top bar and
@@ -324,7 +328,7 @@ export function Dashboard() {
     // pinning the FIRST non-stat widget keeps the existing stat pins instead of
     // wiping them (the migration default becomes explicit on first edit).
     const cur = layout?.layouts;
-    const curStrip = readStrip(cur ?? undefined) ?? generateStripPlacements(statIds);
+    const curStrip = readStrip(cur ?? undefined) ?? generateStripPlacements(statIds, widgetMins(statIds));
     // The page breakpoints: the saved blob if present, else the freshly generated
     // default for the full available set (so a never-customized layout still gets a
     // complete set of page placements to move the widget between).
@@ -332,6 +336,7 @@ export function Dashboard() {
       statIds: availableStats,
       chartIds: availableCharts,
       panelIds: availablePanels,
+      mins: widgetMins([...availableStats, ...availableCharts, ...availablePanels]),
     });
     const pageBlob: Record<string, Placement[]> = {};
     for (const bp of Object.keys(COLS) as Breakpoint[]) {
