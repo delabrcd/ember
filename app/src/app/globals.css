@@ -92,6 +92,18 @@ body {
   border-bottom-right-radius: 2px;
 }
 
+/* ── Pinned top-bar highlight (issue #73 polish #4) ────────────────────────
+   The operator: "[a pinned widget] should be indicated by a highlighted
+   background." A widget pinned to the top bar gets an amber ring (set inline in
+   WidgetCell) PLUS a faint amber wash behind its card here, so the bar reads as a
+   distinct, obviously-pinned region — in both view and customize mode. Scoped to
+   `.ngrid-pinned-cell` so only pinned tiles are tinted; the wash sits behind the
+   card's own chrome (the card paints its slate background opaquely on top, so the
+   tint shows as a halo around the card edges, matching the ring). */
+.ngrid-pinned-cell {
+  background: rgba(245, 158, 11, 0.1); /* amber-500/10 */
+}
+
 /* ── Stat-card content fit (issue #73) ─────────────────────────────────────
    The operator's rule: a stat card's title + headline (+ the budget progress
    bar) must ALWAYS show, the optional detail/sub line hides when the tile is too

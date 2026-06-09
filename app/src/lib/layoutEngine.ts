@@ -70,7 +70,43 @@ export interface Placement {
 // shape and the concrete type behind Phase D's opaque `DashboardLayout.layouts`
 // passthrough (RFC §3.4). Partial because a breakpoint may be unset until first
 // generated; the component fills any missing breakpoint from the generator.
-export type Placements = Partial<Record<Breakpoint, Placement[]>>;
+//
+// PINNED-STRIP PLACEMENTS (issue #73 iteration — the customizable pinned strip):
+// the pinned stat strip is now its OWN editable RGL grid, with its own placements.
+// They ride this SAME blob under a reserved key (`STRIP_KEY` below) — NOT a new
+// `DashboardLayout` field, so there's no schema change: the strip layout persists
+// through the same `layouts` PUT as the paged grid. The key is NOT a Breakpoint
+// (it's a fixed `__strip`), so the per-breakpoint paths (mergePlacements over the
+// four real breakpoints, the paged-grid build) never see it; the component reads
+// it out explicitly via `readStrip` / writes it via `withStrip`.
+export type Placements = Partial<Record<Breakpoint, Placement[]>> & {
+  // The pinned strip's own placements (a single 12-col band of stat cards). Stored
+  // under a reserved, non-breakpoint key so it round-trips with the rest of the
+  // layout blob without a schema change. Absent until the strip is first generated.
+  [STRIP_KEY]?: Placement[];
+};
+
+// The reserved (non-breakpoint) key under which the pinned strip's placements live
+// in the `Placements` blob. A double-underscore prefix so it can never collide
+// with a real breakpoint id ('lg'/'md'/'sm'/'xs').
+export const STRIP_KEY = '__strip' as const;
+
+// The pinned strip is a 12-col band (matching the lg grid's column count) so its
+// 8-across default lands cleanly. Exported for the component's strip RGL.
+export const STRIP_COLS = 12;
+
+// Read the strip placements out of a (possibly absent) blob — never the
+// per-breakpoint paths, which must ignore the reserved key. PURE.
+export function readStrip(p: Placements | undefined): Placement[] | undefined {
+  const arr = p?.[STRIP_KEY];
+  return Array.isArray(arr) ? arr : undefined;
+}
+
+// Return a copy of the blob with the strip placements set under the reserved key,
+// leaving every real breakpoint untouched. PURE.
+export function withStrip(p: Placements, strip: Placement[]): Placements {
+  return { ...p, [STRIP_KEY]: strip };
+}
 
 // The three widget categories the default generator lays out, in the order they
 // stack on mobile and band on desktop. Charts are the variable-length middle.
@@ -182,6 +218,18 @@ function statBand(ids: string[], cols: number): { items: Placement[]; nextY: num
     col += 1;
   }
   return { items, nextY: y + STAT_ROWS };
+}
+
+// Generate the PINNED STRIP's own placements (issue #73 iteration). The strip is
+// an independent 12-col RGL grid of the stat cards, pinned above every page. Its
+// default is today's full-width 8-across band — reusing statBand so it's byte-
+// identical to the stat row the lg default cockpit lays out (widths summing to 12,
+// each STAT_ROWS tall, on a single row). Each card carries the same content-fit
+// min bounds the registry's defaultSize uses so it can't be dragged uselessly
+// small; minW/minH are filled by the component from the registry, not here (this
+// stays pure + dependency-free), so we emit only geometry. PURE — unit-tested.
+export function generateStripPlacements(statIds: string[]): Placement[] {
+  return statBand(statIds, STRIP_COLS).items;
 }
 
 // Generate the lg (12-col) cockpit: stat band on top, then a 2×2 chart GRID

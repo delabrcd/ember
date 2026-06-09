@@ -4,17 +4,22 @@ import {
   DEFAULT_FIT_ROWS,
   PINNED_PAGE_ROWS,
   MIN_ROW_HEIGHT,
+  STRIP_COLS,
+  STRIP_KEY,
   clampToPages,
   computeFitRowHeight,
   computePageFit,
   findFreeSlot,
   generateDefaultPlacements,
+  generateStripPlacements,
   mergePlacements,
   pageCount,
   paginatePlacements,
   placementRows,
   placementsEqual,
+  readStrip,
   rebaseToLocal,
+  withStrip,
   type Placement,
   type Placements,
 } from '../src/lib/layoutEngine';
@@ -554,6 +559,124 @@ describe('the default cockpit paginates cleanly at the pinned page budget', () =
     const chartPages = pages.filter((pg) => pg.some((p) => p.i.startsWith('chart:'))).length;
     expect(chartPages).toBeLessThanOrEqual(2);
     expect(pages.length).toBeLessThanOrEqual(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// THE CUSTOMIZABLE PINNED STRIP (issue #73 polish #4) — its own placements blob.
+// ---------------------------------------------------------------------------
+//
+// The pinned stat strip is now its own editable RGL grid. Its placements ride the
+// SAME layout blob under a reserved (non-breakpoint) key STRIP_KEY, so there's no
+// schema change and the strip survives the same PUT as the page grid. These tests
+// fence the pure side: the default is today's 8-across band; the strip key reads/
+// writes without touching the real breakpoints; placementsEqual sees strip edits.
+describe('generateStripPlacements — the strip default = today\'s 8-across band', () => {
+  it('lays the stat cards in one full-width band summing to 12 cols on row 0', () => {
+    const strip = generateStripPlacements(STATS);
+    // One band: every card on y=0 (today's single-row 8-across strip).
+    expect(strip.every((p) => p.y === 0)).toBe(true);
+    // Widths sum to the 12-col strip grid (no ragged gap), 8 cards across.
+    expect(strip.reduce((s, p) => s + p.w, 0)).toBe(STRIP_COLS);
+    expect(strip.length).toBe(STATS.length);
+    // Same 4×w=2 + 4×w=1 distribution the lg cockpit's stat band uses (12/8).
+    expect(strip.filter((p) => p.w === 2).length).toBe(4);
+    expect(strip.filter((p) => p.w === 1).length).toBe(4);
+  });
+
+  it('an empty stat set yields an empty strip', () => {
+    expect(generateStripPlacements([])).toEqual([]);
+  });
+});
+
+describe('readStrip / withStrip — the reserved strip key round-trips', () => {
+  const strip: Placement[] = [
+    { i: 'stat:a', x: 0, y: 0, w: 3, h: 3 },
+    { i: 'stat:b', x: 3, y: 0, w: 3, h: 3 },
+  ];
+
+  it('withStrip stores under STRIP_KEY without touching real breakpoints', () => {
+    const base: Placements = { lg: [{ i: 'chart:cost', x: 0, y: 0, w: 6, h: 7 }] };
+    const out = withStrip(base, strip);
+    // The lg breakpoint is untouched; the strip lands under the reserved key.
+    expect(out.lg).toEqual(base.lg);
+    expect(out[STRIP_KEY]).toEqual(strip);
+  });
+
+  it('readStrip pulls the strip back out (and is undefined when absent/garbage)', () => {
+    expect(readStrip(withStrip({}, strip))).toEqual(strip);
+    expect(readStrip({})).toBeUndefined();
+    expect(readStrip(undefined)).toBeUndefined();
+    // A non-array under the key reads as absent (defensive).
+    expect(readStrip({ [STRIP_KEY]: 'nope' } as unknown as Placements)).toBeUndefined();
+  });
+
+  it('mergePlacements (the per-breakpoint repair) IGNORES the strip key', () => {
+    // The strip key is not a breakpoint, so the page-grid merge never sees it — a
+    // blob carrying a strip merges its four breakpoints and drops the reserved key
+    // (the component reads/writes the strip via readStrip/withStrip, not merge).
+    const def = generateDefaultPlacements(INPUT);
+    const saved = withStrip({ lg: def.lg }, strip);
+    const merged = mergePlacements(saved, def);
+    expect(merged[STRIP_KEY]).toBeUndefined();
+    // The four real breakpoints still merge as usual.
+    expect(merged.lg!.map((p) => p.i).sort()).toEqual(def.lg!.map((p) => p.i).sort());
+  });
+
+  it('placementsEqual detects a strip-card move (so a strip drag persists)', () => {
+    const a = withStrip({}, strip);
+    const moved = withStrip({}, [{ ...strip[0], x: 6 }, strip[1]]);
+    expect(placementsEqual(a, moved)).toBe(false);
+    // ...and an identical strip is equal (a no-op gesture won't re-persist).
+    expect(placementsEqual(a, withStrip({}, strip))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PIN ANY WIDGET to the top bar (issue #73 polish #4) — pure-side invariants.
+// ---------------------------------------------------------------------------
+//
+// The bar generalized from stats-only to ANY widget. The cross-grid pin/unpin
+// MOVE lives in the component (it has registry access), but it rests on these pure
+// guarantees: a CHART/PANEL placement round-trips under STRIP_KEY exactly like a
+// stat; placementsEqual sees a chart pinned/unpinned (so the PUT fires once and the
+// re-feed loop still settles); and findFreeSlot lands a newly-pinned tile on an
+// empty strip cell beside the existing pins (the slot the component uses).
+describe('top bar holds ANY widget (chart/panel), not just stats', () => {
+  it('a chart placement round-trips under STRIP_KEY (readStrip/withStrip)', () => {
+    // A chart and the bills panel pinned alongside a stat — the generalized bar.
+    const mixed: Placement[] = [
+      { i: 'stat:latestBill', x: 0, y: 0, w: 2, h: 3 },
+      { i: 'chart:cost', x: 2, y: 0, w: 3, h: 3 },
+      { i: 'panel:bills', x: 5, y: 0, w: 3, h: 3 },
+    ];
+    const blob = withStrip({ lg: [] }, mixed);
+    expect(readStrip(blob)).toEqual(mixed);
+    // The reserved key is not a breakpoint, so the page merge still ignores it.
+    expect(mergePlacements(blob, generateDefaultPlacements(INPUT))[STRIP_KEY]).toBeUndefined();
+  });
+
+  it('placementsEqual detects pinning/unpinning a chart in the bar', () => {
+    const base = withStrip({}, [{ i: 'stat:latestBill', x: 0, y: 0, w: 2, h: 3 }]);
+    const pinnedChart = withStrip({}, [
+      { i: 'stat:latestBill', x: 0, y: 0, w: 2, h: 3 },
+      { i: 'chart:cost', x: 2, y: 0, w: 3, h: 3 },
+    ]);
+    // Pinning a chart changes the strip set → a persist fires (PUT).
+    expect(placementsEqual(base, pinnedChart)).toBe(false);
+    // Unpinning is the inverse — back to base reads as equal (idempotent, no loop).
+    expect(placementsEqual(pinnedChart, pinnedChart)).toBe(true);
+  });
+
+  it('findFreeSlot lands a pinned tile beside existing strip tiles (no overlap)', () => {
+    // The component pins a chart at a compact strip size (w=3, h=3) onto the strip's
+    // 12-col grid. With two stat tiles already occupying x=0..3 on row 0, the next
+    // free 3-wide cell is x=4 on row 0 — what the pin path places it at.
+    const existing: Placement[] = [
+      { i: 'stat:a', x: 0, y: 0, w: 2, h: 3 },
+      { i: 'stat:b', x: 2, y: 0, w: 2, h: 3 },
+    ];
+    expect(findFreeSlot(existing, { w: 3, h: 3 }, STRIP_COLS)).toEqual({ x: 4, y: 0 });
   });
 });
 
