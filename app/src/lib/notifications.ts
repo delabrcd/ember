@@ -210,6 +210,42 @@ export function deriveNotifications(
 }
 
 // ---------------------------------------------------------------------------
+// Anomaly retraction helper (issue #112). Pure: no DB/React. Identifies stored
+// anomaly keys that should be deleted because the underlying data for the LATEST
+// evaluated month has corrected (the flag cleared) — i.e. transient false
+// positives from a bad scrape value that was later corrected.
+//
+// ONLY retracts anomalies whose ym === latestYm and whose key is no longer in the
+// current expected set. Anomalies for older months (genuine historical records)
+// are NEVER touched. Bills are NEVER touched. Nothing is deleted when latestYm is
+// null (detection couldn't run).
+//
+// The key format is `anomaly:{ym}:{fuel}:{metric}` — parse `ym` from segment [1].
+// ---------------------------------------------------------------------------
+
+// Parse the ym from an anomaly key (`anomaly:{ym}:{fuel}:{metric}`).
+// Returns NaN when the key doesn't match the expected shape.
+function parseAnomalyYm(key: string): number {
+  if (!key.startsWith('anomaly:')) return NaN;
+  return Number(key.split(':')[1]);
+}
+
+// Returns the subset of storedAnomalyKeys that should be deleted: those whose
+// parsed ym equals latestYm AND whose key is not in currentAnomalyKeys.
+// Keys that don't parse cleanly (NaN ym) are left alone.
+export function anomalyKeysToRetract(
+  storedAnomalyKeys: string[],
+  currentAnomalyKeys: string[],
+  latestYm: number
+): string[] {
+  const currentSet = new Set(currentAnomalyKeys);
+  return storedAnomalyKeys.filter((key) => {
+    const ym = parseAnomalyYm(key);
+    return Number.isFinite(ym) && ym === latestYm && !currentSet.has(key);
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Anomaly detail (notification-details feature). Clicking an anomaly notification
 // opens a breakdown; this pure helper turns the raw AnomalyFlag into the structured
 // fields that view renders, so NO formatting/arithmetic lives in the component. It

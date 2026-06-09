@@ -3,6 +3,7 @@ import {
   buildNotifications,
   deriveNotifications,
   describeAnomaly,
+  anomalyKeysToRetract,
   type NotificationsOverview,
 } from '../src/lib/notifications';
 import type { AnomalyFlag, AnomalyResult } from '../src/lib/anomaly';
@@ -240,5 +241,63 @@ describe('describeAnomaly', () => {
     expect(describeAnomaly(mkFlag({ fuel: 'gas', metric: 'rate' })).metricLabel).toBe('all-in price ($/therm)');
     const usageAbove = describeAnomaly(mkFlag({ fuel: 'elec', metric: 'usage', direction: 'above' }));
     expect(usageAbove.meaning).toContain('running all the time');
+  });
+});
+
+describe('anomalyKeysToRetract', () => {
+  // Both stored anomaly keys for the latest month are cleared -> both returned.
+  it('returns both stored keys when current anomaly keys are empty (transient clears while latest)', () => {
+    const stored = ['anomaly:202605:elec:rate', 'anomaly:202605:elec:usage'];
+    const result = anomalyKeysToRetract(stored, [], 202605);
+    expect(result).toHaveLength(2);
+    expect(result).toContain('anomaly:202605:elec:rate');
+    expect(result).toContain('anomaly:202605:elec:usage');
+  });
+
+  // A stored anomaly key that's still in the current set must NOT be returned.
+  it('does not return a genuine anomaly that is still flagged', () => {
+    const stored = ['anomaly:202605:elec:rate'];
+    const current = ['anomaly:202605:elec:rate'];
+    const result = anomalyKeysToRetract(stored, current, 202605);
+    expect(result).toEqual([]);
+  });
+
+  // A stored anomaly for an older month must not be returned, even though it
+  // isn't in the current key set (it's a genuine historical record).
+  it('does not touch anomalies for an older ym (non-latest months are never retracted)', () => {
+    const stored = ['anomaly:202504:gas:usage'];
+    const result = anomalyKeysToRetract(stored, [], 202605);
+    expect(result).toEqual([]);
+  });
+
+  // Mixed: one stale-latest, one still-current for latest, one older -> only the
+  // stale-latest is returned.
+  it('returns only the stale-latest key in a mixed set', () => {
+    const stored = [
+      'anomaly:202605:elec:rate',   // stale latest (should be retracted)
+      'anomaly:202605:elec:usage',  // still current (should survive)
+      'anomaly:202504:gas:usage',   // older month (must not be touched)
+    ];
+    const current = ['anomaly:202605:elec:usage'];
+    const result = anomalyKeysToRetract(stored, current, 202605);
+    expect(result).toEqual(['anomaly:202605:elec:rate']);
+  });
+
+  // bill:* keys must never be returned by this helper (they are excluded by the
+  // `anomaly:` prefix check; the caller passes only kind='anomaly' keys, but the
+  // helper itself must also be safe even if a bill key slips through).
+  it('ignores bill keys even if accidentally passed as stored anomaly keys', () => {
+    const stored = ['bill:2026-05-04', 'anomaly:202605:elec:rate'];
+    const result = anomalyKeysToRetract(stored, [], 202605);
+    // Only the anomaly key should be returned; the bill key must not be.
+    expect(result).toEqual(['anomaly:202605:elec:rate']);
+  });
+
+  // Keys that don't parse cleanly (malformed, missing segments) are skipped.
+  it('skips malformed anomaly keys that cannot be parsed', () => {
+    const stored = ['anomaly:', 'anomaly:NaN:elec:rate', 'anomaly:202605:elec:rate'];
+    const result = anomalyKeysToRetract(stored, [], 202605);
+    // Only the well-formed key for latestYm is returned.
+    expect(result).toEqual(['anomaly:202605:elec:rate']);
   });
 });

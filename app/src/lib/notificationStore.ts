@@ -16,7 +16,7 @@
 import { prisma } from '@/lib/db';
 import { getBills, getMonthlySeries } from '@/lib/queries';
 import { detectAnomalies } from '@/lib/anomaly';
-import { deriveNotifications, type NotificationRow } from '@/lib/notifications';
+import { deriveNotifications, anomalyKeysToRetract, type NotificationRow } from '@/lib/notifications';
 import type { Prisma } from '@prisma/client';
 
 // One log row as the bell consumes it (client-safe; no secret). `payload` is the
@@ -33,14 +33,45 @@ export interface NotificationLogItem {
 }
 
 // Compute the rows that should exist for this account (full bill history + current
-// anomaly flags) and INSERT any that are missing. Existing rows are left untouched
-// — read/unread and createdAt are preserved (createMany skipDuplicates). Returns
-// the number of newly-inserted rows. Failure-tolerant callers wrap this in
+// anomaly flags), retract stale anomaly rows for the latest evaluated month that
+// are no longer flagged, and INSERT any missing rows. Existing rows are left
+// untouched — read/unread and createdAt are preserved (createMany skipDuplicates).
+// Returns the number of newly-inserted rows. Failure-tolerant callers wrap this in
 // try/catch; it does not swallow its own errors.
+//
+// RETRACTION LOGIC (issue #112): when a transient bad scrape value trips an anomaly
+// and the next scrape corrects it, the flag clears but the DB row persisted. We
+// delete only the rows that: (a) are kind='anomaly', (b) belong to the latest
+// evaluated month (latestYm), and (c) are no longer in the current flag set.
+// Bills are NEVER deleted. Anomalies for older months are NEVER deleted (genuine
+// historical records). Nothing is deleted when latestYm is null (detection
+// couldn't run — guarded here so we never mass-delete on a bad series).
 export async function syncNotifications(accountId: number): Promise<number> {
   const [bills, series] = await Promise.all([getBills(accountId), getMonthlySeries(accountId)]);
-  const { flags } = detectAnomalies(series);
+  const { flags, ym: latestYm } = detectAnomalies(series);
   const rows: NotificationRow[] = deriveNotifications(bills, flags, accountId);
+
+  // Retract stale anomaly rows for the latest month before inserting.
+  if (latestYm != null) {
+    // Derive the set of current anomaly keys from the rows we just computed so
+    // the key format is guaranteed identical (no hand-formatting).
+    const currentAnomalyKeys = rows.filter((r) => r.kind === 'anomaly').map((r) => r.key);
+
+    // Fetch stored anomaly keys for this account (kind='anomaly' only; bills excluded).
+    const stored = await prisma.notification.findMany({
+      where: { accountId, kind: 'anomaly' },
+      select: { key: true },
+    });
+    const storedAnomalyKeys = stored.map((s) => s.key);
+
+    const keysToRetract = anomalyKeysToRetract(storedAnomalyKeys, currentAnomalyKeys, latestYm);
+    if (keysToRetract.length > 0) {
+      await prisma.notification.deleteMany({
+        where: { accountId, key: { in: keysToRetract } },
+      });
+    }
+  }
+
   if (rows.length === 0) return 0;
 
   const result = await prisma.notification.createMany({
