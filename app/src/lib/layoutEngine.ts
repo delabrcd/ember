@@ -198,11 +198,12 @@ function withMins(p: Placement, mins: WidgetMins | undefined): Placement {
 // → 8 cards forced onto two card-rows), and (2) the card body is trimmed to just
 // the brief title + the headline value (the old sub/detail line moved into the ⓘ
 // tooltip), so a card needs only ~2 grid rows of height. We drop STAT_ROWS 3 → 2:
-// a simple/yoy card (title + headline = 64px) fits in 2 strip rows (2*28 + 8 =
-// 64px); the budget card reserves its progress bar (76px → minH=3, via cardFit), so
-// withMins lifts just that one tile to 3 rows. The strip band is therefore ~one
-// compact row (~106px, budget-driven, at STRIP_ROW_HEIGHT=30) instead of the old
-// ~208px two-row block. A chart stays ~7 units (a comfortably tall plot).
+// EVERY card (title + headline = 66px) fits in 2 strip rows (2*30 + 8 = 68px),
+// INCLUDING the budget card — its ~6px progress bar now fits WITHIN that shared
+// height (visual-uniformity pass) instead of reserving an extra row, so all cards
+// derive minH=2 via cardFit and the strip is one UNIFORM-height compact row (~68px
+// at STRIP_ROW_HEIGHT=30) instead of the old budget-driven ~106px / ~208px blocks.
+// A chart stays ~7 units (a comfortably tall plot).
 export const STAT_ROWS = 2;
 // Exported so WidgetLayout can pass it as computePageFit's `rowQuantum` — keeping
 // each fit page a whole number of CHART rows so the 2×2 aligns to page boundaries

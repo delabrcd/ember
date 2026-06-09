@@ -9,23 +9,24 @@ import { essentialHeightPx, pxToMinRows } from '../src/lib/widgets/cardFit';
 // grid `minH` derives from these same numbers, so fencing them keeps the two in
 // lock-step.
 
-describe('essentialHeightPx (hand-calculated, !p-2 padding + .card border)', () => {
+describe('essentialHeightPx (hand-calculated, !py-2 padding + .card border)', () => {
   it('simple card = border + padding + title + headline', () => {
     // 2 (border) + 16 (p-2) + 16 (title) + 32 (headline) = 66
     expect(essentialHeightPx('simple')).toBe(66);
   });
-  it('budget card also reserves the progress bar', () => {
-    // 66 + 12 (bar + its margin) = 78
-    expect(essentialHeightPx('budget')).toBe(78);
+  it('budget card shares the SAME essential height (visual-uniformity pass)', () => {
+    // The budget progress bar now fits WITHIN the uniform card height (it no longer
+    // reserves its own extra row), so budget === simple → one strip-card height.
+    expect(essentialHeightPx('budget')).toBe(66);
+    expect(essentialHeightPx('budget')).toBe(essentialHeightPx('simple'));
   });
 });
 
 describe('pxToMinRows — content px → grid-row minH (hand-calculated)', () => {
   it('ceils so the rows cover the required pixels: n ≥ (px + m)/(rh + m)', () => {
-    // simple 66px at the strip rowHeight 30, margin 8: (66+8)/(30+8) = 74/38 = 1.95 → 2 rows.
+    // simple/budget 66px at the strip rowHeight 30, margin 8: (66+8)/(30+8) =
+    // 74/38 = 1.95 → 2 rows. Both kinds now derive the SAME minH (2 rows).
     expect(pxToMinRows(66, 30, 8)).toBe(2);
-    // budget 78px: (78+8)/38 = 86/38 = 2.26 → ceil → 3 rows (it reserves the bar).
-    expect(pxToMinRows(78, 30, 8)).toBe(3);
   });
   it('n rows actually cover the px (n*rh + (n-1)*m ≥ px)', () => {
     for (const px of [66, 78, 100, 150]) {

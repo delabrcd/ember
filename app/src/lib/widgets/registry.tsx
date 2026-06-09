@@ -32,10 +32,12 @@ import { STAT_ROWS } from '@/lib/layoutEngine';
 // essential CONTENT height (from cardFit.ts) into a grid-row `minH`. Stat cards'
 // DEFAULT home is the pinned strip, which renders at the fixed STRIP_ROW_HEIGHT
 // (30px) — so we derive `minH` against that row height, the height the card
-// actually occupies where it lives by default. At 30px a slim simple/yoy card
-// (border + padding + title + headline = 66px) needs minH=2 and the budget card
-// (which also reserves its progress bar = 78px) needs minH=3 — the compact single-row strip (the
-// compact-stat-cards iteration: brief title + headline only, detail moved to the ⓘ
+// actually occupies where it lives by default. At 30px EVERY card (border + padding
+// + title + headline = 66px) needs minH=2 — including the budget card, whose ~6px
+// progress bar now fits WITHIN that shared height (visual-uniformity pass) rather
+// than reserving its own extra row, so all strip cards are one uniform height — the
+// compact single-row strip (the compact-stat-cards iteration: brief title +
+// headline only, detail moved to the ⓘ
 // tooltip). `overflow-hidden` on the card is the hard backstop if a tile is ever
 // dragged shorter (e.g. onto the paged grid, whose fit row can bottom out at 24px).
 // Mirrors MARGIN/STRIP_ROW_HEIGHT in WidgetLayout.
@@ -165,9 +167,10 @@ function statWidget(spec: StatSpec): WidgetDef {
     // line moved into the ⓘ tooltip — so the card is short and narrow. minW=1 lets
     // all 8 stat cards lay out in a SINGLE row of the 12-col strip (the operator's
     // ask: one row, not two). minH is DERIVED from the card's essential content
-    // (cardFit.ts) at the strip's row height — simple/yoy → 2 rows, the budget card
-    // (which reserves its progress bar) → 3. `defaultSize.w`/`h` are the add-one-
-    // widget fallback; the default strip widths come from the layout generator.
+    // (cardFit.ts) at the strip's row height — every card (budget included) → 2 rows
+    // now, one uniform strip-card height (the budget bar fits within it, no extra
+    // row). `defaultSize.w`/`h` are the add-one-widget fallback; the default strip
+    // widths come from the layout generator.
     defaultSize: {
       w: 2,
       h: STAT_ROWS,
