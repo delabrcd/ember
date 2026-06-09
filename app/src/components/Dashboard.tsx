@@ -257,7 +257,10 @@ export function Dashboard() {
   const chartIds = availableCharts;
   const panelIds = availablePanels.filter(isPlaced);
 
-  const fit = prefs.density === 'fit';
+  // The dashboard is ALWAYS the paginated fit layout now (the old 'comfortable'
+  // density was retired when Customize mode + the fit pager superseded it). At ≥xl
+  // this pins the page to the viewport and paginates; below xl it scrolls as before.
+  const fit = true;
 
   // Add/remove a widget. Both edit the SAVED placements: removing strips the type
   // from every breakpoint; adding re-inserts it at its default slot (handled by
@@ -537,7 +540,7 @@ export function Dashboard() {
   // iteration): view mode shows one page with a pager; customize mode scrolls the
   // grid CANVAS internally (flex-1 overflow-y-auto inside WidgetLayout) so every
   // page's widgets stay reachable while the page itself stays pinned. Both modes
-  // pin at xl; below xl (and in comfortable density) the page scrolls normally.
+  // pin at xl; below xl the page scrolls normally.
   const lockViewport = fit;
   return (
     // FULL-WIDTH SHELL (issue #73 polish — operator: "left/right banding bars on

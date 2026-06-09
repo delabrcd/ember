@@ -118,6 +118,27 @@ describe('mergePrefs projection toggles (hand-calculated)', () => {
   });
 });
 
+// density (issue #2 → retired): the 'comfortable' page-scrolling layout was
+// dropped once Customize mode + the paginated fit layout superseded it. The pref
+// is kept for localStorage compatibility but is effectively a constant — mergePrefs
+// migrates ANY persisted value (including a returning user's 'comfortable') to 'fit'
+// so nobody is left in the dead layout.
+describe('mergePrefs density (hand-calculated)', () => {
+  it("defaults to 'fit' when nothing is saved", () => {
+    expect(mergePrefs(null).density).toBe('fit');
+    expect(mergePrefs({}).density).toBe('fit');
+    expect(DEFAULT_PREFS.density).toBe('fit');
+  });
+
+  it("migrates a persisted 'comfortable' to 'fit'", () => {
+    expect(mergePrefs({ density: 'comfortable' as never }).density).toBe('fit');
+  });
+
+  it("keeps a persisted 'fit' as 'fit'", () => {
+    expect(mergePrefs({ density: 'fit' }).density).toBe('fit');
+  });
+});
+
 // rateCardMode (compact-stat-cards iteration): the rate cards' flick choice rides
 // the same display prefs with per-key `??` back-compat — default 'avg' (today's
 // behavior) for new/returning users, an explicit valid value survives, garbage falls

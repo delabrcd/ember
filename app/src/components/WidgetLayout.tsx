@@ -963,8 +963,8 @@ export function WidgetLayout(props: WidgetLayoutProps) {
           {buildGrid({ gridLayouts: canvasLayouts, ids: gridIds, draggable: true })}
         </div>
       ) : (
-        // Below the fit breakpoint (or comfortable density): the page scrolls
-        // normally, no pager — today's mobile/md behaviour.
+        // Below the fit breakpoint: the page scrolls normally, no pager —
+        // today's mobile/md behaviour.
         buildGrid({ gridLayouts: canvasLayouts, ids: gridIds, draggable: customizing })
       )}
     </div>

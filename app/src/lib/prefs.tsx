@@ -13,9 +13,13 @@ import { DEFAULT_CHART_CONFIG, DEFAULT_CHART_ORDER, type ChartConfig } from './c
 export type { ChartConfig };
 
 // Density of the cockpit layout (issue #2). 'fit' packs the main view into a
-// 16:9 desktop viewport with no page scroll (vh-based chart heights); 'comfortable'
-// is the classic taller, page-scrolling layout. Only affects ≥1280px.
-export type Density = 'fit' | 'comfortable';
+// 16:9 desktop viewport with no page scroll (vh-based chart heights). The old
+// 'comfortable' page-scrolling alternative was retired once Customize mode +
+// the paginated fit layout superseded it: the dashboard is now ALWAYS 'fit' at
+// ≥1280px (below that it scrolls regardless). The pref is kept (no schema change,
+// localStorage compatibility) but is effectively a constant — mergePrefs migrates
+// any persisted 'comfortable' to 'fit', and there's no longer a UI to set it.
+export type Density = 'fit';
 
 // Which rate the elec/gas rate stat cards show (compact-stat-cards iteration,
 // issue #73): 'avg' = the trailing-12-month average all-in rate (the long-standing
@@ -101,7 +105,10 @@ export function mergePrefs(
   return {
     range: mergeRange(saved),
     currencyDecimals: saved.currencyDecimals ?? DEFAULT_PREFS.currencyDecimals,
-    density: saved.density === 'comfortable' || saved.density === 'fit' ? saved.density : DEFAULT_PREFS.density,
+    // Density is now always 'fit' (the 'comfortable' path was retired). Any value
+    // a previous version persisted — including 'comfortable' — is migrated to
+    // 'fit' so an existing user gets the paginated fit layout on next load.
+    density: 'fit',
     showProjectionOnCharts: saved.showProjectionOnCharts ?? legacyProjection,
     showProjectionCard: saved.showProjectionCard ?? legacyProjection,
     // Per-key `??` back-compat: only an explicit valid value is kept, else default
