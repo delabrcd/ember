@@ -30,6 +30,7 @@ import { dateLabel, relativeFromNow } from '@/lib/format';
 import { STAT_SPECS, type StatData } from '@/lib/widgets/statSpec';
 import {
   BILLS_PANEL_TYPE,
+  INTERVAL_WIDGET_TYPE,
   SPACER_PREFIX,
   chartWidgetType,
   getWidget,
@@ -188,6 +189,10 @@ export function Dashboard() {
     // The spacer widget reads this to switch between its dashed-outline editable form
     // and its invisible space-holding form (CHANGE 2).
     customizing,
+    // The interval load-shape widget (#76) self-fetches /api/interval scoped to the
+    // selected account; thread the id through the host the same way the export links
+    // scope (acctQuery above).
+    accountId: selectedAccountId,
   };
 
   // ---- The placed-widget set (Phase E, #73) ----
@@ -210,6 +215,13 @@ export function Dashboard() {
     : [];
   const availableStats = visibleStats.map((s) => statWidgetType(s.id));
   const availablePanels = [BILLS_PANEL_TYPE];
+  // The interval load-shape widget (#76) is a chart-category tile that is NOT a
+  // ChartSpec (it self-fetches, no `widgetConfig.visible` flag), so — like the
+  // panels — placement PRESENCE is its only removed/shown signal. It lays out as a
+  // normal chart tile (2×2 grid) AFTER the 7 monthly charts, so we append it to the
+  // chart band's id list; `isPlaced` (below) gates it so a brand-new user (no saved
+  // layout) gets it visible and a removal sticks.
+  const availableChartsAll = [...availableCharts, INTERVAL_WIDGET_TYPE];
 
   // SPACER instances (CHANGE 2) currently placed: read straight off the saved blob
   // (the lg page grid + the pinned strip), since spacers aren't a Phase-D-tracked
@@ -256,7 +268,17 @@ export function Dashboard() {
   //     to restore) and keeps remove working without a new persisted field.
   const isPlaced = (type: string) => savedTypes === null || savedTypes.has(type);
   const statIds = availableStats.filter(isPlaced);
-  const chartIds = availableCharts;
+  // The monthly charts use `availableCharts` directly (visibility owned by
+  // widgetConfig). The interval load-shape widget (#76, no widgetConfig flag) is
+  // treated the SAME way as a newly-shipped chart: it's ALWAYS in the chart band's
+  // default id list, so `mergePlacements` appends it at its default slot for BOTH a
+  // brand-new user AND an existing saved layout that predates it (the "append new"
+  // rule) — i.e. it's default-VISIBLE for everyone, not gated behind saved-layout
+  // membership (which would hide it from every existing user). It sits AFTER the 7
+  // monthly charts in the 2×2 grid. (Persisting an explicit removal would need a
+  // widgetConfig.visible flag like the monthly charts — a follow-up; today it
+  // re-appears on reload if removed, same as any default chart.)
+  const chartIds = availableChartsAll;
   const panelIds = availablePanels.filter(isPlaced);
 
   // The dashboard is ALWAYS the paginated fit layout now (the old 'comfortable'
@@ -374,9 +396,9 @@ export function Dashboard() {
   const buildCurrentLgPlacements = (): Placement[] =>
     generateDefaultPlacements({
       statIds: availableStats,
-      chartIds: availableCharts,
+      chartIds: availableChartsAll,
       panelIds: availablePanels,
-      mins: widgetMins([...availableStats, ...availableCharts, ...availablePanels]),
+      mins: widgetMins([...availableStats, ...availableChartsAll, ...availablePanels]),
     })[FIT_BREAKPOINT] ?? [];
 
   // ---- Pin / unpin a widget to the top bar (issue #73 polish #4) ----
@@ -401,9 +423,9 @@ export function Dashboard() {
     // complete set of page placements to move the widget between).
     const fullDefault = generateDefaultPlacements({
       statIds: availableStats,
-      chartIds: availableCharts,
+      chartIds: availableChartsAll,
       panelIds: availablePanels,
-      mins: widgetMins([...availableStats, ...availableCharts, ...availablePanels]),
+      mins: widgetMins([...availableStats, ...availableChartsAll, ...availablePanels]),
     });
     const pageBlob: Record<string, Placement[]> = {};
     for (const bp of Object.keys(COLS) as Breakpoint[]) {
@@ -470,9 +492,13 @@ export function Dashboard() {
   const removedCharts = layout
     ? layout.order.filter((id) => SPEC_BY_ID[id] && !layout.widgetConfig[id]?.visible).map(chartWidgetType)
     : [];
+  // The interval load-shape widget (#76) is a chart tile gated on placement
+  // presence (no widgetConfig flag), so it joins the Charts palette group when it's
+  // been removed (not currently placed).
+  const removedIntervalWidget = !isPlaced(INTERVAL_WIDGET_TYPE) ? [INTERVAL_WIDGET_TYPE] : [];
   const paletteGroups: PaletteGroup[] = [
     { label: 'Stat cards', types: availableStats.filter((t) => !isPlaced(t)) },
-    { label: 'Charts', types: removedCharts },
+    { label: 'Charts', types: [...removedCharts, ...removedIntervalWidget] },
     { label: 'Panels', types: availablePanels.filter((t) => !isPlaced(t)) },
   ];
 

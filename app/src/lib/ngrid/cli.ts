@@ -13,8 +13,16 @@ import { persist } from './persist';
     const summary = await persist(result);
     console.log('account:', result.account.accountNumber, result.account.companyCode, result.account.region);
     console.log('  bills:', result.bills.length, '| usage:', result.usage.length, '| costs:', result.costs.length, '| weather:', result.weather.length);
-    console.log('  PDFs downloaded this run:', result.pdfsDownloaded);
-    console.log('  DB:', summary.billsTotal, 'bills total,', summary.billsAdded, 'new');
+    console.log('  PDFs downloaded this run:', result.pdfsDownloaded, '| interval reads:', result.intervals.length);
+    console.log(
+      '  DB:',
+      summary.billsTotal,
+      'bills total,',
+      summary.billsAdded,
+      'new,',
+      summary.intervalsAdded,
+      'interval reads added'
+    );
   }
   process.exit(0);
 })().catch((e) => {

@@ -23,6 +23,7 @@ import { getVizRenderer } from '@/lib/widgets/vizRenderers';
 import { STAT_SPECS, type StatData, type StatSpec } from '@/lib/widgets/statSpec';
 import { BudgetStatCard, StatCard, YoyStatCard } from '@/components/widgets/StatCard';
 import { BillsPanel, type BillsPanelData } from '@/components/widgets/BillsPanel';
+import { IntervalLoadShape } from '@/components/widgets/IntervalLoadShape';
 import { Spacer } from '@/components/widgets/Spacer';
 import type { ChartConfig } from '@/lib/prefs';
 import type { ToolsTab } from '@/components/ToolsModal';
@@ -104,6 +105,11 @@ export interface WidgetHost {
   // it (spacers then render invisible). A single dashboard-level flag — the same
   // value WidgetCell passes its cells — so it's correct for every cell.
   customizing?: boolean;
+  // The SELECTED account id (issue #76). The interval load-shape widget self-fetches
+  // /api/interval and scopes the request to this account, the same id the export
+  // links and other read routes use. Optional so a non-dashboard caller (the demo
+  // gallery) can omit it (the widget then fetches the default account).
+  accountId?: number | null;
 }
 
 // WidgetDef (RFC §3.1). `defaultSize` is now REAL (Phase E, #73): the grid size
@@ -219,6 +225,24 @@ const BILLS_PANEL: WidgetDef = {
   render: (host) => <BillsPanel data={host.billsData} />,
 };
 
+// The interval LOAD-SHAPE widget (issue #76). A SELF-CONTAINED chart tile: it
+// fetches its own data from /api/interval (scoped to host.accountId) and shapes it
+// with the PURE averageDayProfile, so it does NOT declare a dataset dep or go
+// through resolveDataset — `dataDeps: []`. Categorized 'chart' so it lays out as a
+// normal half-width chart tile (the default generator's 2×2), sized like the other
+// charts. Placed on the dashboard as a default-visible tile after the existing 7.
+export const INTERVAL_WIDGET_TYPE = 'interval-load-shape' as const;
+const INTERVAL_WIDGET: WidgetDef = {
+  type: INTERVAL_WIDGET_TYPE,
+  category: 'chart',
+  title: 'Average daily load shape',
+  dataDeps: [],
+  // Same footprint as a chart widget (half the lg grid, tall) so it tiles in the
+  // 2×2 chart grid alongside the monthly charts.
+  defaultSize: { w: 6, h: 7, minW: 3, minH: 3 },
+  render: (host) => <IntervalLoadShape accountId={host.accountId} />,
+};
+
 // The SPACER widget (CHANGE 2, issue #73). Unlike every other widget type — which
 // is a SINGLETON keyed by a fixed id — the spacer is MULTI-INSTANCE: the user can
 // add as many as they like, keyed `spacer:1`, `spacer:2`, … . The registry stores
@@ -253,6 +277,7 @@ export const WIDGETS: Record<string, WidgetDef> = Object.fromEntries([
   ...CHART_SPECS.map((s) => [`chart:${s.id}`, chartWidget(s)] as const),
   ...STAT_SPECS.map((s) => [`stat:${s.id}`, statWidget(s)] as const),
   [BILLS_PANEL.type, BILLS_PANEL] as const,
+  [INTERVAL_WIDGET.type, INTERVAL_WIDGET] as const,
   [SPACER_PREFIX, SPACER_WIDGET] as const,
 ]);
 

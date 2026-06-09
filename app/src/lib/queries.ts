@@ -175,6 +175,45 @@ export async function getMonthlySeries(accountId: number): Promise<MonthRow[]> {
   return withSupplyRateTrailing(estimateEmissions(rows, factors));
 }
 
+// Recent smart-meter AMI interval reads (issue #76) for the interval chart. Thin
+// DB read only: returns raw IntervalUsage rows ordered by intervalStart, filtered
+// to a fuel and a trailing window. Any chart shaping/aggregation belongs in a
+// PURE helper (next phase); this just hands back the rows. PURELY observational —
+// never a billed-cost number, never fed to /api/verify.
+export type IntervalSeriesRow = {
+  fuelType: string;
+  intervalStart: Date;
+  intervalSeconds: number;
+  quantity: number;
+  unit: string;
+  source: string;
+};
+
+export async function getIntervalSeries(
+  accountId: number,
+  opts: { fuelType?: string; sinceDays?: number } = {}
+): Promise<IntervalSeriesRow[]> {
+  const sinceDays = opts.sinceDays && opts.sinceDays > 0 ? opts.sinceDays : 30;
+  const since = new Date(Date.now() - sinceDays * 24 * 60 * 60 * 1000);
+  const rows = await prisma.intervalUsage.findMany({
+    where: {
+      accountId,
+      intervalStart: { gte: since },
+      ...(opts.fuelType ? { fuelType: opts.fuelType } : {}),
+    },
+    orderBy: { intervalStart: 'asc' },
+    select: {
+      fuelType: true,
+      intervalStart: true,
+      intervalSeconds: true,
+      quantity: true,
+      unit: true,
+      source: true,
+    },
+  });
+  return rows;
+}
+
 export async function getBills(accountId: number) {
   const bills = await prisma.bill.findMany({
     where: { accountId },

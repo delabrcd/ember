@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { CHART_SPECS } from '../src/lib/chartSpec';
 import type { Overview } from '../src/components/useDashboardData';
-import { WIDGETS, BILLS_PANEL_TYPE, SPACER_PREFIX, chartWidgetType, statWidgetType, getWidget, isSpacerId, widgetMins } from '../src/lib/widgets/registry';
+import { WIDGETS, BILLS_PANEL_TYPE, INTERVAL_WIDGET_TYPE, SPACER_PREFIX, chartWidgetType, statWidgetType, getWidget, isSpacerId, widgetMins } from '../src/lib/widgets/registry';
 import type { MonthRow } from '../src/lib/chartSpec';
 import {
   STAT_IDS,
@@ -72,15 +72,16 @@ describe('widget registry completeness', () => {
     }
   });
 
-  it('has exactly chart+stat+panel+spacer entries and no namespace collision', () => {
-    // 7 charts + 8 stats + 1 panel (the bills rail, Phase E #73) + 1 spacer prototype
-    // (CHANGE 2) = 17 registry entries; the chart:/stat:/panel:/spacer prefixes keep
-    // them distinct. (The spacer is stored under its bare prefix; concrete
-    // `spacer:<n>` instances resolve to it in getWidget — they're not extra entries.)
+  it('has exactly chart+stat+panel+interval+spacer entries and no namespace collision', () => {
+    // 7 charts + 8 stats + 1 panel (the bills rail, Phase E #73) + 1 interval
+    // load-shape widget (#76) + 1 spacer prototype (CHANGE 2) = 18 registry entries;
+    // the chart:/stat:/panel:/interval/spacer keys keep them distinct. (The spacer is
+    // stored under its bare prefix; concrete `spacer:<n>` instances resolve to it in
+    // getWidget — they're not extra entries.)
     expect(CHART_SPECS.length).toBe(7);
     expect(STAT_IDS.length).toBe(8);
-    expect(Object.keys(WIDGETS).length).toBe(CHART_SPECS.length + STAT_IDS.length + 2);
-    expect(new Set(Object.keys(WIDGETS)).size).toBe(17);
+    expect(Object.keys(WIDGETS).length).toBe(CHART_SPECS.length + STAT_IDS.length + 3);
+    expect(new Set(Object.keys(WIDGETS)).size).toBe(18);
   });
 
   it('registers the bills panel (Phase E #73) as a placeable panel widget', () => {
@@ -89,6 +90,18 @@ describe('widget registry completeness', () => {
     expect(w.category).toBe('panel');
     expect(getWidget(BILLS_PANEL_TYPE)).toBe(w);
     expect(w.dataDeps).toEqual(['bills']);
+  });
+
+  it('registers the interval load-shape widget (#76) as a self-contained chart tile', () => {
+    const w = WIDGETS[INTERVAL_WIDGET_TYPE];
+    expect(w).toBeTruthy();
+    expect(w.category).toBe('chart');
+    expect(getWidget(INTERVAL_WIDGET_TYPE)).toBe(w);
+    // It SELF-FETCHES /api/interval, so it declares no dataset deps (it never goes
+    // through resolveDataset / specFor).
+    expect(w.dataDeps).toEqual([]);
+    // Sized like a chart tile so it lays out in the 2×2 chart grid.
+    expect(w.defaultSize.w).toBe(6);
   });
 
   it('throws on an unknown widget type (a missing registration is a bug)', () => {

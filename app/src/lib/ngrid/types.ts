@@ -1,5 +1,8 @@
 // Normalized shapes produced by the scraper (collect.ts) and consumed by persist.ts.
 
+import type { IntervalReadRow } from './interval';
+export type { IntervalReadRow };
+
 export interface AccountInfo {
   accountNumber: string;
   accountLink?: string;
@@ -53,6 +56,9 @@ export interface CollectResult {
   usage: UsageRow[];
   costs: CostRow[];
   weather: WeatherRow[];
+  // Smart-meter AMI interval reads (issue #76), one row per metering interval per
+  // fuel. Empty when the account has no AMI meter. NEVER feeds billed-cost numbers.
+  intervals: IntervalReadRow[];
   pdfsDownloaded: number;
   // The stored NgLogin this account was scraped under, if any. Threaded through
   // to persist() so the upserted Account is tagged with its login. Undefined for

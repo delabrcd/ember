@@ -8,6 +8,7 @@ export interface PersistSummary {
   accountId: number;
   billsTotal: number;
   billsAdded: number;
+  intervalsAdded: number;
 }
 
 export async function persist(result: CollectResult): Promise<PersistSummary> {
@@ -131,6 +132,32 @@ export async function persist(result: CollectResult): Promise<PersistSummary> {
     });
   }
 
+  // Smart-meter AMI interval reads (issue #76). Append-mostly + idempotent: each
+  // run pulls a windowed tail that overlaps what we already have, so we insert
+  // with skipDuplicates on the [accountId, fuelType, intervalStart, intervalSeconds]
+  // unique key (chunked to keep parameter counts sane). PURELY additive — this
+  // never touches the monthly Usage/Cost logic or /api/verify.
+  let intervalsAdded = 0;
+  if (result.intervals.length) {
+    const data = result.intervals.map((iv) => ({
+      accountId: account.id,
+      fuelType: iv.fuelType,
+      intervalStart: iv.intervalStart,
+      intervalSeconds: iv.intervalSeconds,
+      quantity: iv.quantity,
+      unit: iv.unit,
+      source: iv.source,
+    }));
+    const CHUNK = 1000;
+    for (let i = 0; i < data.length; i += CHUNK) {
+      const res = await prisma.intervalUsage.createMany({
+        data: data.slice(i, i + CHUNK),
+        skipDuplicates: true,
+      });
+      intervalsAdded += res.count;
+    }
+  }
+
   const after = await prisma.bill.count({ where: { accountId: account.id } });
-  return { accountId: account.id, billsTotal: after, billsAdded: after - before };
+  return { accountId: account.id, billsTotal: after, billsAdded: after - before, intervalsAdded };
 }

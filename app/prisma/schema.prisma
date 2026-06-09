@@ -51,13 +51,35 @@ model Account {
   firstSeenAt    DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
-  bills         Bill[]
-  usages        Usage[]
-  costs         Cost[]
-  scrapeRuns    ScrapeRun[]
-  scheduleState ScheduleState?
-  weatherDaily  WeatherDaily[]
-  notifications Notification[]
+  bills          Bill[]
+  usages         Usage[]
+  costs          Cost[]
+  scrapeRuns     ScrapeRun[]
+  scheduleState  ScheduleState?
+  weatherDaily   WeatherDaily[]
+  notifications  Notification[]
+  intervalUsages IntervalUsage[]
+}
+
+// Smart-meter AMI interval usage (issue #76). One row per metering interval per
+// fuel, pulled from the portal's amiadapter REST endpoint when a meter reports
+// hasAmiSmartMeter. PURELY additive: never feeds billed-cost numbers or
+// /api/verify (the bill PDF stays the source of truth). intervalStart is the UTC
+// instant the interval begins; intervalSeconds is its length (900=15-min, 3600=
+// hourly, 86400=daily) so DST fall-back's two distinct UTC instants don't collide.
+model IntervalUsage {
+  id              Int      @id @default(autoincrement())
+  account         Account  @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  accountId       Int
+  fuelType        String // ELECTRIC | GAS
+  intervalStart   DateTime // UTC; start of the interval
+  intervalSeconds Int // 900 (15-min) | 3600 | 86400
+  quantity        Float
+  unit            String // kWh | therms
+  source          String   @default("portal")
+
+  @@unique([accountId, fuelType, intervalStart, intervalSeconds])
+  @@index([accountId, fuelType, intervalStart])
 }
 
 // One statement. PDF is stored on disk; pdfPath points at it.
