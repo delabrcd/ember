@@ -18,6 +18,7 @@ import type { Page, Route } from 'playwright';
 import { contextOptions, ensureLoggedIn, dataDir, saveState } from './auth';
 import { extractAccountLinks, buildNavUrl } from './accounts';
 import { parseBillPdf } from './parsePdf';
+import { summarizeGqlRequest, summarizeGqlResponse } from './intervalDebug';
 import type {
   AccountInfo,
   BillRow,
@@ -127,11 +128,30 @@ async function collectOneAccount(
   let companyCode: string | undefined;
   let weatherRegion: string | undefined;
 
+  // SCRAPE_DEBUG-only discovery buffer (issue #76, phase 1). Holds summarized
+  // gql requests + responses observed during this account's scrape so we can dump
+  // them to a debug artifact at the end. Stays empty (and is never written) when
+  // SCRAPE_DEBUG is unset, so the normal path is byte-identical.
+  type DebugEntry =
+    | { kind: 'request'; entry: NonNullable<ReturnType<typeof summarizeGqlRequest>> }
+    | { kind: 'response'; entry: ReturnType<typeof summarizeGqlResponse> };
+  const debugLog: DebugEntry[] = [];
+
   // Widen filters + capture auth headers / identifiers from the app's requests.
   const onRoute = async (route: Route) => {
     const req = route.request();
     const h = req.headers();
     let post = req.postData() || '';
+    // Capture the ORIGINAL request body (what the SPA actually sent) before we
+    // widen anything below — debug-only, never alters the widening.
+    if (process.env.SCRAPE_DEBUG) {
+      try {
+        const summary = summarizeGqlRequest(req.url(), post);
+        if (summary) debugLog.push({ kind: 'request', entry: summary });
+      } catch {
+        /* debug capture must never affect the scrape */
+      }
+    }
     try {
       const j = JSON.parse(post);
       const v = j.variables || {};
@@ -171,7 +191,16 @@ async function collectOneAccount(
     }
     const data = json?.data;
     if (!data) return;
-    if (process.env.SCRAPE_DEBUG) console.log('[collect] gql keys:', Object.keys(data).join('+'));
+    if (process.env.SCRAPE_DEBUG) {
+      console.log('[collect] gql keys:', Object.keys(data).join('+'));
+      // Record EVERY gql response (not just the known cap.* keys) so the spike
+      // can surface the MySmartEnergy interval payload alongside the rest.
+      try {
+        debugLog.push({ kind: 'response', entry: summarizeGqlResponse(url, data) });
+      } catch {
+        /* debug capture must never affect the scrape */
+      }
+    }
     if (data.Bills) cap.bills = asArray(data.Bills);
     if (data.energyUsages) cap.usages = asArray(data.energyUsages);
     if (data.energyUsageCosts) cap.costs = asArray(data.energyUsageCosts);
@@ -198,6 +227,94 @@ async function collectOneAccount(
       await page.goto(buildNavUrl(BASE, routePath, q), { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
       await page.waitForTimeout(4000);
     }
+    // ---- SCRAPE_DEBUG: interval-view discovery probe (issue #76, phase 1) ----
+    // Try to make the MySmartEnergy interval query fire on /energy-usage so the
+    // debug artifact captures its query key + variable shape. Best-effort and
+    // FULLY exception-wrapped end to end — a debug run must never crash a scrape.
+    // Bounded clicks, sequential, with the existing per-page settle waits: still
+    // a good guest. Entirely inert when SCRAPE_DEBUG is unset.
+    if (process.env.SCRAPE_DEBUG) {
+      try {
+        log('interval-spike: probing energy-usage interval view');
+        await page
+          .goto(buildNavUrl(BASE, '/energy-usage', q), { waitUntil: 'networkidle', timeout: 30000 })
+          .catch(() => {});
+        await page.waitForTimeout(3500).catch(() => {});
+
+        // Click up to ~5 distinct controls that look like a granularity / interval
+        // drill-down. Each click is independently wrapped so a stale/missing
+        // control can't throw out of the probe.
+        const intervalRe = /15[\s-]?min|interval|hourly|daily|\bday\b|\bhour\b|usage detail|my\s*smart\s*energy/i;
+        const seen = new Set<string>();
+        let clicks = 0;
+        for (const sel of ['button', 'a', '[role="tab"]', '[role="button"]', '.tab']) {
+          if (clicks >= 5) break;
+          let loc;
+          try {
+            loc = page.locator(sel).filter({ hasText: intervalRe });
+          } catch {
+            continue;
+          }
+          let count = 0;
+          try {
+            count = await loc.count();
+          } catch {
+            count = 0;
+          }
+          for (let i = 0; i < count && clicks < 5; i++) {
+            try {
+              const el = loc.nth(i);
+              const text = ((await el.innerText({ timeout: 1500 }).catch(() => '')) || '').trim().toLowerCase();
+              const key = `${sel}::${text}`;
+              if (text && seen.has(key)) continue;
+              if (text) seen.add(key);
+              await el.click({ timeout: 3000 });
+              clicks++;
+              await page.waitForTimeout(3500).catch(() => {});
+            } catch {
+              /* stale / not clickable — skip */
+            }
+          }
+        }
+
+        // Optional operator override: point straight at the interval URL if the
+        // clicks don't surface it. Path → buildNavUrl; otherwise treated as raw.
+        const overrideUrl = process.env.INTERVAL_DEBUG_URL;
+        if (overrideUrl) {
+          try {
+            const target = overrideUrl.startsWith('/') ? buildNavUrl(BASE, overrideUrl, q) : overrideUrl;
+            log(`interval-spike: navigating override ${target}`);
+            await page.goto(target, { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
+            await page.waitForTimeout(3500).catch(() => {});
+          } catch {
+            /* override navigation is best-effort */
+          }
+        }
+      } catch {
+        /* the entire interval probe is best-effort — never break the scrape */
+      }
+
+      // ---- write the debug artifact -------------------------------------
+      try {
+        const requests = debugLog.filter((e) => e.kind === 'request').map((e) => e.entry);
+        const responses = debugLog.filter((e) => e.kind === 'response').map((e) => e.entry);
+        const dir = process.env.BACKUP_DIR || path.join(dataDir(), 'backups');
+        fs.mkdirSync(dir, { recursive: true });
+        const ts = new Date().toISOString().replace(/[:.]/g, '-');
+        const outPath = path.join(dir, `interval-spike-${accountNumber || 'unknown'}-${ts}.json`);
+        fs.writeFileSync(
+          outPath,
+          JSON.stringify({ capturedAt: new Date().toISOString(), accountNumber, requests, responses }, null, 2)
+        );
+        const keysSeen = [...new Set(responses.flatMap((r) => r.keys))].join(', ');
+        console.log(
+          `[collect] interval-spike: wrote ${outPath} (${requests.length} gql requests, ${responses.length} responses, response keys seen: ${keysSeen})`
+        );
+      } catch (err) {
+        console.log('[collect] interval-spike: failed to write artifact:', err);
+      }
+    }
+
     // Re-save session in case tokens were refreshed during navigation.
     await saveState(ctx, loginId).catch(() => {});
   } finally {
