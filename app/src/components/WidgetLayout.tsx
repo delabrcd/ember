@@ -43,7 +43,7 @@
 //   • Below the fit breakpoint (mobile / md): UNCHANGED — a fixed rowHeight, the
 //     page scrolls normally, NO pager.
 
-import { forwardRef, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { forwardRef, useEffect, useLayoutEffect, useMemo, useRef, useState, type TouchEvent as ReactTouchEvent } from 'react';
 import { Responsive, WidthProvider, type Layout, type Layouts } from 'react-grid-layout';
 import {
   BREAKPOINTS,
@@ -97,6 +97,17 @@ const PAGER_FALLBACK_H = 44;
 // visible (its bottom a hair above the viewport edge, never clipped).
 const COLUMN_GAP = 8;
 
+// The bottom gutter (px) reserved below the pager in the pinned fit view (issue #73
+// polish #2 — operator: "no padding at the bottom"). gridTop folds in everything
+// ABOVE the grid (chrome + top page padding), but nothing accounted for the page's
+// BOTTOM padding, so the pager landed flush against the overflow-hidden viewport
+// edge. We subtract this from availH so the slide-track + pager are sized to stop
+// this many px above the viewport bottom → a visible gap below the arrows, with NO
+// new scroll and the pager never clipped. It MATCHES the shell's `xl:py-3` (12px)
+// so the bottom gutter equals the top one. Only reserved at the fit breakpoint
+// (below it the page scrolls and the shell's own padding already applies).
+const BOTTOM_PAD = 12;
+
 // The fixed, readable rowHeight used BELOW the fit breakpoint (the scrolling
 // breakpoints) and on the very first paint at fit before the band is measured. At
 // fit the rowHeight is DERIVED (computePageFit) so R rows exactly fill the band —
@@ -136,6 +147,11 @@ export interface WidgetLayoutProps {
   host: WidgetHost;
   // Remove a widget from the placed set (the per-widget × affordance in a cell).
   onRemoveWidget: (type: string) => void;
+  // Toggle a widget's pinned-to-top-bar state (issue #73 polish #4). Pinning moves
+  // it from the active page into the __strip grid; unpinning moves it back to a free
+  // page slot. Optional so non-fit callers can omit the affordance. The host
+  // (Dashboard) owns the cross-grid placement move + persistence.
+  onTogglePin?: (type: string) => void;
 }
 
 // Map RGL's 5-key breakpoint object down to our 4 (we don't use xxs). RGL still
@@ -321,57 +337,79 @@ export function WidgetLayout(props: WidgetLayoutProps) {
   // Only paginate (and pin the page) at the lg breakpoint in fit density.
   const fitActive = fit && bp === FIT_BREAKPOINT;
 
-  // The stat ids that render in the PINNED band vs in the paged grid. When pinned
-  // AND fit-active, stats live in the fixed strip and are excluded from the RGL
-  // canvas; otherwise (unpinned, or below fit) every placed id is a grid tile.
-  const pinStats = fitActive && pinnedStatStrip && statIds.length > 0;
+  // ---- The PINNED STRIP's own placements (issue #73 polish #4 — ANY widget) ----
+  // The strip is its OWN editable RGL grid. Its placements ride the layout blob
+  // under the reserved STRIP_KEY (no schema change). Generalized from stats-only to
+  // ANY widget (chart/panel/stat) the user pins to the top bar:
+  //   • MEMBERSHIP is the saved __strip set, NOT the stat category — a chart or the
+  //     bills panel can live here too. We repair it against the currently-placed
+  //     universe (drop a strip entry whose widget was removed/hidden) so a stale
+  //     pin can't render a ghost tile.
+  //   • MIGRATION / default: when NOTHING is saved under __strip yet, the default
+  //     strip is today's full-width stat band (generateStripPlacements(statIds)) —
+  //     so an existing user still opens to the stats-pinned dashboard (today's
+  //     semantics) until they pin/unpin something, at which point __strip becomes
+  //     the explicit authority.
+  // Min bounds come from the registry (content-fit), filled here since the pure
+  // generator emits only geometry. Recomputed when the placed set or saved strip
+  // changes.
+  const stripPlacements = useMemo<Placement[]>(() => {
+    const saved = readStrip(savedPlacements);
+    // The default (pre-customization) strip = today's stat band; once __strip is
+    // explicitly saved, IT is the authority (an empty saved __strip means "nothing
+    // pinned", NOT "fall back to stats").
+    const source = saved ?? generateStripPlacements(statIds);
+    // Repair against the placed universe: a pinned widget must still be a placed,
+    // available widget (its page-grid counterpart was removed → drop the pin too).
+    const known = new Set(placedIds);
+    const kept = source.filter((p) => known.has(p.i));
+    // Stamp each tile's content-fit min bounds from the registry so it can't be
+    // dragged uselessly small (the registry's defaultSize owns the per-widget
+    // minimums; we only carry geometry in the saved blob / pure generator).
+    return kept.map((p) => {
+      const { defaultSize } = getWidget(p.i);
+      return { ...p, minW: defaultSize.minW, minH: defaultSize.minH };
+    });
+  }, [statIds, placedIds, savedPlacements]);
+
+  // The set of pinned widget ids (whatever currently lives in the strip). Drives
+  // the grid/strip split AND the per-cell "pinned" highlight + pin/unpin affordance.
+  const pinnedIds = useMemo(() => new Set(stripPlacements.map((p) => p.i)), [stripPlacements]);
+
+  // The strip is SHOWN (pinned out of the paged area) when the toggle is on, we're
+  // fit-active, AND at least one widget is pinned. Replaces the old stats-only
+  // `pinStats` — the gate is now membership-driven, not category-driven.
+  const pinActive = fitActive && pinnedStatStrip && pinnedIds.size > 0;
+
+  // The ids that render in the PAGED grid: every placed id MINUS the pinned ones
+  // (when the strip is shown). Below fit / strip off, every placed id is a tile.
   const gridIds = useMemo(
-    () => (pinStats ? [...chartIds, ...panelIds] : placedIds),
-    [pinStats, chartIds, panelIds, placedIds]
+    () => (pinActive ? placedIds.filter((id) => !pinnedIds.has(id)) : placedIds),
+    [pinActive, placedIds, pinnedIds]
   );
 
+  // True when the stat BAND still lives on the page (i.e. not every stat is pinned).
+  // It decides the per-page row budget: stats-on-page → a band + chart rows
+  // (DEFAULT_FIT_ROWS, quantum 1); stats-pinned-out → pure chart rows
+  // (PINNED_PAGE_ROWS, quantum CHART_ROWS). This generalizes the old "pinStats"
+  // budget switch: pinning a CHART (stats still on the page) keeps the band budget;
+  // pinning all stats drops to the chart-only budget exactly as before.
+  const statsOnPage = useMemo(() => gridIds.some((id) => id.startsWith('stat:')), [gridIds]);
+
   // The lg placements actually fed to the grid: the merged set, minus the pinned
-  // stats (so the paged grid only sizes against charts/panels when the strip is
-  // pinned). When stats ARE pinned out, the remaining charts/panels still carry
-  // the stat-band's row offset (the default generator puts charts at y=STAT_ROWS),
-  // so we REBASE them to start at row 0 — otherwise page 1 would waste the band
-  // the (now-pinned) stat strip used to occupy. Below the fit breakpoint RGL reads
-  // the per-breakpoint blob as-is.
+  // widgets. When the pinned set sat below row 0 (e.g. the stat band is pinned out,
+  // leaving charts that the default generator placed at y=STAT_ROWS), the remaining
+  // tiles still carry that row offset, so we REBASE them up to start at row 0 —
+  // otherwise page 1 would waste the band the pinned widgets used to occupy. Below
+  // the fit breakpoint RGL reads the per-breakpoint blob as-is.
   const gridLgPlacements = useMemo(() => {
     const lg = layouts[FIT_BREAKPOINT] ?? [];
     const keep = new Set(gridIds);
     const kept = lg.filter((p) => keep.has(p.i));
-    if (!pinStats || kept.length === 0) return kept;
+    if (!pinActive || kept.length === 0) return kept;
     const minY = Math.min(...kept.map((p) => p.y));
     return minY > 0 ? kept.map((p) => ({ ...p, y: p.y - minY })) : kept;
-  }, [layouts, gridIds, pinStats]);
-
-  // ---- The PINNED STRIP's own placements (issue #73 polish #4) ----
-  // The strip is its OWN editable RGL grid. Its placements ride the layout blob
-  // under the reserved STRIP_KEY (no schema change). We READ the saved strip and
-  // REPAIR it against a freshly-generated default for the current visible stat set
-  // (drop removed cards, append newly-shown ones at their default slot) — the same
-  // merge discipline mergePlacements uses for the page grid. The min bounds come
-  // from the registry (content-fit), filled here since the pure generator emits
-  // only geometry. Recomputed when the stat set or saved strip changes.
-  const stripPlacements = useMemo<Placement[]>(() => {
-    const def = generateStripPlacements(statIds);
-    const saved = readStrip(savedPlacements);
-    // Repair: keep a saved card (with the user's geometry) if it's still a visible
-    // stat, append any newly-visible stat at its default slot, drop unknown ids.
-    const known = new Set(statIds);
-    const kept = (saved ?? []).filter((p) => known.has(p.i));
-    const have = new Set(kept.map((p) => p.i));
-    const appended = def.filter((p) => !have.has(p.i));
-    const merged = [...kept, ...appended];
-    // Stamp each card's content-fit min bounds from the registry so a strip card
-    // can't be dragged uselessly small (the registry's statWidget defaultSize owns
-    // the per-card minimums; we only carry geometry in the pure generator).
-    return merged.map((p) => {
-      const { defaultSize } = getWidget(p.i);
-      return { ...p, minW: defaultSize.minW, minH: defaultSize.minH };
-    });
-  }, [statIds, savedPlacements]);
+  }, [layouts, gridIds, pinActive]);
 
   // ---- The per-page bounded fit math (PURE computePageFit from layoutEngine) ----
   // availH = viewport − everything above the grid (gridTop folds in chrome + page
@@ -390,26 +428,37 @@ export function WidgetLayout(props: WidgetLayoutProps) {
   // costs a single-page layout the pager's worth of height, which is the prior
   // behaviour. Until the first measure lands (pagerH===0) we use PAGER_FALLBACK_H.
   const pagerReserve = fitActive ? (pagerH > 0 ? pagerH : PAGER_FALLBACK_H) + COLUMN_GAP : 0;
-  const availH = Math.max(0, viewportH - gridTop - (pinStats ? stripH + COLUMN_GAP : 0) - pagerReserve);
+  // Reserve the bottom gutter (issue #73 polish #2) alongside the pager so the
+  // slide-track + pager stop BOTTOM_PAD px above the viewport edge — a visible gap
+  // below the arrows, no new scroll. Only at the fit breakpoint (the page is pinned
+  // there); below it the shell's own padding applies and the page scrolls.
+  const bottomReserve = fitActive ? BOTTOM_PAD : 0;
+  const availH = Math.max(
+    0,
+    viewportH - gridTop - (pinActive ? stripH + COLUMN_GAP : 0) - pagerReserve - bottomReserve
+  );
 
-  // The DESIGN per-page row budget: DEFAULT_FIT_ROWS when stats page with the grid
-  // (a band + two chart rows), or PINNED_PAGE_ROWS (just the two chart rows) when
-  // the strip is pinned out of the paged area — so a page of charts still fills the
-  // viewport as a 2×2. computePageFit honours this budget but reduces it on a short
-  // viewport so the rows stay readable (it adapts, never scrolls).
-  const designRows = pinStats ? PINNED_PAGE_ROWS : DEFAULT_FIT_ROWS;
+  // The DESIGN per-page row budget: DEFAULT_FIT_ROWS when the stat band still pages
+  // with the grid (a band + two chart rows), or PINNED_PAGE_ROWS (just the two
+  // chart rows) when the band is pinned out — so a page of charts still fills the
+  // viewport as a 2×2. Keyed on statsOnPage (not the old stats-only pin flag) so
+  // pinning a CHART while stats stay on the page keeps the band budget; pinning all
+  // stats drops to the chart-only budget. computePageFit honours this budget but
+  // reduces it on a short viewport so the rows stay readable (it adapts, never
+  // scrolls).
+  const designRows = statsOnPage ? DEFAULT_FIT_ROWS : PINNED_PAGE_ROWS;
 
   // (R, rowHeight) for the active page: R rows EXACTLY fill availH at rowHeight, so
   // a page is viewport-tall with no scroll. Before the first measure (or below the
   // fit breakpoint) we use the design budget + the fixed fallback row. When the
-  // stat strip is PINNED the paged area is pure CHART rows, so we quantize R to
+  // stat band is pinned out the paged area is pure CHART rows, so we quantize R to
   // CHART_ROWS — a page holds a whole 2×2 / 1×2, never a partial chart row that
-  // would straddle a boundary and leave a wasted empty band. Unpinned, the page
-  // mixes a stat band with chart rows, so no quantum applies (default 1).
+  // would straddle a boundary and leave a wasted empty band. With stats still on
+  // the page it mixes a band with chart rows, so no quantum applies (default 1).
   const { rows: rowsPerPage, rowHeight } = useMemo(() => {
     if (!fitActive || viewportH === 0) return { rows: designRows, rowHeight: FALLBACK_ROW_HEIGHT };
-    return computePageFit({ availH, designRows, marginY: MARGIN, rowQuantum: pinStats ? CHART_ROWS : 1 });
-  }, [fitActive, viewportH, availH, designRows, pinStats]);
+    return computePageFit({ availH, designRows, marginY: MARGIN, rowQuantum: statsOnPage ? 1 : CHART_ROWS });
+  }, [fitActive, viewportH, availH, designRows, statsOnPage]);
 
   // The page partition + count (only meaningful when fit-active). clampToPages (in
   // paginatePlacements) guarantees no tile straddles a boundary; view mode mounts
@@ -429,6 +478,81 @@ export function WidgetLayout(props: WidgetLayoutProps) {
     // page). Done in an effect so we don't setState during render.
     if (activePage !== safePage) setActivePage(safePage);
   }, [activePage, safePage]);
+
+  // ---- Trackpad horizontal-scroll paging (issue #73 polish #3) ----
+  // Operator: "allow the user to scroll left or right (say on their trackpad) to
+  // swap to the next panel." We attach a NON-PASSIVE wheel listener to the slide
+  // viewport so a HORIZONTAL gesture (deltaX dominant, OR shift+wheel — the common
+  // mouse-wheel→horizontal convention) advances/retreats activePage, and we
+  // preventDefault so the browser doesn't rubber-band / over-scroll the page. A
+  // VERTICAL wheel (deltaY dominant) is left ALONE so it still scrolls an
+  // internally-scrollable widget (the bills table) and the page below the fit
+  // breakpoint. One gesture = one page change: we throttle on a time gate + require
+  // the delta to clear a threshold, and arm/disarm on the gesture's momentum (we
+  // ignore the long tail of inertial events until the wheel quiets down). Only
+  // wired when fit-active with more than one page (otherwise there's nothing to
+  // page); a ref lets the effect read the latest totalPages without re-binding.
+  const slideViewportRef = useRef<HTMLDivElement | null>(null);
+  const totalPagesRef = useRef(totalPages);
+  totalPagesRef.current = totalPages;
+  useEffect(() => {
+    const el = slideViewportRef.current;
+    if (!el || !fitActive || totalPages <= 1) return;
+    // The minimum |deltaX| (px-ish; wheel units vary by device) for a step, and the
+    // quiet-time after a step before another gesture can fire — together "one
+    // gesture = one page". A trackpad fires a burst of small deltas; the time gate
+    // collapses the burst into a single page change, and the threshold ignores
+    // jitter from a mostly-vertical scroll that has a tiny horizontal component.
+    const STEP_THRESHOLD = 30;
+    const STEP_COOLDOWN_MS = 500;
+    let lastStepAt = 0;
+    const onWheel = (e: WheelEvent) => {
+      // Horizontal intent: deltaX dominates, OR the user holds Shift (mouse-wheel
+      // horizontal convention). A dominant deltaY is a vertical scroll → ignore it
+      // entirely so internal widget scrolling still works.
+      const dx = e.shiftKey && e.deltaX === 0 ? e.deltaY : e.deltaX;
+      const horizontal = Math.abs(dx) > Math.abs(e.deltaY) || (e.shiftKey && e.deltaX === 0);
+      if (!horizontal) return;
+      // Consume the horizontal gesture so the page doesn't rubber-band sideways.
+      e.preventDefault();
+      if (Math.abs(dx) < STEP_THRESHOLD) return;
+      const now = e.timeStamp || performance.now();
+      if (now - lastStepAt < STEP_COOLDOWN_MS) return;
+      lastStepAt = now;
+      const dir = dx > 0 ? 1 : -1;
+      setActivePage((p) => clampPage(p + dir, totalPagesRef.current));
+    };
+    // Non-passive so preventDefault actually suppresses the native horizontal
+    // over-scroll (Chrome treats wheel listeners as passive by default).
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [fitActive, totalPages]);
+
+  // ---- Touch-swipe paging (issue #73 polish #3, the cheap bonus) ----
+  // A left/right swipe on the slide viewport pages the same way the wheel does. We
+  // track the first touch's x and, on touchend, page if the horizontal travel beat
+  // a threshold AND dominated the vertical travel (so a vertical scroll-swipe on an
+  // internal widget isn't hijacked). Pure pointer math; no library.
+  const touchStart = useRef<{ x: number; y: number } | null>(null);
+  const onTouchStart = (e: ReactTouchEvent) => {
+    const t = e.touches[0];
+    if (t) touchStart.current = { x: t.clientX, y: t.clientY };
+  };
+  const onTouchEnd = (e: ReactTouchEvent) => {
+    const start = touchStart.current;
+    touchStart.current = null;
+    if (!start || !fitActive || totalPages <= 1) return;
+    const t = e.changedTouches[0];
+    if (!t) return;
+    const dx = t.clientX - start.x;
+    const dy = t.clientY - start.y;
+    const SWIPE_THRESHOLD = 50;
+    if (Math.abs(dx) < SWIPE_THRESHOLD || Math.abs(dx) <= Math.abs(dy)) return;
+    // A swipe LEFT (negative dx) goes to the NEXT page (content moves left), the
+    // standard carousel convention.
+    const dir = dx < 0 ? 1 : -1;
+    setActivePage((p) => clampPage(p + dir, totalPagesRef.current));
+  };
 
   // ---- RGL change handler ----
   // RGL hands us the edited layout for the active breakpoint plus the full
@@ -454,7 +578,7 @@ export function WidgetLayout(props: WidgetLayoutProps) {
   // structural-equality guard stays as a cheap belt-and-suspenders no-op filter.
 
   // Build the persistable per-breakpoint blob from RGL's full `allLayouts`,
-  // applying the pinned-stat fold-back and the paged clamp (same transform the
+  // applying the pinned-widget fold-back and the paged clamp (same transform the
   // fed layout uses, so the persisted geometry and the view-mode partition agree).
   const buildNext = (all: Layouts): Placements => {
     const next: Placements = {};
@@ -462,13 +586,13 @@ export function WidgetLayout(props: WidgetLayoutProps) {
       const arr = all[key];
       if (!Array.isArray(arr)) continue;
       let edited = arr.map((l) => sanitize(l));
-      // At lg, when the strip is pinned, the grid excluded the stat tiles — fold
-      // their existing saved placements back so the persisted lg blob stays
-      // complete (so toggling the strip back on/off, and md/sm/xs, keep the cards).
-      if (key === FIT_BREAKPOINT && pinStats) {
+      // At lg, when the strip is shown, the grid excluded the PINNED tiles — fold
+      // their existing saved page placements back so the persisted lg blob stays
+      // complete (so unpinning, and md/sm/xs, keep each widget's page geometry).
+      if (key === FIT_BREAKPOINT && pinActive) {
         const prevLg = layouts[FIT_BREAKPOINT] ?? [];
-        const stats = prevLg.filter((p) => statIds.includes(p.i));
-        edited = [...stats, ...edited];
+        const pinned = prevLg.filter((p) => pinnedIds.has(p.i));
+        edited = [...pinned, ...edited];
       }
       // Clamp the edited lg grid to pages so a tile dragged across a boundary in
       // the (scrolling) customize canvas is re-banded — keeping the view-mode
@@ -529,20 +653,22 @@ export function WidgetLayout(props: WidgetLayoutProps) {
     onPlacementsChange(next);
   };
 
-  // ---- The pinned stat strip (its OWN editable RGL grid; issue #73 polish #4) ----
-  // The strip is now a SECOND RGL region — the stat cards are drag/resize/arrange-
-  // able within it in Customize mode, with their own placements (stripPlacements,
-  // persisted under STRIP_KEY). It's pinned ABOVE the paged slide-track and shows
-  // identically on every page. Its height is MEASURED (stripRef) and subtracted
-  // from availH so the paged grid fits below it. Uses a fixed STRIP_ROW_HEIGHT
-  // (content-sized, not viewport-filling) and the same free-placement model
-  // (compactType=null + preventCollision) so cards can have gaps. The
-  // `ngrid-stat-strip` class keeps the cards' content un-clipped (globals.css). We
-  // wrap in `min-w-0` so RGL's WidthProvider measures the column width correctly.
-  const pinnedStrip = pinStats ? (
+  // ---- The pinned top bar (its OWN editable RGL grid; issue #73 polish #4) ----
+  // The bar is a SECOND RGL region — the pinned widgets (ANY category now: stats,
+  // charts, the bills panel) are drag/resize/arrange-able within it in Customize
+  // mode, with their own placements (stripPlacements, persisted under STRIP_KEY).
+  // It's pinned ABOVE the paged slide-track and shows identically on every page.
+  // Its height is MEASURED (stripRef) and subtracted from availH so the paged grid
+  // fits below it. Uses a fixed STRIP_ROW_HEIGHT (content-sized, not viewport-
+  // filling) and the same free-placement model (compactType=null +
+  // preventCollision) so tiles can have gaps. The `ngrid-stat-strip` class keeps
+  // any pinned stat cards' content un-clipped (globals.css), and `ngrid-pinned-bar`
+  // carries the amber pinned highlight (the operator's "highlighted background").
+  // We wrap in `min-w-0` so RGL's WidthProvider measures the column width correctly.
+  const pinnedStrip = pinActive ? (
     <div ref={stripRef} className="shrink-0">
       <ResponsiveGrid
-        className={`ngrid-rgl ngrid-stat-strip ${customizing ? 'is-customizing' : ''}`}
+        className={`ngrid-rgl ngrid-stat-strip ngrid-pinned-bar ${customizing ? 'is-customizing' : ''}`}
         layouts={{ lg: stripPlacements, md: stripPlacements, sm: stripPlacements, xs: stripPlacements } as unknown as Layouts}
         breakpoints={RGL_BREAKPOINTS}
         // The strip is a fixed 12-col band at every breakpoint (it only renders at
@@ -563,7 +689,18 @@ export function WidgetLayout(props: WidgetLayoutProps) {
       >
         {stripPlacements.map((p) => (
           <div key={p.i} className="ngrid-rgl-item">
-            <WidgetCell type={p.i} host={host} customizing={customizing} onRemove={() => props.onRemoveWidget(p.i)} />
+            <WidgetCell
+              type={p.i}
+              host={host}
+              customizing={customizing}
+              onRemove={() => props.onRemoveWidget(p.i)}
+              // This tile lives in the bar → it's pinned: show the amber highlight
+              // (always) and an UNPIN affordance (in Customize only) (issue #73
+              // polish #4).
+              pinned
+              canPin={customizing && !!props.onTogglePin}
+              onTogglePin={() => props.onTogglePin?.(p.i)}
+            />
           </div>
         ))}
       </ResponsiveGrid>
@@ -642,7 +779,18 @@ export function WidgetLayout(props: WidgetLayoutProps) {
     >
       {opts.ids.map((type) => (
         <div key={type} className="ngrid-rgl-item">
-          <WidgetCell type={type} host={host} customizing={opts.draggable} onRemove={() => props.onRemoveWidget(type)} />
+          <WidgetCell
+            type={type}
+            host={host}
+            customizing={opts.draggable}
+            onRemove={() => props.onRemoveWidget(type)}
+            // A page tile is NOT pinned; in Customize it gets the "pin to top bar"
+            // affordance (issue #73 polish #4). The pin button only shows when the
+            // cell is customizing, so view-mode tiles are unaffected.
+            pinned={false}
+            canPin={opts.draggable && !!props.onTogglePin}
+            onTogglePin={() => props.onTogglePin?.(type)}
+          />
         </div>
       ))}
     </ResponsiveGrid>
@@ -660,7 +808,16 @@ export function WidgetLayout(props: WidgetLayoutProps) {
   // but there are only ~2–3 pages, so rendering them all is fine.
   const slideTrack =
     fitActive && !customizing ? (
-      <div className="ngrid-slide-viewport min-h-0 shrink-0 overflow-hidden">
+      // The slide viewport carries the trackpad horizontal-scroll + touch-swipe
+      // paging handlers (issue #73 polish #3). The wheel listener is attached
+      // imperatively (non-passive) in an effect via slideViewportRef so it can
+      // preventDefault; touch is wired declaratively here.
+      <div
+        ref={slideViewportRef}
+        className="ngrid-slide-viewport min-h-0 shrink-0 overflow-hidden"
+        onTouchStart={onTouchStart}
+        onTouchEnd={onTouchEnd}
+      >
         <div
           className="flex"
           style={{
@@ -848,34 +1005,78 @@ function sanitize(l: Layout): Placement {
 }
 
 // One placed widget's cell: the registry render plus, in Customize mode, a
-// remove (×) affordance overlaid in the corner. The cell fills its grid box
-// (h-full) so charts/the bills rail stretch to their placed height.
+// PIN/UNPIN toggle + a remove (×) affordance overlaid in the corner. The cell
+// fills its grid box (h-full) so charts/the bills rail stretch to their placed
+// height. A pinned cell (one living in the top bar) gets an amber highlight ring so
+// it's obvious it's pinned — the operator's "highlighted background" (issue #73
+// polish #4); the highlight shows in BOTH view and customize so the bar always
+// reads as the pinned region.
 function WidgetCell({
   type,
   host,
   customizing,
   onRemove,
+  pinned = false,
+  canPin = false,
+  onTogglePin,
 }: {
   type: string;
   host: WidgetHost;
   customizing: boolean;
   onRemove: () => void;
+  // True when this cell lives in the pinned top bar (drives the highlight + the
+  // affordance label: "Unpin" vs "Pin to top bar").
+  pinned?: boolean;
+  // True when the pin/unpin button should render (Customize mode + a handler wired).
+  canPin?: boolean;
+  onTogglePin?: () => void;
 }) {
   const widget = getWidget(type);
   return (
-    <div className="relative h-full min-h-0 w-full">
+    <div
+      // The pinned highlight: an amber ring + faint amber wash over the cell so a
+      // pinned widget is visually distinct from a paged one. `ring`/`bg` sit on the
+      // cell wrapper (behind the widget's own card chrome) so it reads as a halo,
+      // not a clash with the card border. Pointer-events untouched.
+      className={`relative h-full min-h-0 w-full rounded-2xl ${
+        pinned ? 'ngrid-pinned-cell ring-2 ring-amber-400/70 ring-offset-1 ring-offset-slate-950' : ''
+      }`}
+      data-pinned={pinned ? 'true' : undefined}
+    >
       {customizing && (
-        <button
-          type="button"
-          onClick={onRemove}
-          title={`Remove ${widget.title}`}
-          aria-label={`Remove ${widget.title}`}
-          className="rgl-no-drag absolute right-1 top-1 z-20 inline-flex h-6 w-6 items-center justify-center rounded-lg border border-rose-500/50 bg-slate-900/90 text-rose-300 shadow transition hover:bg-rose-900/60 hover:text-rose-100"
-        >
-          <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-            <path d="M18 6 6 18M6 6l12 12" />
-          </svg>
-        </button>
+        <div className="absolute right-1 top-1 z-20 flex items-center gap-1">
+          {canPin && onTogglePin && (
+            <button
+              type="button"
+              onClick={onTogglePin}
+              title={pinned ? `Unpin ${widget.title} from the top bar` : `Pin ${widget.title} to the top bar`}
+              aria-label={pinned ? `Unpin ${widget.title}` : `Pin ${widget.title} to top bar`}
+              aria-pressed={pinned}
+              className={`rgl-no-drag inline-flex h-6 w-6 items-center justify-center rounded-lg border shadow transition ${
+                pinned
+                  ? 'border-amber-400/70 bg-amber-500/20 text-amber-200 hover:bg-amber-500/30'
+                  : 'border-slate-600/70 bg-slate-900/90 text-slate-300 hover:bg-amber-900/40 hover:text-amber-200'
+              }`}
+            >
+              {/* A pushpin glyph; filled-look when pinned, outline when not. */}
+              <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 17v5" />
+                <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
+              </svg>
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={onRemove}
+            title={`Remove ${widget.title}`}
+            aria-label={`Remove ${widget.title}`}
+            className="rgl-no-drag inline-flex h-6 w-6 items-center justify-center rounded-lg border border-rose-500/50 bg-slate-900/90 text-rose-300 shadow transition hover:bg-rose-900/60 hover:text-rose-100"
+          >
+            <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+              <path d="M18 6 6 18M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
       )}
       <div className={`h-full min-h-0 w-full ${customizing ? 'pointer-events-none select-none' : ''}`}>
         {widget.render(host)}

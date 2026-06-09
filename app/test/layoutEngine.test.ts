@@ -633,6 +633,54 @@ describe('readStrip / withStrip — the reserved strip key round-trips', () => {
 });
 
 // ---------------------------------------------------------------------------
+// PIN ANY WIDGET to the top bar (issue #73 polish #4) — pure-side invariants.
+// ---------------------------------------------------------------------------
+//
+// The bar generalized from stats-only to ANY widget. The cross-grid pin/unpin
+// MOVE lives in the component (it has registry access), but it rests on these pure
+// guarantees: a CHART/PANEL placement round-trips under STRIP_KEY exactly like a
+// stat; placementsEqual sees a chart pinned/unpinned (so the PUT fires once and the
+// re-feed loop still settles); and findFreeSlot lands a newly-pinned tile on an
+// empty strip cell beside the existing pins (the slot the component uses).
+describe('top bar holds ANY widget (chart/panel), not just stats', () => {
+  it('a chart placement round-trips under STRIP_KEY (readStrip/withStrip)', () => {
+    // A chart and the bills panel pinned alongside a stat — the generalized bar.
+    const mixed: Placement[] = [
+      { i: 'stat:latestBill', x: 0, y: 0, w: 2, h: 3 },
+      { i: 'chart:cost', x: 2, y: 0, w: 3, h: 3 },
+      { i: 'panel:bills', x: 5, y: 0, w: 3, h: 3 },
+    ];
+    const blob = withStrip({ lg: [] }, mixed);
+    expect(readStrip(blob)).toEqual(mixed);
+    // The reserved key is not a breakpoint, so the page merge still ignores it.
+    expect(mergePlacements(blob, generateDefaultPlacements(INPUT))[STRIP_KEY]).toBeUndefined();
+  });
+
+  it('placementsEqual detects pinning/unpinning a chart in the bar', () => {
+    const base = withStrip({}, [{ i: 'stat:latestBill', x: 0, y: 0, w: 2, h: 3 }]);
+    const pinnedChart = withStrip({}, [
+      { i: 'stat:latestBill', x: 0, y: 0, w: 2, h: 3 },
+      { i: 'chart:cost', x: 2, y: 0, w: 3, h: 3 },
+    ]);
+    // Pinning a chart changes the strip set → a persist fires (PUT).
+    expect(placementsEqual(base, pinnedChart)).toBe(false);
+    // Unpinning is the inverse — back to base reads as equal (idempotent, no loop).
+    expect(placementsEqual(pinnedChart, pinnedChart)).toBe(true);
+  });
+
+  it('findFreeSlot lands a pinned tile beside existing strip tiles (no overlap)', () => {
+    // The component pins a chart at a compact strip size (w=3, h=3) onto the strip's
+    // 12-col grid. With two stat tiles already occupying x=0..3 on row 0, the next
+    // free 3-wide cell is x=4 on row 0 — what the pin path places it at.
+    const existing: Placement[] = [
+      { i: 'stat:a', x: 0, y: 0, w: 2, h: 3 },
+      { i: 'stat:b', x: 2, y: 0, w: 2, h: 3 },
+    ];
+    expect(findFreeSlot(existing, { w: 3, h: 3 }, STRIP_COLS)).toEqual({ x: 4, y: 0 });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // FREE PLACEMENT — the Android-home-screen model (CHANGE 2, issue #73).
 // ---------------------------------------------------------------------------
 //

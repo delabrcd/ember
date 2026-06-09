@@ -38,8 +38,12 @@ import { WidgetPalette, type PaletteGroup } from './WidgetPalette';
 import {
   COLS,
   FIT_BREAKPOINT,
+  STRIP_COLS,
   findFreeSlot,
   generateDefaultPlacements,
+  generateStripPlacements,
+  readStrip,
+  withStrip,
   type Breakpoint,
   type Placement,
 } from '@/lib/layoutEngine';
@@ -184,13 +188,21 @@ export function Dashboard() {
   const availableStats = visibleStats.map((s) => statWidgetType(s.id));
   const availablePanels = [BILLS_PANEL_TYPE];
 
-  // The set of widget types the SAVED layout places (lg breakpoint). null (vs an
-  // empty set) means "no layout saved yet" → show everything (today's default,
-  // acceptance #1/#4). Once saved, it's the authority for STAT/PANEL membership.
+  // The set of widget types the SAVED layout places — the lg page grid PLUS the
+  // pinned top bar (__strip). null (vs an empty set) means "no layout saved yet" →
+  // show everything (today's default, acceptance #1/#4). Once saved, it's the
+  // authority for STAT/PANEL membership. Including the strip ids (issue #73 polish
+  // #4) is load-bearing: a widget PINNED to the bar is dropped from the lg page
+  // breakpoint, so without the strip it would read as "removed" and wrongly appear
+  // in the palette's add-back list while still living (highlighted) in the bar.
   const savedTypes: Set<string> | null = useMemo(() => {
     const lg = layout?.layouts?.[FIT_BREAKPOINT];
-    if (!lg || !Array.isArray(lg)) return null;
-    return new Set(lg.map((p: Placement) => p.i));
+    const strip = readStrip(layout?.layouts ?? undefined);
+    if (!Array.isArray(lg) && !Array.isArray(strip)) return null;
+    const ids = new Set<string>();
+    if (Array.isArray(lg)) for (const p of lg) ids.add(p.i);
+    if (Array.isArray(strip)) for (const p of strip) ids.add(p.i);
+    return ids;
   }, [layout]);
 
   // What's PLACED, per category, reconciling the two removal signals:
@@ -296,6 +308,85 @@ export function Dashboard() {
       FIT_BREAKPOINT
     ] ?? [];
 
+  // ---- Pin / unpin a widget to the top bar (issue #73 polish #4) ----
+  // The operator wants ANY widget (chart/panel/stat) movable to the top bar and
+  // back — indicated by a highlight. The bar is the existing __strip RGL grid; this
+  // is the robust per-widget TOGGLE (literal cross-grid drag is fragile). It edits
+  // the SAME layout blob (no schema change): pinning adds the widget's placement to
+  // __strip (at a free strip slot) and DROPS it from every page breakpoint; unpin
+  // removes it from __strip and re-adds it to a free page slot at each breakpoint.
+  // WidgetLayout excludes pinned ids from the paged grid, so the visible move is
+  // immediate and survives a reload. Idempotent + structural (setPlacements →
+  // debounced PUT; placementsEqual guards the re-feed loop), so no React #185.
+  const togglePin = (type: string) => {
+    // The effective current strip: the saved __strip if present, else today's
+    // default stat band (the pre-customization strip). Materializing it here means
+    // pinning the FIRST non-stat widget keeps the existing stat pins instead of
+    // wiping them (the migration default becomes explicit on first edit).
+    const cur = layout?.layouts;
+    const curStrip = readStrip(cur ?? undefined) ?? generateStripPlacements(statIds);
+    // The page breakpoints: the saved blob if present, else the freshly generated
+    // default for the full available set (so a never-customized layout still gets a
+    // complete set of page placements to move the widget between).
+    const fullDefault = generateDefaultPlacements({
+      statIds: availableStats,
+      chartIds: availableCharts,
+      panelIds: availablePanels,
+    });
+    const pageBlob: Record<string, Placement[]> = {};
+    for (const bp of Object.keys(COLS) as Breakpoint[]) {
+      const saved = cur?.[bp];
+      pageBlob[bp] = Array.isArray(saved) ? [...saved] : (fullDefault[bp] ?? []);
+    }
+
+    const isPinned = curStrip.some((p) => p.i === type);
+    let nextStrip: Placement[];
+    if (isPinned) {
+      // UNPIN: drop from the strip, then ensure it has a page placement to return
+      // to at every breakpoint (a free slot if it's missing there).
+      nextStrip = curStrip.filter((p) => p.i !== type);
+      const { defaultSize } = getWidget(type);
+      for (const bp of Object.keys(COLS) as Breakpoint[]) {
+        const arr = pageBlob[bp]!;
+        if (arr.some((p) => p.i === type)) continue; // already has a page slot
+        const slot = findFreeSlot(arr, defaultSize, COLS[bp]);
+        arr.unshift({
+          i: type,
+          x: slot.x,
+          y: slot.y,
+          w: Math.min(defaultSize.w, COLS[bp]),
+          h: defaultSize.h,
+          minW: defaultSize.minW,
+          minH: defaultSize.minH,
+        });
+      }
+    } else {
+      // PIN: add to the strip at a free slot (a COMPACT strip size so a pinned
+      // chart/panel doesn't make the bar viewport-tall — the strip is a thin band).
+      // Then drop the widget from every page breakpoint so it lives ONLY in the bar.
+      const { defaultSize } = getWidget(type);
+      const stripSize = stripSizeFor(type, defaultSize);
+      const slot = findFreeSlot(curStrip, stripSize, STRIP_COLS);
+      nextStrip = [
+        ...curStrip,
+        {
+          i: type,
+          x: slot.x,
+          y: slot.y,
+          w: stripSize.w,
+          h: stripSize.h,
+          minW: defaultSize.minW,
+          minH: defaultSize.minH,
+        },
+      ];
+      for (const bp of Object.keys(COLS) as Breakpoint[]) {
+        pageBlob[bp] = pageBlob[bp]!.filter((p) => p.i !== type);
+      }
+    }
+
+    setPlacements(withStrip(pageBlob as Record<Breakpoint, Placement[]>, nextStrip));
+  };
+
   // The palette's removable-widget groups — what the user can ADD BACK while
   // customizing. Matches the two removal signals above:
   //   • Charts: those with a spec but Phase-D visible:false (the in-app toggle /
@@ -382,8 +473,21 @@ export function Dashboard() {
   // pin at xl; below xl (and in comfortable density) the page scrolls normally.
   const lockViewport = fit;
   return (
+    // FULL-WIDTH SHELL (issue #73 polish — operator: "left/right banding bars on
+    // hi-dpi / zoomed-out screens"). The shell used to cap at `max-w-[1800px]
+    // mx-auto`, so on a very wide / zoomed-out / hi-DPI-CSS-px viewport the content
+    // sat in a centered column with empty side BANDS. We drop the cap so the layout
+    // fills the FULL viewport width at any width (RGL's WidthProvider then measures
+    // the full content width and the grid spans it edge-to-edge), keeping only the
+    // small side padding (`px-3` / `sm:px-5`) as a gutter. No mx-auto/max-w now.
+    //
+    // BOTTOM PADDING (issue #73 polish — operator: "no padding at the bottom"). In
+    // the pinned fit view the pager sat flush against the viewport bottom. We add a
+    // bottom gutter matching the top (`xl:pb-3`) AND reserve it in the fit math (see
+    // BOTTOM_PAD in WidgetLayout, subtracted from availH) so the gutter doesn't
+    // reintroduce a scroll or clip the pager — it just opens a visible gap below it.
     <div
-      className={`mx-auto flex w-full max-w-[1800px] flex-col gap-3 px-3 py-3 sm:px-5 sm:py-4 ${
+      className={`flex w-full flex-col gap-3 px-3 py-3 sm:px-5 sm:py-4 ${
         lockViewport ? 'xl:h-dvh xl:gap-2 xl:overflow-hidden xl:py-3' : ''
       }`}
     >
@@ -496,13 +600,15 @@ export function Dashboard() {
           <div className="space-y-2">
             <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-200/90">
               <span>
-                Customize mode — drag to move, drag a corner to resize, × to remove. Changes save automatically. Press
+                Customize mode — drag to move, drag a corner to resize, the pin to add/remove a widget from the top bar,
+                × to remove. Changes save automatically. Press
                 <strong className="mx-1">Done</strong> when finished.
               </span>
-              {/* Pinned stat strip toggle (issue #73 iteration). ON (default)
-                  keeps the stat cards in a fixed band at the top, always visible;
-                  OFF turns them into ordinary tiles that paginate with everything
-                  else. Persists on the server layout blob. */}
+              {/* Top-bar toggle (issue #73 polish #4 — generalized from stats-only).
+                  ON (default) shows the pinned top bar (always visible, not paged);
+                  OFF hides the bar and its widgets fall back onto the scrollable
+                  pages. The bar can now hold ANY pinned widget (chart/panel/stat),
+                  not just stats. Persists on the server layout blob. */}
               <label className="inline-flex cursor-pointer items-center gap-2 rounded-lg border border-amber-500/30 bg-slate-900/50 px-2 py-1">
                 <input
                   type="checkbox"
@@ -510,7 +616,7 @@ export function Dashboard() {
                   onChange={(e) => setPinnedStatStrip(e.target.checked)}
                   className="h-3.5 w-3.5 accent-amber-400"
                 />
-                <span className="text-amber-200/90">Pin stat strip</span>
+                <span className="text-amber-200/90">Show top bar</span>
               </label>
             </div>
             <WidgetPalette groups={paletteGroups} onAdd={addWidget} />
@@ -567,6 +673,7 @@ export function Dashboard() {
           pinnedStatStrip={layout.pinnedStatStrip}
           host={widgetHost}
           onRemoveWidget={removeWidget}
+          onTogglePin={togglePin}
         />
       )}
 
@@ -589,4 +696,17 @@ export function Dashboard() {
       </footer>
     </div>
   );
+}
+
+// The size a widget gets when PINNED to the top bar (issue #73 polish #4). The bar
+// is a thin band (STRIP_ROW_HEIGHT ≈ 28px/row, content-sized — not viewport-tall),
+// so a stat keeps its compact band geometry (≈3 rows ≈ 100px, today's strip card),
+// while a CHART or PANEL — whose page default is tall (h=7/14) — is clamped to a
+// compact bar tile so pinning one doesn't make the bar swallow the viewport. The
+// user can still drag-resize it within the bar afterward. Mirrors STAT_ROWS=3 and
+// the half-width chart from layoutEngine without importing the private constant.
+function stripSizeFor(type: string, defaultSize: { w: number; h: number }): { w: number; h: number } {
+  if (type.startsWith('stat:')) return { w: defaultSize.w, h: 3 };
+  // Charts / panels: a quarter-width, ~3-row bar tile (≈100px tall) by default.
+  return { w: 3, h: 3 };
 }
