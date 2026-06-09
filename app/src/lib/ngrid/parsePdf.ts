@@ -27,14 +27,6 @@ export interface BillDetail {
   gas: FuelDetail;
 }
 
-// Backwards-compatible shape used by the scraper to store SUPPLY/DELIVERY rows.
-export interface PdfCharges {
-  electricSupply: number | null;
-  electricDelivery: number | null;
-  gasSupply: number | null;
-  gasDelivery: number | null;
-}
-
 const MONEY = '\\$?\\s*(-?[\\d,]+\\.\\d{2})';
 const num = (s: string | undefined): number | null => (s == null ? null : parseFloat(s.replace(/,/g, '')));
 
