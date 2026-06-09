@@ -177,6 +177,47 @@ To get PDFs out of the container if you change the mount: `docker compose cp ngr
 To wipe everything and start over: `docker compose down -v` (removes the named volumes), then
 delete your PDF directory.
 
+## Backup & restore
+
+For a single, portable snapshot of the whole app — enough to rebuild it on a new host — use the
+**full backup**:
+
+- **`GET /api/backup`** (or **Settings → Account & data → Download full backup**) streams a single
+  `ember-backup-<date>.tar.gz` containing a `pg_dump` of the database (`db.sql`) **plus every bill
+  PDF** (`pdfs/<account>/<file>.pdf`) and a `MANIFEST.txt`. The dump is taken with
+  `--clean --if-exists --no-owner --no-privileges`, so it restores cleanly into a fresh, empty
+  database regardless of role.
+- It is **gated by the same posture as the rest of the app** (LAN-only / reverse-proxy / SSO) —
+  there is no separate auth on this endpoint, so **never expose it un-gated**, exactly as with the
+  rest of the dashboard.
+
+**`NGRID_SECRET_KEY` is required to restore your saved National Grid logins, and is NOT in the
+archive.** The database stores those credentials only as AES-256-GCM **ciphertext**; the key that
+decrypts them is the `NGRID_SECRET_KEY` env var (or, if you never set one, the auto-generated
+`session/secret.key`). **Back that key up separately** — without the same key, a restored backup
+can't decrypt your stored logins (charts, bills, and usage still restore fine; only the saved
+NG-login credentials need it).
+
+Restore into a **fresh** stack:
+
+```bash
+# 1. Bring up just an empty Postgres for the new stack
+docker compose up -d ngrid_postgres
+
+# 2. Restore the database + PDFs from a backup archive
+./scripts/restore.sh ember-backup-2026-06-09.tar.gz
+#   options: --db-container <name> (default ngrid_postgres), --pdf-dir <path> (default ./data/pdfs)
+
+# 3. Put the SAME NGRID_SECRET_KEY back in .env (from your separate secret backup),
+#    then start the app — its entrypoint applies the schema and it comes up populated.
+docker compose up -d ngrid-dashboard
+```
+
+`scripts/restore.sh` extracts the tarball, loads `db.sql` via
+`docker compose exec -T ngrid_postgres psql`, copies the PDFs into your `PDF_DIR`, and prints
+`Bill`/`Usage` row counts as a sanity check (a direct-`psql` alternative for an external Postgres is
+documented in the script's comments).
+
 ## Contributing / development
 
 Building from source, running the tests, the release flow, and how the scraper works all live

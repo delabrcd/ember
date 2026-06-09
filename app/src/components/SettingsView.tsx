@@ -433,6 +433,21 @@ export function SettingsView() {
         <div className="border-t border-slate-800 pt-4">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
+              <div className="text-sm font-medium text-slate-200">Full backup</div>
+              <div className="text-xs text-slate-500">Download a single restorable archive of the whole app: the database plus every bill PDF.</div>
+            </div>
+            <a className="btn border border-slate-700/70 bg-slate-800/40 text-slate-200 hover:bg-slate-700" href="/api/backup" download>
+              Download full backup
+            </a>
+          </div>
+          <div className="mt-2 text-xs text-slate-500">
+            Database + bill PDFs. Keep your NGRID_SECRET_KEY backed up separately — it&apos;s required to restore saved logins and is not in the archive.
+          </div>
+        </div>
+
+        <div className="border-t border-slate-800 pt-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
               <div className="text-sm font-medium text-slate-200">Data check</div>
               <div className="text-xs text-slate-500">Double-check that the numbers shown here match your actual bills.</div>
             </div>
