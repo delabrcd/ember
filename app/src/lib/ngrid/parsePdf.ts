@@ -27,14 +27,6 @@ export interface BillDetail {
   gas: FuelDetail;
 }
 
-// Backwards-compatible shape used by the scraper to store SUPPLY/DELIVERY rows.
-export interface PdfCharges {
-  electricSupply: number | null;
-  electricDelivery: number | null;
-  gasSupply: number | null;
-  gasDelivery: number | null;
-}
-
 const MONEY = '\\$?\\s*(-?[\\d,]+\\.\\d{2})';
 const num = (s: string | undefined): number | null => (s == null ? null : parseFloat(s.replace(/,/g, '')));
 
@@ -115,15 +107,6 @@ export function parseBillDetail(text: string): BillDetail {
       serviceTotal: gTokens.length ? gTokens[gTokens.length - 1] : null,
       usage: gasUsage,
     },
-  };
-}
-
-export function toCharges(d: BillDetail): PdfCharges {
-  return {
-    electricSupply: d.electric.supply,
-    electricDelivery: d.electric.delivery,
-    gasSupply: d.gas.supply,
-    gasDelivery: d.gas.delivery,
   };
 }
 

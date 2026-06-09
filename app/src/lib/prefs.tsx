@@ -12,38 +12,34 @@ import { DEFAULT_CHART_CONFIG, DEFAULT_CHART_ORDER, type ChartConfig } from './c
 // unchanged.
 export type { ChartConfig };
 
-// Density of the cockpit layout (issue #2). 'fit' packs the main view into a
-// 16:9 desktop viewport with no page scroll (vh-based chart heights); 'comfortable'
-// is the classic taller, page-scrolling layout. Only affects ≥1280px.
-export type Density = 'fit' | 'comfortable';
+// Which rate the elec/gas rate stat cards show (compact-stat-cards iteration,
+// issue #73): 'avg' = the trailing-12-month average all-in rate (the long-standing
+// default headline); 'current' = the latest month's all-in rate. The user FLICKS
+// a rate card between the two by clicking it; the choice is an ephemeral per-browser
+// display pref (it changes nothing about the underlying numbers — both rates already
+// exist in StatData; this only picks which one the headline shows). Default 'avg'
+// preserves today's behavior.
+export type RateCardMode = 'avg' | 'current';
 
 export interface Prefs {
   // Range selection (issue #24). The RangePref model (preset + custom ym bounds)
   // replaces the old `rangeMonths` number; a stale rangeMonths is migrated on load.
   range: RangePref;
   currencyDecimals: number;
-  density: Density;
-  // Show the seasonal 12-month forward projection (issue #52). Issue #69 added a
-  // single hide toggle; #71 splits it into two independent controls so the dashed
-  // forward series on the cost & usage charts and the "Proj. next 12 mo" summary
-  // card can be shown/hidden separately. Both default on (current behavior). A
-  // saved legacy `showProjection` is migrated into both in mergePrefs().
+  // Show the seasonal 12-month forward projection on the cost & usage charts
+  // (issue #52). Issue #69 added a single hide toggle; #71 generalized it. A saved
+  // legacy `showProjection` is migrated into this in mergePrefs(). Defaults on.
   showProjectionOnCharts: boolean;
-  showProjectionCard: boolean;
+  // Which rate the elec/gas rate stat cards show (compact-stat-cards iteration).
+  // Flicked per-browser by clicking a rate card; default 'avg' (trailing-12-mo
+  // average, today's behavior). Display-only — see RateCardMode.
+  rateCardMode: RateCardMode;
   order: string[];
   charts: Record<string, ChartConfig>;
   // The account the dashboard is scoped to. null = the default account (and the
   // only sensible value on a single-account install). Survives reload via
   // localStorage; an id that no longer exists is ignored at fetch time.
   selectedAccountId: number | null;
-  // Locally-dismissed in-app notifications (notifications-dropdown feature): the
-  // stable keys (see lib/notifications.ts) of header-bell items the user has
-  // dismissed. Persisted here so a dismissal sticks across reloads on this
-  // browser; a dismissed key never reappears. Empty by default.
-  // NOTE: superseded by the server-side notification log (notification-log
-  // feature) — read/unread now lives in the DB and the bell no longer reads this.
-  // Kept for back-compat with persisted prefs (additive change only).
-  dismissedNotifications: string[];
   // Show ALREADY-READ items in the notifications bell (notification-log feature).
   // OFF by default — the dropdown shows only unread, with a header toggle to reveal
   // the read history (rendered muted). Persisted per-browser.
@@ -53,11 +49,9 @@ export interface Prefs {
 export const DEFAULT_PREFS: Prefs = {
   range: DEFAULT_RANGE,
   currencyDecimals: 2,
-  density: 'fit',
   showProjectionOnCharts: true,
-  showProjectionCard: true,
+  rateCardMode: 'avg',
   selectedAccountId: null,
-  dismissedNotifications: [],
   showReadNotifications: false,
   // Chart order + per-chart config defaults come from the shared, server-safe
   // lib/chartConfig.ts (the same source the Phase D server layout default uses).
@@ -79,22 +73,22 @@ export function mergePrefs(
   for (const id of DEFAULT_PREFS.order) {
     charts[id] = { ...DEFAULT_PREFS.charts[id], ...(saved.charts?.[id] || {}) };
   }
-  // Back-compat (#71): the old single `showProjection` toggle now seeds BOTH new
-  // toggles, so an existing user who turned the projection off keeps it off
-  // everywhere. The per-key `??` (not ||) preserves an explicit `false`; only
-  // null/undefined fall through to the legacy value, then to the default.
+  // Back-compat (#71): the old single `showProjection` toggle seeds the on-charts
+  // toggle, so an existing user who turned the projection off keeps it off. The
+  // per-key `??` (not ||) preserves an explicit `false`; only null/undefined fall
+  // through to the legacy value, then to the default.
   const legacyProjection = saved.showProjection ?? DEFAULT_PREFS.showProjectionOnCharts;
   return {
     range: mergeRange(saved),
     currencyDecimals: saved.currencyDecimals ?? DEFAULT_PREFS.currencyDecimals,
-    density: saved.density === 'comfortable' || saved.density === 'fit' ? saved.density : DEFAULT_PREFS.density,
     showProjectionOnCharts: saved.showProjectionOnCharts ?? legacyProjection,
-    showProjectionCard: saved.showProjectionCard ?? legacyProjection,
+    // Per-key `??` back-compat: only an explicit valid value is kept, else default
+    // 'avg' (today's behavior). Guards against a malformed persisted string.
+    rateCardMode:
+      saved.rateCardMode === 'current' || saved.rateCardMode === 'avg'
+        ? saved.rateCardMode
+        : DEFAULT_PREFS.rateCardMode,
     selectedAccountId: saved.selectedAccountId ?? DEFAULT_PREFS.selectedAccountId,
-    // Defend against a malformed persisted value (only keep strings); default [].
-    dismissedNotifications: Array.isArray(saved.dismissedNotifications)
-      ? saved.dismissedNotifications.filter((k): k is string => typeof k === 'string')
-      : DEFAULT_PREFS.dismissedNotifications,
     showReadNotifications: saved.showReadNotifications ?? DEFAULT_PREFS.showReadNotifications,
     order: mergeOrder(saved.order, DEFAULT_PREFS.order),
     charts,

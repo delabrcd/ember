@@ -4,9 +4,10 @@
 // Two layers:
 //   1. PURE, unit-tested helpers — formatBillNotification() (message content),
 //      selectBillsToNotify() (watermark dedupe) and resolveChannel() (env →
-//      channel). They live in `@/lib/notifyFormat` (no DB / network / env imports)
-//      and are re-exported here for back-compat. Keeping them DB-free lets the unit
-//      suite run without a generated Prisma client.
+//      channel). They live in `@/lib/notifyFormat` (no DB / network / env imports);
+//      this module imports them for the dispatcher below, and other callers/tests
+//      import them from `@/lib/notifyFormat` directly. Keeping them DB-free lets the
+//      unit suite run without a generated Prisma client.
 //   2. An impure dispatcher — notifyNewBills() — that reads env, picks a channel,
 //      sends, and advances the AppSetting watermark. Wrapped in try/catch by its
 //      caller (run.ts) so a notification failure can't fail a good scrape.
@@ -35,23 +36,6 @@ import {
   type NotifyChannel,
   type NotifyEnv,
 } from '@/lib/notifyFormat';
-
-// Re-export the pure surface so existing import sites (and the unit tests) can
-// keep importing from `@/lib/notify` unchanged.
-export {
-  LAST_NOTIFIED_KEY,
-  ANOMALY_NOTIFY_ENABLED_KEY,
-  LAST_ANOMALY_NOTIFIED_KEY,
-  formatBillNotification,
-  formatAnomalyNotification,
-  resolveChannel,
-  selectBillsToNotify,
-  shouldNotifyAnomaly,
-  type BillNotification,
-  type NotifiableBill,
-  type NotifyChannel,
-  type NotifyEnv,
-};
 
 async function sendWebhook(n: BillNotification, env: NotifyEnv): Promise<void> {
   const url = env.NOTIFY_WEBHOOK_URL;

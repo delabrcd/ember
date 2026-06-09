@@ -293,16 +293,3 @@ async function runPreflight(id: string, job: PreflightJob): Promise<void> {
     }
   }
 }
-
-// Test/maintenance hook: drop every entry and stop the sweeper. Not used in the
-// request path; exported so a future test can reset module state.
-export async function _resetPreflights(): Promise<void> {
-  for (const entry of registry.values()) {
-    if (entry.browser) await closeResources(entry);
-  }
-  registry.clear();
-  if (sweeper) {
-    clearInterval(sweeper);
-    sweeper = null;
-  }
-}

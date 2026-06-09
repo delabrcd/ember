@@ -4,11 +4,6 @@
 // "per degree-day" intensity. This is the only place the HDD/CDD arithmetic lives;
 // it's PURE so the hand-calculated test exercises it directly.
 
-export interface DegreeDayDay {
-  date: string; // YYYY-MM-DD (unused by the math; kept so callers pass daily rows as-is)
-  tMean: number; // mean temperature for the day, in the same unit as `baseF`
-}
-
 export interface DegreeDays {
   hdd: number; // sum of max(0, base - tMean) over the days
   cdd: number; // sum of max(0, tMean - base) over the days

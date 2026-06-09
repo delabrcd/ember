@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { MonthRow } from '@/lib/chartSpec';
 import { SPEC_BY_ID } from '@/lib/chartSpec';
 import { seasonForwardRows } from '@/lib/prediction';
@@ -28,8 +28,10 @@ import { dateLabel, relativeFromNow } from '@/lib/format';
 import { STAT_SPECS, type StatData } from '@/lib/widgets/statSpec';
 import {
   BILLS_PANEL_TYPE,
+  SPACER_PREFIX,
   chartWidgetType,
   getWidget,
+  isSpacerId,
   statWidgetType,
   widgetMins,
   type WidgetHost,
@@ -39,6 +41,7 @@ import { WidgetPalette, type PaletteGroup } from './WidgetPalette';
 import {
   COLS,
   FIT_BREAKPOINT,
+  STAT_ROWS,
   STRIP_COLS,
   findFreeSlot,
   generateDefaultPlacements,
@@ -130,8 +133,15 @@ export function Dashboard() {
   // Stat-strip widgets (Phase A, issue #93). The visible specs (their isVisible
   // predicate passed) in declared order. StatData is the exact bag the cards read.
   const statData: StatData = useMemo(
-    () => ({ ov, elecAllIn, gasAllIn, lastRow, currencyDecimals: dp }),
-    [ov, elecAllIn, gasAllIn, lastRow, dp]
+    () => ({ ov, elecAllIn, gasAllIn, lastRow, currencyDecimals: dp, rateCardMode: prefs.rateCardMode }),
+    [ov, elecAllIn, gasAllIn, lastRow, dp, prefs.rateCardMode]
+  );
+  // Flick the rate cards' headline between the trailing-12-mo average and the
+  // current rate (compact-stat-cards iteration). Persists the choice as an ephemeral
+  // per-browser display pref; the rate selectors read it off StatData and stay pure.
+  const flickRateMode = useCallback(
+    () => patch({ rateCardMode: prefs.rateCardMode === 'current' ? 'avg' : 'current' }),
+    [patch, prefs.rateCardMode]
   );
   const visibleStats = STAT_SPECS.filter((s) => s.isVisible(statData));
 
@@ -154,8 +164,14 @@ export function Dashboard() {
   // In the grid every widget FILLS its placed cell (the RGL row sizing — fit or
   // fixed — owns the height now), so chartFill is always true and chartHeight is
   // irrelevant (ConfigurableChart uses the fill path). This is the runtime no-
-  // scroll fit replacing FILL_BODY_CLASSES: the cell height comes from RGL's
-  // computed rowHeight, and the chart fills it at 100%.
+  // scroll fit: the cell height comes from RGL's computed rowHeight, and the chart
+  // fills it at 100%.
+  // Customize mode (Phase E). A header Customize/Done toggle; only meaningful at
+  // ≥xl in fit (the grid is interactive everywhere, but the palette + the cockpit
+  // shine on desktop). Off by default — the default view is the static dashboard.
+  // Declared before widgetHost so the host can pass it to the spacer renderer.
+  const [customizing, setCustomizing] = useState(false);
+
   const widgetHost: WidgetHost = {
     resolveDataset,
     specFor,
@@ -165,7 +181,11 @@ export function Dashboard() {
     onChartChange: updateLayoutChart,
     statData,
     openTools,
+    flickRateMode,
     billsData: { rangedBills, currencyDecimals: dp, csvScope, pdfScope },
+    // The spacer widget reads this to switch between its dashed-outline editable form
+    // and its invisible space-holding form (CHANGE 2).
+    customizing,
   };
 
   // ---- The placed-widget set (Phase E, #73) ----
@@ -188,6 +208,19 @@ export function Dashboard() {
     : [];
   const availableStats = visibleStats.map((s) => statWidgetType(s.id));
   const availablePanels = [BILLS_PANEL_TYPE];
+
+  // SPACER instances (CHANGE 2) currently placed: read straight off the saved blob
+  // (the lg page grid + the pinned strip), since spacers aren't a Phase-D-tracked
+  // category — they exist only as placements. De-duped, in a stable order, so they
+  // flow into WidgetLayout's placed universe and survive the merge repair.
+  const spacerIds = useMemo(() => {
+    const ids = new Set<string>();
+    const lg = layout?.layouts?.[FIT_BREAKPOINT];
+    if (Array.isArray(lg)) for (const p of lg) if (isSpacerId(p.i)) ids.add(p.i);
+    const strip = readStrip(layout?.layouts ?? undefined);
+    if (Array.isArray(strip)) for (const p of strip) if (isSpacerId(p.i)) ids.add(p.i);
+    return [...ids];
+  }, [layout]);
 
   // The set of widget types the SAVED layout places — the lg page grid PLUS the
   // pinned top bar (__strip). null (vs an empty set) means "no layout saved yet" →
@@ -224,11 +257,10 @@ export function Dashboard() {
   const chartIds = availableCharts;
   const panelIds = availablePanels.filter(isPlaced);
 
-  // Customize mode (Phase E). A header Customize/Done toggle; only meaningful at
-  // ≥xl in fit (the grid is interactive everywhere, but the palette + the cockpit
-  // shine on desktop). Off by default — the default view is the static dashboard.
-  const [customizing, setCustomizing] = useState(false);
-  const fit = prefs.density === 'fit';
+  // The dashboard is ALWAYS the paginated fit layout now (the old 'comfortable'
+  // density was retired when Customize mode + the fit pager superseded it). At ≥xl
+  // this pins the page to the viewport and paginates; below xl it scrolls as before.
+  const fit = true;
 
   // Add/remove a widget. Both edit the SAVED placements: removing strips the type
   // from every breakpoint; adding re-inserts it at its default slot (handled by
@@ -286,12 +318,12 @@ export function Dashboard() {
     if (lg.some((p) => p.i === type)) return; // already placed
     const next: Record<string, Placement[]> = { ...(cur as Record<string, Placement[]>) };
     // Drop at the widget's registry default size on the FIRST free slot of the lg
-    // grid. Under FREE PLACEMENT (compactType=null + preventCollision, CHANGE 2)
-    // RGL no longer compacts a tile dropped at (0,0) into an empty cell, and would
-    // REJECT a drop that overlaps an existing tile — so we must place the new tile
-    // on an empty patch ourselves (findFreeSlot scans reading-order for the first
-    // non-overlapping cell, always finding one below the layout at worst). Other
-    // breakpoints get it appended by WidgetLayout's merge against fresh defaults.
+    // grid. Under DISPLACEMENT+COMPACTION (CHANGE 2) RGL would otherwise drop a new
+    // tile at (0,0) and shove the existing tiles down; landing it on an empty patch
+    // (findFreeSlot scans reading-order for the first non-overlapping cell, always
+    // finding one below the layout at worst) keeps the add tidy, and vertical
+    // compaction then packs it into place. Other breakpoints get it appended by
+    // WidgetLayout's merge against fresh defaults.
     const { defaultSize } = getWidget(type);
     const slot = findFreeSlot(lg, defaultSize, COLS[FIT_BREAKPOINT]);
     next[FIT_BREAKPOINT] = [
@@ -299,6 +331,39 @@ export function Dashboard() {
       ...lg,
     ];
     setPlacements(next);
+  };
+
+  // Add a NEW spacer instance (CHANGE 2). Spacers are multi-instance (`spacer:1`,
+  // `spacer:2`, …) and always addable, so this mints a FRESH id (one past the
+  // highest existing spacer number) and drops it at a free lg slot. If no layout is
+  // saved yet, we first materialize the current default (so the new spacer sticks as
+  // an explicit placement). It persists as a normal placement and survives reload.
+  const addSpacer = () => {
+    // The next free spacer number: max existing + 1 (1-based), so removing then
+    // re-adding doesn't collide with a surviving instance.
+    const nums = spacerIds.map((id) => Number(id.slice(SPACER_PREFIX.length + 1))).filter((n) => Number.isFinite(n));
+    const nextId = `${SPACER_PREFIX}:${(nums.length ? Math.max(...nums) : 0) + 1}`;
+    const { defaultSize } = getWidget(nextId);
+    const lg = Array.isArray(layout?.layouts?.[FIT_BREAKPOINT])
+      ? layout!.layouts![FIT_BREAKPOINT]!
+      : buildCurrentLgPlacements();
+    const slot = findFreeSlot(lg, defaultSize, COLS[FIT_BREAKPOINT]);
+    const newTile: Placement = {
+      i: nextId,
+      x: slot.x,
+      y: slot.y,
+      w: defaultSize.w,
+      h: defaultSize.h,
+      minW: defaultSize.minW,
+      minH: defaultSize.minH,
+    };
+    // Preserve any other saved breakpoints + the strip; only the lg page grid gains
+    // the new spacer (other breakpoints pick it up via WidgetLayout's merge defaults).
+    const cur = layout?.layouts;
+    const next: Record<string, Placement[]> = cur ? { ...(cur as Record<string, Placement[]>) } : {};
+    next[FIT_BREAKPOINT] = [newTile, ...lg];
+    const strip = readStrip(cur ?? undefined);
+    setPlacements(strip ? withStrip(next as Record<Breakpoint, Placement[]>, strip) : next);
   };
   // The current default lg placements for the FULL available set — used to
   // materialize a saved blob the first time the user removes a widget from the
@@ -475,7 +540,7 @@ export function Dashboard() {
   // iteration): view mode shows one page with a pager; customize mode scrolls the
   // grid CANVAS internally (flex-1 overflow-y-auto inside WidgetLayout) so every
   // page's widgets stay reachable while the page itself stays pinned. Both modes
-  // pin at xl; below xl (and in comfortable density) the page scrolls normally.
+  // pin at xl; below xl the page scrolls normally.
   const lockViewport = fit;
   return (
     // FULL-WIDTH SHELL (issue #73 polish — operator: "left/right banding bars on
@@ -498,7 +563,7 @@ export function Dashboard() {
     >
       {/* FIXED CHROME (header, banners, range/schedule strip). Tagged so
           WidgetLayout's ResizeObserver can measure its height for the no-scroll
-          fit (replacing the FILL_BODY_CLASSES constant). Everything inside here
+          fit (the grid rowHeight is derived from it). Everything inside here
           is layout the user can't drag; the draggable grid lives below it. */}
       <div data-dashboard-chrome className="flex shrink-0 flex-col gap-3 xl:gap-2">
         {/* HARD TOP-RIGHT ACTIONS (issue #73 mobile fix): a NO-WRAP row with the
@@ -624,7 +689,7 @@ export function Dashboard() {
                 <span className="text-amber-200/90">Show top bar</span>
               </label>
             </div>
-            <WidgetPalette groups={paletteGroups} onAdd={addWidget} />
+            <WidgetPalette groups={paletteGroups} onAdd={addWidget} onAddSpacer={addSpacer} />
           </div>
         )}
 
@@ -679,6 +744,7 @@ export function Dashboard() {
           host={widgetHost}
           onRemoveWidget={removeWidget}
           onTogglePin={togglePin}
+          spacerIds={spacerIds}
         />
       )}
 
@@ -705,13 +771,13 @@ export function Dashboard() {
 
 // The size a widget gets when PINNED to the top bar (issue #73 polish #4). The bar
 // is a thin band (STRIP_ROW_HEIGHT ≈ 28px/row, content-sized — not viewport-tall),
-// so a stat keeps its compact band geometry (≈3 rows ≈ 100px, today's strip card),
+// so a stat keeps its compact band geometry (STAT_ROWS rows ≈ the strip card),
 // while a CHART or PANEL — whose page default is tall (h=7/14) — is clamped to a
 // compact bar tile so pinning one doesn't make the bar swallow the viewport. The
-// user can still drag-resize it within the bar afterward. Mirrors STAT_ROWS=3 and
-// the half-width chart from layoutEngine without importing the private constant.
+// user can still drag-resize it within the bar afterward. Uses STAT_ROWS from the
+// layout engine so the pinned height tracks the compact strip-card height.
 function stripSizeFor(type: string, defaultSize: { w: number; h: number }): { w: number; h: number } {
-  if (type.startsWith('stat:')) return { w: defaultSize.w, h: 3 };
-  // Charts / panels: a quarter-width, ~3-row bar tile (≈100px tall) by default.
-  return { w: 3, h: 3 };
+  if (type.startsWith('stat:')) return { w: defaultSize.w, h: STAT_ROWS };
+  // Charts / panels: a quarter-width, compact STAT_ROWS-tall bar tile by default.
+  return { w: 3, h: STAT_ROWS };
 }

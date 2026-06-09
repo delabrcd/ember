@@ -1,37 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { clampPage, paginate } from '../src/lib/cockpit';
+import { clampPage } from '../src/lib/cockpit';
 import { estimateTooltip } from '../src/lib/format';
-
-// paginate splits the visible charts into fixed-size pages for the cockpit's
-// 2×2 "fit" grid (issue #38): 6 visible → [4, 2]. PURE.
-describe('paginate (hand-calculated)', () => {
-  it('splits six items into a full page of four and a remainder of two', () => {
-    expect(paginate(['a', 'b', 'c', 'd', 'e', 'f'], 4)).toEqual([
-      ['a', 'b', 'c', 'd'],
-      ['e', 'f'],
-    ]);
-  });
-
-  it('keeps four-or-fewer items on a single page (no arrows case)', () => {
-    expect(paginate(['a', 'b', 'c', 'd'], 4)).toEqual([['a', 'b', 'c', 'd']]);
-    expect(paginate(['a'], 4)).toEqual([['a']]);
-  });
-
-  it('yields no pages for an empty list', () => {
-    expect(paginate([], 4)).toEqual([]);
-  });
-
-  it('preserves order across pages', () => {
-    expect(paginate([1, 2, 3, 4, 5], 2)).toEqual([[1, 2], [3, 4], [5]]);
-  });
-
-  it('clamps a bad perPage to at least one per page (no zero-size loop)', () => {
-    expect(paginate(['a', 'b'], 0)).toEqual([['a'], ['b']]);
-    expect(paginate(['a', 'b'], -3)).toEqual([['a'], ['b']]);
-    // Fractional perPage floors to a whole page size.
-    expect(paginate(['a', 'b', 'c'], 2.9)).toEqual([['a', 'b'], ['c']]);
-  });
-});
 
 // clampPage wraps/clamps the active page index so the prev/next arrows can never
 // select an out-of-range page, even after the visible set shrinks. PURE.

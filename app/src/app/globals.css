@@ -104,44 +104,51 @@ body {
   background: rgba(245, 158, 11, 0.1); /* amber-500/10 */
 }
 
-/* ── Stat-card content fit (issue #73) ─────────────────────────────────────
-   The operator's rule: a stat card's title + headline (+ the budget progress
-   bar) must ALWAYS show, the optional detail/sub line hides when the tile is too
-   short, and text NEVER flows off the card. We do this DECLARATIVELY with a CSS
-   container query — no JS measuring, no setTimeout band-aid: the card is a
-   size query container, and `.stat-detail` is hidden when the card's own height
-   drops below the threshold at which the detail line would fit.
+/* ── Stat-card content fit (issue #73; compact-stat-cards visual-uniformity pass) ─
+   The compact card body is just the (brief) title + the headline value (+ the
+   budget progress bar) — the old optional sub/detail line moved into the ⓘ tooltip.
+   The card's own `minH` (derived from cardFit.ts) guarantees the title + headline
+   fit VERTICALLY, and `overflow-hidden` is the hard backstop.
 
-   The thresholds MIRROR lib/widgets/cardFit.ts (the single source for the
-   arithmetic). A CSS `@container (max-height: …)` query measures the query
-   container's CONTENT box (NOT its border box), so the thresholds here are the
-   CONTENT-box values cardFit.contentDetailThresholdPx() returns —
-   detailHeightPx − the card's vertical padding: simple = 88 − 24 = 64px,
-   budget = 100 − 24 = 76px (the budget card reserves a progress bar, so its sub
-   line hides a little earlier). We hide one px below those so the line is gone the
-   moment it wouldn't fully fit. `overflow-hidden` on the card (set in
-   StatCard.tsx) is the hard backstop: even mid-threshold the card clips to its
-   tile, so text can never spill out. */
+   UNIFORMITY (operator feedback): "the fonts are all different sizes … lots of
+   horizontal and vertical space left … the budget one is a totally different
+   vertical size." Three fixes here:
+     1. ONE headline size for EVERY card. The old per-tile container-query step-down
+        (text-2xl → xl → lg → base, keyed on the card's own width) made each card's
+        headline a DIFFERENT size depending on its slot width — the "different fonts"
+        the operator saw. It's gone. We pick a SINGLE size — text-xl (1.25rem) — that
+        fits the headlines in the EVEN strip cell (CHANGE 1: the strip is a 24-col
+        band, 8 cards × 3 cols each, all equal width — verified headlessly: every
+        card's .stat scrollWidth ≤ clientWidth, no clip). The one genuinely wide
+        headline (yoy) had its TEXT compacted ("E −19% · G −3%") to fit the even cell
+        at the uniform font, rather than handing it a wider slot.
+     2. FILL the card. The card body is a flex column that SPACES the title and the
+        headline to the card's full height (`justify-between`) so there's no large
+        empty band — content reaches both edges of the (short) card.
+     3. The TITLE still `truncate`s (StatCard.tsx) and the headline keeps its
+        `truncate` overflow backstop, so nothing ever clips. */
 .stat-card {
-  container-type: size;
+  /* Still an inline-size container so the narrow-resize budget-target backstop
+     below can react to the card's own width (not the viewport). The font no longer
+     steps — only the secondary " / target" tail hides on a hand-narrowed budget
+     tile, keeping the projected number whole. */
+  container-type: inline-size;
 }
-/* In the PINNED stat strip the cards must grow to their natural content height so
-   nothing is clipped (the strip is their full presentation). Turning containment
-   off here also stops the hide-the-detail query from matching, so the strip always
-   shows the complete card. Size containment + the query stay active for the
-   resizable RGL grid tiles, where the tile dictates the height. */
-.ngrid-stat-strip .stat-card {
-  container-type: normal;
+/* The single uniform headline size for ALL stat cards. text-xl (1.25rem) with a
+   line box that fits the strip's compact row height. Overrides the .stat base
+   (text-3xl) for stat cards only — every card's headline now renders at the SAME
+   size regardless of its slot width. The smaller trailing unit span (text-sm) is
+   set inline in StatCard.tsx. */
+.stat-card .stat {
+  font-size: 1.25rem; /* text-xl */
+  line-height: 1.75rem;
 }
-@container (max-height: 63px) {
-  .stat-card .stat-detail {
-    display: none;
-  }
-}
-/* The budget card's bar is essential, so its sub line hides a little earlier
-   (a taller threshold) — its dedicated class wins via specificity/order. */
-@container (max-height: 75px) {
-  .stat-card-budget .stat-detail {
+/* On a too-narrow budget tile (only if a user RESIZES it narrow — the default
+   strip gives budget w=2), drop the secondary " / target" tail so the projected
+   headline stays whole; the bar's tick + the ⓘ still carry the target. Presentation
+   backstop only, no number logic. */
+@container (max-width: 150px) {
+  .stat-card-budget .budget-target {
     display: none;
   }
 }

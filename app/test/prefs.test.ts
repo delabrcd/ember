@@ -70,50 +70,58 @@ describe('mergeRange (hand-calculated)', () => {
   });
 });
 
-// mergePrefs carries the two projection display prefs (issue #71, splitting the
-// single #69 toggle) through a localStorage round-trip: both default on for
-// new/returning users, an explicit `false` must survive each (the `??` must not
-// clobber it), and a saved LEGACY `showProjection` seeds both new keys so an
-// existing user who hid the projection keeps it hidden everywhere.
-describe('mergePrefs projection toggles (hand-calculated)', () => {
-  it('defaults both projection toggles to true when nothing is saved', () => {
+// mergePrefs carries the projection display pref (issue #71, generalizing the
+// single #69 toggle) through a localStorage round-trip: defaults on for
+// new/returning users, an explicit `false` must survive (the `??` must not clobber
+// it), and a saved LEGACY `showProjection` seeds it so an existing user who hid the
+// projection keeps it hidden.
+describe('mergePrefs projection toggle (hand-calculated)', () => {
+  it('defaults the projection toggle to true when nothing is saved', () => {
     expect(mergePrefs(null).showProjectionOnCharts).toBe(true);
-    expect(mergePrefs(null).showProjectionCard).toBe(true);
     expect(mergePrefs({}).showProjectionOnCharts).toBe(true);
-    expect(mergePrefs({}).showProjectionCard).toBe(true);
     expect(DEFAULT_PREFS.showProjectionOnCharts).toBe(true);
-    expect(DEFAULT_PREFS.showProjectionCard).toBe(true);
   });
 
-  it('preserves an explicit false for each toggle (no ?? clobber)', () => {
+  it('preserves an explicit false (no ?? clobber)', () => {
     expect(mergePrefs({ showProjectionOnCharts: false }).showProjectionOnCharts).toBe(false);
-    // The other key is untouched and falls back to its default.
-    expect(mergePrefs({ showProjectionOnCharts: false }).showProjectionCard).toBe(true);
-    expect(mergePrefs({ showProjectionCard: false }).showProjectionCard).toBe(false);
-    expect(mergePrefs({ showProjectionCard: false }).showProjectionOnCharts).toBe(true);
   });
 
-  it('preserves an explicit true for each toggle', () => {
+  it('preserves an explicit true', () => {
     expect(mergePrefs({ showProjectionOnCharts: true }).showProjectionOnCharts).toBe(true);
-    expect(mergePrefs({ showProjectionCard: true }).showProjectionCard).toBe(true);
   });
 
-  it('migrates a legacy showProjection=false into BOTH new toggles', () => {
-    const m = mergePrefs({ showProjection: false });
-    expect(m.showProjectionOnCharts).toBe(false);
-    expect(m.showProjectionCard).toBe(false);
+  it('migrates a legacy showProjection=false into the toggle', () => {
+    expect(mergePrefs({ showProjection: false }).showProjectionOnCharts).toBe(false);
   });
 
-  it('migrates a legacy showProjection=true into BOTH new toggles', () => {
-    const m = mergePrefs({ showProjection: true });
-    expect(m.showProjectionOnCharts).toBe(true);
-    expect(m.showProjectionCard).toBe(true);
+  it('migrates a legacy showProjection=true into the toggle', () => {
+    expect(mergePrefs({ showProjection: true }).showProjectionOnCharts).toBe(true);
   });
 
-  it('lets a new key override the legacy value when both are present', () => {
-    // A user mid-migration who explicitly set one new toggle: it wins over legacy.
-    const m = mergePrefs({ showProjection: false, showProjectionCard: true });
-    expect(m.showProjectionOnCharts).toBe(false); // from legacy
-    expect(m.showProjectionCard).toBe(true); // explicit new key wins
+  it('lets the new key override the legacy value when both are present', () => {
+    // A user mid-migration who explicitly set the new toggle: it wins over legacy.
+    const m = mergePrefs({ showProjection: false, showProjectionOnCharts: true });
+    expect(m.showProjectionOnCharts).toBe(true); // explicit new key wins
+  });
+});
+
+// rateCardMode (compact-stat-cards iteration): the rate cards' flick choice rides
+// the same display prefs with per-key `??` back-compat — default 'avg' (today's
+// behavior) for new/returning users, an explicit valid value survives, garbage falls
+// back to the default.
+describe('mergePrefs rateCardMode (hand-calculated)', () => {
+  it("defaults to 'avg' when nothing is saved", () => {
+    expect(mergePrefs(null).rateCardMode).toBe('avg');
+    expect(mergePrefs({}).rateCardMode).toBe('avg');
+    expect(DEFAULT_PREFS.rateCardMode).toBe('avg');
+  });
+
+  it('preserves an explicit saved mode', () => {
+    expect(mergePrefs({ rateCardMode: 'current' }).rateCardMode).toBe('current');
+    expect(mergePrefs({ rateCardMode: 'avg' }).rateCardMode).toBe('avg');
+  });
+
+  it('falls back to the default for a garbage value', () => {
+    expect(mergePrefs({ rateCardMode: 'bogus' as never }).rateCardMode).toBe('avg');
   });
 });

@@ -34,7 +34,6 @@ export const COMPARE_PRESETS: { value: ComparePreset; label: string }[] = [
 // "winter 2024" = Nov 2024 → Mar 2025. PURE.
 export const WINTER_START_MONTH = 11; // November
 export const WINTER_END_MONTH = 3; // March (of the following year)
-export const WINTER_LENGTH_MONTHS = 5; // Nov, Dec, Jan, Feb, Mar
 
 // The Nov–Mar window for the winter that STARTS in `startYear` (e.g. 2024 →
 // { 202411, 202503 }). PURE.

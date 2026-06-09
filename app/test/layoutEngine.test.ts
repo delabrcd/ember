@@ -20,6 +20,7 @@ import {
   readStrip,
   rebaseToLocal,
   withStrip,
+  WIDE_STAT_TYPES,
   type Placement,
   type Placements,
 } from '../src/lib/layoutEngine';
@@ -39,11 +40,12 @@ const INPUT = { statIds: STATS, chartIds: CHARTS, panelIds: PANELS };
 
 // The REAL registry mins for the default widget set (mirrors registry.tsx's
 // defaultSize.minW/minH; kept hand-written here so the layout-engine test stays
-// PURE — no React/registry import). Stat cards minW=2 (the issue #73 offender),
-// charts minW=3, the bills panel minW=3. minH values aren't load-bearing for the
-// width-crush invariant but are included so the no-sub-min check covers H too.
+// PURE — no React/registry import). Stat cards minW=1 (the compact-stat-cards
+// change: all 8 fit in ONE strip row), charts minW=3, the bills panel minW=3. minH
+// values aren't load-bearing for the width-crush invariant but are included so the
+// no-sub-min check covers H too (stat cards minH=2, the slim title+headline floor).
 const MINS: Record<string, { minW: number; minH: number }> = {
-  ...Object.fromEntries(STATS.map((i) => [i, { minW: 2, minH: 3 }])),
+  ...Object.fromEntries(STATS.map((i) => [i, { minW: 1, minH: 2 }])),
   ...Object.fromEntries(CHARTS.map((i) => [i, { minW: 3, minH: 3 }])),
   'panel:bills': { minW: 3, minH: 4 },
 };
@@ -196,50 +198,45 @@ describe('default placements never fall below a widget min (issue #73)', () => {
     }
   });
 
-  it('lg stat strip WRAPS to 2 rows (8 cards × minW=2 on 12 cols → 6 + 2)', () => {
+  it('lg stat strip is a SINGLE row (8 cards × minW=1 on 12 cols → all on y=0)', () => {
     const stats = placements.lg!.filter((p) => p.i.startsWith('stat:'));
-    // Two distinct band rows (no longer one crushed full-width row).
-    const rowYs = [...new Set(stats.map((p) => p.y))].sort((a, b) => a - b);
-    expect(rowYs.length).toBe(2);
-    // Row 1: 6 cards, each w=2 → sums to 12. Row 2: 2 cards, each w=6 → sums to 12.
-    const row1 = stats.filter((p) => p.y === rowYs[0]);
-    const row2 = stats.filter((p) => p.y === rowYs[1]);
-    expect(row1.length).toBe(6);
-    expect(row2.length).toBe(2);
-    expect(row1.reduce((s, p) => s + p.w, 0)).toBe(COLS.lg);
-    expect(row2.reduce((s, p) => s + p.w, 0)).toBe(COLS.lg);
-    // EVERY card is ≥ minW=2 (the bug was four w=1 cards).
-    expect(stats.every((p) => p.w >= 2)).toBe(true);
-    expect(row1.every((p) => p.w === 2)).toBe(true);
-    expect(row2.every((p) => p.w === 6)).toBe(true);
+    // ONE band row — the compact-stat-cards change: minW=1 lets all 8 fit at once.
+    const rowYs = [...new Set(stats.map((p) => p.y))];
+    expect(rowYs.length).toBe(1);
+    expect(stats.every((p) => p.y === 0)).toBe(true);
+    // Widths fill the 12-col strip edge to edge: 12/8 → four w=2 (the first 12%8=4
+    // get the extra col) and four w=1, summing to 12.
+    expect(stats.reduce((s, p) => s + p.w, 0)).toBe(COLS.lg);
+    expect(stats.filter((p) => p.w === 2).length).toBe(4);
+    expect(stats.filter((p) => p.w === 1).length).toBe(4);
+    // Every card is ≥ its minW=1 (none below the floor).
+    expect(stats.every((p) => p.w >= 1)).toBe(true);
   });
 
-  it('the strip default (generateStripPlacements) likewise wraps, no sub-min card', () => {
+  it('the strip default (generateStripPlacements) is likewise a single row', () => {
     const strip = generateStripPlacements(STATS, MINS);
     const rowYs = [...new Set(strip.map((p) => p.y))];
-    expect(rowYs.length).toBe(2); // 6 + 2
-    expect(strip.every((p) => p.w >= 2)).toBe(true);
-    expect(strip.every((p) => p.minW === 2)).toBe(true);
-    // Each row still fills the 12-col strip edge to edge.
-    for (const y of rowYs) {
-      const sum = strip.filter((p) => p.y === y).reduce((s, p) => s + p.w, 0);
-      expect(sum).toBe(STRIP_COLS);
-    }
+    expect(rowYs.length).toBe(1); // all 8 on one row
+    expect(strip.every((p) => p.w >= 1)).toBe(true);
+    expect(strip.every((p) => p.minW === 1)).toBe(true);
+    // The row fills the 12-col strip edge to edge.
+    expect(strip.reduce((s, p) => s + p.w, 0)).toBe(STRIP_COLS);
   });
 
-  it('mergePlacements self-heals a previously-persisted crushed default (w<minW → minW)', () => {
-    // Simulate a layout the BUGGY generator persisted: a stat card stamped with the
-    // min but with a crushed w=1 (below minW=2). The merge against the correct
-    // default must lift it up to the floor and stamp the min.
+  it('mergePlacements self-heals a previously-persisted crushed default (h<minH → minH)', () => {
+    // Simulate a layout an OLD generator persisted: a stat card with a crushed h=1
+    // (below the slim minH=2). The merge against the correct default must lift it up
+    // to the floor and stamp the mins.
     const def = generateDefaultPlacements(INPUT_WITH_MINS);
     const crushed: Placements = {
-      lg: [{ i: 'stat:a', x: 0, y: 0, w: 1, h: 1 }], // crushed below minW=2 / minH
+      lg: [{ i: 'stat:a', x: 0, y: 0, w: 1, h: 1 }], // crushed below minH=2
     };
     const merged = mergePlacements(crushed, def);
     const a = merged.lg!.find((p) => p.i === 'stat:a')!;
-    expect(a.w).toBeGreaterThanOrEqual(2); // healed up to minW
-    expect(a.minW).toBe(2);
-    expect(a.h).toBeGreaterThanOrEqual(a.minH ?? 0);
+    expect(a.h).toBeGreaterThanOrEqual(2); // healed up to minH
+    expect(a.minH).toBe(2);
+    expect(a.minW).toBe(1);
+    expect(a.w).toBeGreaterThanOrEqual(a.minW ?? 0);
     // A user's DELIBERATELY larger size is never shrunk by the heal.
     const big: Placements = { lg: [{ i: 'stat:a', x: 0, y: 0, w: 5, h: 9 }] };
     const bigMerged = mergePlacements(big, def).lg!.find((p) => p.i === 'stat:a')!;
@@ -342,9 +339,9 @@ describe('placementRows (hand-calculated)', () => {
       chartIds: ['chart:usage', 'chart:cost'],
       panelIds: PANELS,
     }).lg!;
-    // STAT_ROWS(3) + 1 chart row (CHART_ROWS=7) → bills at y=10, h=PINNED_PAGE_ROWS
-    // (14) → bottom 24.
-    expect(placementRows(twoCharts)).toBe(3 + 7 + PINNED_PAGE_ROWS);
+    // STAT_ROWS(2) + 1 chart row (CHART_ROWS=7) → bills at y=9, h=PINNED_PAGE_ROWS
+    // (14) → bottom 23.
+    expect(placementRows(twoCharts)).toBe(2 + 7 + PINNED_PAGE_ROWS);
     // (sanity: the full 7-chart set is taller still, since charts wrap to 4 rows.)
     expect(placementRows(lg)).toBeGreaterThan(DEFAULT_FIT_ROWS);
   });
@@ -675,17 +672,49 @@ describe('the default cockpit paginates cleanly at the pinned page budget', () =
 // schema change and the strip survives the same PUT as the page grid. These tests
 // fence the pure side: the default is today's 8-across band; the strip key reads/
 // writes without touching the real breakpoints; placementsEqual sees strip edits.
-describe('generateStripPlacements — the strip default = today\'s 8-across band', () => {
-  it('lays the stat cards in one full-width band summing to 12 cols on row 0', () => {
+describe('generateStripPlacements — the EVEN strip default (CHANGE 1)', () => {
+  it('lays the 8 stat cards as ONE row of EQUAL-width cards filling the 24-col strip', () => {
     const strip = generateStripPlacements(STATS);
-    // One band: every card on y=0 (today's single-row 8-across strip).
+    // One band: every card on y=0 (the single-row strip).
     expect(strip.every((p) => p.y === 0)).toBe(true);
-    // Widths sum to the 12-col strip grid (no ragged gap), 8 cards across.
-    expect(strip.reduce((s, p) => s + p.w, 0)).toBe(STRIP_COLS);
     expect(strip.length).toBe(STATS.length);
-    // Same 4×w=2 + 4×w=1 distribution the lg cockpit's stat band uses (12/8).
-    expect(strip.filter((p) => p.w === 2).length).toBe(4);
-    expect(strip.filter((p) => p.w === 1).length).toBe(4);
+    // EVEN widths: 24 / 8 = 3 cols each, all identical (the operator's "evenly
+    // spaced" ask — no mixed w=1/w=2). The widths sum to the full 24-col strip with
+    // no remainder, so the row fills edge to edge.
+    expect(STRIP_COLS).toBe(24);
+    expect(strip.every((p) => p.w === 3)).toBe(true);
+    expect(strip.reduce((s, p) => s + p.w, 0)).toBe(STRIP_COLS);
+    // Cards tile left to right with no overlap (x = 0, 3, 6, …, 21).
+    expect(strip.map((p) => p.x)).toEqual([0, 3, 6, 9, 12, 15, 18, 21]);
+  });
+
+  it('is even regardless of card content (no WIDE-content +1 distribution any more)', () => {
+    // The real 8-card set, in display order: every card is the SAME width now —
+    // the yoy/rate/budget cards no longer get a wider slot (the strip is even and
+    // yoy's text was compacted to fit the even width instead).
+    const real = [
+      'stat:latestBill', 'stat:lifetimeSpend', 'stat:elecRate', 'stat:gasRate',
+      'stat:nextBillEstimate', 'stat:emissions', 'stat:yoy', 'stat:budget',
+    ];
+    const strip = generateStripPlacements(real);
+    expect(strip.every((p) => p.y === 0)).toBe(true); // single row
+    expect(strip.reduce((s, p) => s + p.w, 0)).toBe(STRIP_COLS);
+    const widths = new Set(strip.map((p) => p.w));
+    expect(widths.size).toBe(1); // all equal
+    expect([...widths][0]).toBe(3);
+    // The retired WIDE set no longer affects placement (it's empty now).
+    expect(WIDE_STAT_TYPES.size).toBe(0);
+  });
+
+  it('stays even for other divisible card counts (6 → 4 each, 4 → 6, 3 → 8, 2 → 12)', () => {
+    const counts: Record<number, number> = { 6: 4, 4: 6, 3: 8, 2: 12 };
+    for (const [n, w] of Object.entries(counts)) {
+      const ids = Array.from({ length: Number(n) }, (_, i) => `stat:s${i}`);
+      const strip = generateStripPlacements(ids, Object.fromEntries(ids.map((i) => [i, { minW: 1, minH: 2 }])));
+      expect(strip.every((p) => p.w === w)).toBe(true);
+      expect(strip.reduce((s, p) => s + p.w, 0)).toBe(STRIP_COLS);
+      expect(strip.every((p) => p.y === 0)).toBe(true);
+    }
   });
 
   it('an empty stat set yields an empty strip', () => {

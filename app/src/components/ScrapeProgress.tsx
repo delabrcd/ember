@@ -19,13 +19,6 @@ const POLL_MS = 3000;
 // auto-clears, so the run doesn't vanish the instant it finishes.
 const SETTLE_MS = 6000;
 
-export interface ScrapeProgressHandle {
-  // The run currently being tracked (or null when idle), and a setter so the
-  // RefreshButton can hand off a freshly-started run for the banner to track.
-  trackedRunId: number | null;
-  track: (runId: number) => void;
-}
-
 // Lifted state: Dashboard owns this so a single banner tracks both the manual
 // button and any run already in flight when the page loads (`initialRun` from
 // the overview's `lastRun`). Returns the live run + a `track()` to adopt a new

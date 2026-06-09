@@ -120,11 +120,6 @@ export interface TimeseriesVizSpec extends VizBase<MonthRow> {
 // lands — at which point only the `dataset`/`Row` change, not the encoding shape.
 // ---------------------------------------------------------------------------
 
-// A dataset row, for the PURE aggregators, is a string-keyed record (they read
-// the encoded field by its string name). `MonthRow`/the sample row are read this
-// way at the renderer boundary. Defined here so aggregate.ts shares one name.
-export type VizRow = Record<string, unknown>;
-
 // The numeric-valued fields of `Row` — the only valid targets for an axis / a
 // color scale (you can't put a label on a numeric axis). For a CONCRETE `Row`
 // this resolves to a UNION OF STRING LITERALS (the numeric field names), so

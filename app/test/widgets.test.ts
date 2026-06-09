@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { CHART_SPECS } from '../src/lib/chartSpec';
 import type { Overview } from '../src/components/useDashboardData';
-import { WIDGETS, BILLS_PANEL_TYPE, chartWidgetType, statWidgetType, getWidget } from '../src/lib/widgets/registry';
+import { WIDGETS, BILLS_PANEL_TYPE, SPACER_PREFIX, chartWidgetType, statWidgetType, getWidget, isSpacerId, widgetMins } from '../src/lib/widgets/registry';
 import type { MonthRow } from '../src/lib/chartSpec';
 import {
   STAT_IDS,
@@ -40,6 +40,7 @@ const mkData = (
   gasAllIn: null,
   lastRow: undefined,
   currencyDecimals: 2,
+  rateCardMode: 'avg',
   ...over,
 });
 
@@ -71,13 +72,15 @@ describe('widget registry completeness', () => {
     }
   });
 
-  it('has exactly chart+stat+panel entries and no namespace collision', () => {
-    // 7 charts + 8 stats + 1 panel (the bills rail, Phase E #73) = 16 widgets;
-    // the chart:/stat:/panel: prefixes keep them distinct.
+  it('has exactly chart+stat+panel+spacer entries and no namespace collision', () => {
+    // 7 charts + 8 stats + 1 panel (the bills rail, Phase E #73) + 1 spacer prototype
+    // (CHANGE 2) = 17 registry entries; the chart:/stat:/panel:/spacer prefixes keep
+    // them distinct. (The spacer is stored under its bare prefix; concrete
+    // `spacer:<n>` instances resolve to it in getWidget — they're not extra entries.)
     expect(CHART_SPECS.length).toBe(7);
     expect(STAT_IDS.length).toBe(8);
-    expect(Object.keys(WIDGETS).length).toBe(CHART_SPECS.length + STAT_IDS.length + 1);
-    expect(new Set(Object.keys(WIDGETS)).size).toBe(16);
+    expect(Object.keys(WIDGETS).length).toBe(CHART_SPECS.length + STAT_IDS.length + 2);
+    expect(new Set(Object.keys(WIDGETS)).size).toBe(17);
   });
 
   it('registers the bills panel (Phase E #73) as a placeable panel widget', () => {
@@ -91,6 +94,30 @@ describe('widget registry completeness', () => {
   it('throws on an unknown widget type (a missing registration is a bug)', () => {
     expect(() => getWidget('chart:does-not-exist')).toThrow();
     expect(() => getWidget('stat:does-not-exist')).toThrow();
+  });
+
+  it('resolves any spacer:<n> instance to the one spacer prototype (CHANGE 2)', () => {
+    const proto = getWidget(SPACER_PREFIX);
+    expect(proto.category).toBe('tool');
+    expect(proto.title).toBe('Spacer');
+    // Multi-instance: every concrete spacer id resolves to the SAME prototype def.
+    expect(getWidget('spacer:1')).toBe(proto);
+    expect(getWidget('spacer:2')).toBe(proto);
+    expect(getWidget('spacer:42')).toBe(proto);
+    // isSpacerId distinguishes a concrete instance from the bare prefix / other ids.
+    expect(isSpacerId('spacer:1')).toBe(true);
+    expect(isSpacerId('spacer:99')).toBe(true);
+    expect(isSpacerId('spacer')).toBe(false); // the bare prototype key, not an instance
+    expect(isSpacerId('stat:budget')).toBe(false);
+    // The prototype respects the min-size floor (minW/minH ≥ 1).
+    expect(proto.defaultSize.minW).toBeGreaterThanOrEqual(1);
+    expect(proto.defaultSize.minH).toBeGreaterThanOrEqual(1);
+  });
+
+  it('widgetMins resolves a placed spacer instance to its prototype floor', () => {
+    const mins = widgetMins(['spacer:1', 'spacer:7']);
+    expect(mins['spacer:1']).toEqual({ minW: 1, minH: 1 });
+    expect(mins['spacer:7']).toEqual({ minW: 1, minH: 1 });
   });
 
   it('keeps the 4 fixed cards first, then the optional cards, in render order', () => {
@@ -163,64 +190,104 @@ describe('StatSpec isVisible predicates', () => {
 // 2b. Value selectors (simple cards)
 // ---------------------------------------------------------------------------
 describe('StatSpec selectors — simple cards', () => {
-  it('latest bill: amount + statement date', () => {
+  // The compact-stat-cards iteration: the card body is now just the brief title +
+  // the headline value; the old sub/detail line MOVED into the ⓘ tooltip. So every
+  // simple card carries a `tooltip` and no `sub`, with a shorter title.
+  it('latest bill: amount only, statement date in the tooltip', () => {
     const spec = STAT_SPEC_BY_ID.latestBill;
     if (spec.kind !== 'simple') throw new Error('expected simple');
     const m = spec.select(mkData({ latestBill: { statementDate: '2026-05-01', totalDueAmount: 192.5 } }));
-    expect(m).toEqual({ title: 'Latest bill', value: '$192.50', sub: 'May 1, 2026' });
+    expect(m.title).toBe('Latest bill');
+    expect(m.value).toBe('$192.50');
+    expect(m.tooltip.accent).toBe('amber');
+    expect(m.tooltip.text).toBe('Amount due on your latest statement, dated May 1, 2026.');
+    // The detail no longer renders as a card sub line.
+    expect('sub' in m).toBe(false);
   });
 
-  it('lifetime spend: whole-dollar + bill count', () => {
+  it('lifetime: whole-dollar, bill count in the tooltip, brief title', () => {
     const spec = STAT_SPEC_BY_ID.lifetimeSpend;
     if (spec.kind !== 'simple') throw new Error('expected simple');
     const m = spec.select(mkData({ lifetimeSpend: 12345.67, billCount: 30 }));
-    expect(m).toEqual({ title: 'Lifetime spend', value: '$12,346', sub: 'across 30 bills' });
+    expect(m.title).toBe('Lifetime');
+    expect(m.value).toBe('$12,346');
+    expect(m.tooltip.text).toBe('Total spent across all 30 bills on record.');
   });
 
-  it('electric rate: all-in $/kWh with unit span + supply-part sub', () => {
+  it('electric rate (avg mode): 2-dp all-in $/kWh, flick label, supply + both modes in the tooltip', () => {
     const spec = STAT_SPEC_BY_ID.elecRate;
     if (spec.kind !== 'simple') throw new Error('expected simple');
-    const m = spec.select(mkData({}, { elecAllIn: 0.2456, lastRow: mkLastRow({ elecRateSupply: 0.1 }) }));
-    expect(m.value).toEqual({ lead: '$0.246', unit: '/kWh' });
-    expect(m.sub).toBe('full price, last 12 mo · supply part $0.100');
+    const m = spec.select(
+      mkData({}, { elecAllIn: 0.2456, lastRow: mkLastRow({ elecRateAllIn: 0.31, elecRateSupply: 0.1 }), rateCardMode: 'avg' })
+    );
+    expect(m.title).toBe('Elec');
+    // Trimmed to 2 decimals so the card fits w=1 ($0.25/kWh, not $0.246/kWh).
+    expect(m.value).toEqual({ lead: '$0.25', unit: '/kWh' });
+    expect(m.flick).toEqual({ label: 'avg' });
+    expect(m.tooltip.text).toContain('12-MONTH AVERAGE');
+    expect(m.tooltip.text).toContain('12-mo average $0.25/kWh; current $0.31/kWh');
+    expect(m.tooltip.text).toContain('supply part of your latest bill is $0.10/kWh');
   });
 
-  it('gas rate: 2-dp all-in $/therm with unit span + supply-part sub', () => {
+  it('electric rate (current mode): headline flips to the latest month all-in rate', () => {
+    const spec = STAT_SPEC_BY_ID.elecRate;
+    if (spec.kind !== 'simple') throw new Error('expected simple');
+    const m = spec.select(
+      mkData({}, { elecAllIn: 0.2456, lastRow: mkLastRow({ elecRateAllIn: 0.31, elecRateSupply: 0.1 }), rateCardMode: 'current' })
+    );
+    // CURRENT = lastRow.elecRateAllIn, not the trailing-12 average.
+    expect(m.value).toEqual({ lead: '$0.31', unit: '/kWh' });
+    expect(m.flick).toEqual({ label: 'now' });
+    expect(m.tooltip.text).toContain('CURRENT (latest month)');
+  });
+
+  it('gas rate (avg vs current): flicks between the 12-mo average and the latest all-in rate', () => {
     const spec = STAT_SPEC_BY_ID.gasRate;
     if (spec.kind !== 'simple') throw new Error('expected simple');
-    const m = spec.select(mkData({}, { gasAllIn: 1.234, lastRow: mkLastRow({ gasRateSupply: 0.9 }) }));
-    expect(m.value).toEqual({ lead: '$1.23', unit: '/therm' });
-    expect(m.sub).toBe('full price, last 12 mo · supply part $0.90');
+    const avg = spec.select(
+      mkData({}, { gasAllIn: 1.234, lastRow: mkLastRow({ gasRateAllIn: 1.6, gasRateSupply: 0.9 }), rateCardMode: 'avg' })
+    );
+    expect(avg.title).toBe('Gas');
+    expect(avg.value).toEqual({ lead: '$1.23', unit: '/therm' });
+    expect(avg.flick).toEqual({ label: 'avg' });
+    const cur = spec.select(
+      mkData({}, { gasAllIn: 1.234, lastRow: mkLastRow({ gasRateAllIn: 1.6, gasRateSupply: 0.9 }), rateCardMode: 'current' })
+    );
+    expect(cur.value).toEqual({ lead: '$1.60', unit: '/therm' });
+    expect(cur.tooltip.text).toContain('supply part of your latest bill is $0.90/therm');
   });
 
-  it('rate cards show — for a null rate', () => {
+  it('rate cards show — for a null rate (both modes)', () => {
     const elec = STAT_SPEC_BY_ID.elecRate;
     if (elec.kind !== 'simple') throw new Error('expected simple');
-    const m = elec.select(mkData({}, { elecAllIn: null, lastRow: undefined }));
-    expect(m.value).toEqual({ lead: '—', unit: '/kWh' });
-    expect(m.sub).toBe('full price, last 12 mo · supply part —');
+    const avg = elec.select(mkData({}, { elecAllIn: null, lastRow: undefined, rateCardMode: 'avg' }));
+    expect(avg.value).toEqual({ lead: '—', unit: '/kWh' });
+    expect(avg.tooltip.text).toContain('supply part of your latest bill is —/kWh');
+    const cur = elec.select(mkData({}, { elecAllIn: null, lastRow: undefined, rateCardMode: 'current' }));
+    expect(cur.value).toEqual({ lead: '—', unit: '/kWh' });
   });
 
-  it('est-next: ~point, low–high range, and the estimate tooltip (amber)', () => {
+  it('est-next: ~point headline; low–high range + estimate basis in the tooltip (amber)', () => {
     const spec = STAT_SPEC_BY_ID.nextBillEstimate;
     if (spec.kind !== 'simple') throw new Error('expected simple');
     const m = spec.select(mkData({ nextBillEstimate: { point: 192.24, low: 170, high: 215, basis: 'a Kalman model' } }));
-    expect(m.title).toBe('Est. next bill');
+    expect(m.title).toBe('Est. next');
     expect(m.value).toBe('~$192.24');
-    expect(m.sub).toBe('$170.00–$215.00');
-    expect(m.tooltip?.accent).toBe('amber');
-    expect(m.tooltip?.text).toBe('Estimated from a Kalman model. Not a real charge.');
+    expect(m.tooltip.accent).toBe('amber');
+    expect(m.tooltip.text).toBe('Likely range $170.00–$215.00. Estimated from a Kalman model. Not a real charge.');
   });
 
-  it('carbon: rounded kg with unit span, equivalence sub, emerald tooltip', () => {
+  it('carbon: rounded kg headline; equivalences + caveat in the emerald tooltip', () => {
     const spec = STAT_SPEC_BY_ID.emissions;
     if (spec.kind !== 'simple') throw new Error('expected simple');
     const m = spec.select(
       mkData({ emissions: { elecKg: 100, gasKg: 200, totalKg: 1234.6, gallonsGasoline: 138.9, treeYears: 20.4 } })
     );
-    expect(m.value).toEqual({ lead: '~1,235', unit: ' kg CO₂e' });
-    expect(m.sub).toBe('≈ 139 gal gas · 20 tree-yrs · estimate');
-    expect(m.tooltip?.accent).toBe('emerald');
+    expect(m.title).toBe('Carbon');
+    expect(m.value).toEqual({ lead: '~1,235', unit: ' kg' });
+    expect(m.tooltip.accent).toBe('emerald');
+    expect(m.tooltip.text).toContain('139 gal of gasoline');
+    expect(m.tooltip.text).toContain('20 tree-years');
   });
 });
 
@@ -312,6 +379,8 @@ describe('StatSpec selector — budget', () => {
     expect(m.over).toBe(true);
     expect(m.statusColor).toBe('text-rose-300');
     expect(m.statusLabel).toBe('over by $200');
+    // The status detail moved into the ⓘ tooltip (compact-stat-cards iteration).
+    expect(m.tooltip).toContain('over by $200');
     // denom = max(1000,1200,1) = 1200; spent 600 → 50%; rem (1200-600)/1200=50%;
     // target tick at 1000/1200 = 83.33%.
     expect(m.spentPct).toBe(50);

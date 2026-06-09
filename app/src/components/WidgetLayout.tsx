@@ -55,6 +55,7 @@ import {
   STRIP_COLS,
   STRIP_KEY,
   computePageFit,
+  findFreeSlot,
   generateDefaultPlacements,
   generateStripPlacements,
   mergePlacements,
@@ -116,9 +117,12 @@ const FALLBACK_ROW_HEIGHT = 40;
 
 // The pinned strip's row height (px). The strip is NOT viewport-filling — it's
 // sized to its cards' content (its height is measured and SUBTRACTED from availH),
-// so it uses a fixed readable row, NOT the fit-derived one. A STAT_ROWS-tall card
-// (3 rows) at this height ≈ the old flex strip's ~100px card: 3*28 + 2*8 = 100.
-const STRIP_ROW_HEIGHT = 28;
+// so it uses a fixed readable row, NOT the fit-derived one. A compact simple card
+// is STAT_ROWS=2 rows → 2*30 + 8 = 68px (covers its 66px essential border-box with a
+// hair of slack); the budget card reserves a progress bar (minH=3) → 3*30 + 16 =
+// 106px, which drives the single-row strip band height. Mirrors REF_ROW_HEIGHT in
+// registry.tsx, where the same row height derives each card's grid `minH`.
+const STRIP_ROW_HEIGHT = 30;
 
 export interface WidgetLayoutProps {
   // The widget ids to place, by category, IN ORDER — the host computes these
@@ -133,9 +137,9 @@ export interface WidgetLayoutProps {
   savedPlacements: Placements | undefined;
   // Persist a new placements blob (debounced PUT in useDashboardLayout).
   onPlacementsChange: (p: Placements) => void;
-  // True in fit density (the old `prefs.density === 'fit'`). Only at the lg
-  // breakpoint AND in fit density do we paginate + pin the page to the viewport;
-  // otherwise the page scrolls (today's behaviour).
+  // True in the fit layout (always on now — see Dashboard's `const fit = true`).
+  // Only at the lg breakpoint AND in fit do we paginate + pin the page to the
+  // viewport; otherwise the page scrolls (today's behaviour).
   fit: boolean;
   // Customize mode on/off — drag/resize + remove affordances + the palette.
   customizing: boolean;
@@ -152,6 +156,12 @@ export interface WidgetLayoutProps {
   // page slot. Optional so non-fit callers can omit the affordance. The host
   // (Dashboard) owns the cross-grid placement move + persistence.
   onTogglePin?: (type: string) => void;
+  // The SPACER instance ids currently placed (CHANGE 2), derived by the host from
+  // the saved blob (the page grid + strip). Spacers are user-added and NOT produced
+  // by the default generator, so the host hands them in explicitly: they're folded
+  // into the placed universe (so they render) and into the merge defaults (so the
+  // saved-blob repair preserves them instead of dropping them as "unknown").
+  spacerIds?: string[];
 }
 
 // Map RGL's 5-key breakpoint object down to our 4 (we don't use xxs). RGL still
@@ -172,6 +182,7 @@ export function WidgetLayout(props: WidgetLayoutProps) {
     pinnedStatStrip,
     host,
   } = props;
+  const spacerIds = useMemo(() => props.spacerIds ?? [], [props.spacerIds]);
 
   // The default placements that reproduce today's dashboard for the CURRENT
   // visible set. Recomputed when the set changes (a chart toggled, a card
@@ -180,10 +191,47 @@ export function WidgetLayout(props: WidgetLayoutProps) {
   // generator so no default placement falls below a widget's floor — the issue #73
   // fix (the crushed stat strip). It also lets mergePlacements self-heal a
   // previously-persisted crushed default up to the min.
-  const defaults = useMemo(
-    () => generateDefaultPlacements({ statIds, chartIds, panelIds, mins: widgetMins([...statIds, ...chartIds, ...panelIds]) }),
-    [statIds, chartIds, panelIds]
-  );
+  const defaults = useMemo(() => {
+    const base = generateDefaultPlacements({
+      statIds,
+      chartIds,
+      panelIds,
+      mins: widgetMins([...statIds, ...chartIds, ...panelIds]),
+    });
+    if (spacerIds.length === 0) return base;
+    // SPACERS (CHANGE 2) aren't produced by the generator, so fold each placed
+    // spacer's SAVED geometry (or, missing, a free-slot fallback at its registry
+    // default size) into every breakpoint's defaults — this is what lets
+    // mergePlacements PRESERVE spacers (it keeps only ids present in the default;
+    // without this a spacer would be dropped on the next repair). The saved geometry
+    // is authoritative when present so a moved/resized spacer round-trips.
+    const out: Placements = { ...base };
+    const { defaultSize } = getWidget(spacerIds[0]); // all spacers share the prototype size
+    for (const key of Object.keys(COLS) as Breakpoint[]) {
+      const arr = [...(base[key] ?? [])];
+      const cols = COLS[key];
+      const savedArr = savedPlacements?.[key] ?? [];
+      for (const id of spacerIds) {
+        const saved = savedArr.find((p) => p.i === id);
+        if (saved) {
+          arr.push({ ...saved, minW: defaultSize.minW, minH: defaultSize.minH });
+        } else {
+          const slot = findFreeSlot(arr, defaultSize, cols);
+          arr.push({
+            i: id,
+            x: slot.x,
+            y: slot.y,
+            w: Math.min(defaultSize.w, cols),
+            h: defaultSize.h,
+            minW: defaultSize.minW,
+            minH: defaultSize.minH,
+          });
+        }
+      }
+      out[key] = arr;
+    }
+    return out;
+  }, [statIds, chartIds, panelIds, spacerIds, savedPlacements]);
 
   // The effective per-breakpoint layouts RGL renders: the saved placements
   // repaired against the fresh defaults (drop removed widgets, append newly-added
@@ -197,7 +245,10 @@ export function WidgetLayout(props: WidgetLayoutProps) {
   // layout with NO `layouts` yet → generate the default and persist it ONCE so
   // they open to today's dashboard AND can then customize. Guarded by a ref so we
   // persist exactly once per mount-with-no-saved-placements.
-  const placedIds = useMemo(() => [...statIds, ...chartIds, ...panelIds], [statIds, chartIds, panelIds]);
+  const placedIds = useMemo(
+    () => [...statIds, ...chartIds, ...panelIds, ...spacerIds],
+    [statIds, chartIds, panelIds, spacerIds]
+  );
   const persistedDefault = useRef(false);
   useEffect(() => {
     if (!savedPlacements && !persistedDefault.current && placedIds.length > 0) {
@@ -674,8 +725,8 @@ export function WidgetLayout(props: WidgetLayoutProps) {
   // It's pinned ABOVE the paged slide-track and shows identically on every page.
   // Its height is MEASURED (stripRef) and subtracted from availH so the paged grid
   // fits below it. Uses a fixed STRIP_ROW_HEIGHT (content-sized, not viewport-
-  // filling) and the same free-placement model (compactType=null +
-  // preventCollision) so tiles can have gaps. The `ngrid-stat-strip` class keeps
+  // filling) and the same displacement+compaction model (CHANGE 2) as the page
+  // grid so a strip card reorder pushes the others aside. The `ngrid-stat-strip` class keeps
   // any pinned stat cards' content un-clipped (globals.css), and `ngrid-pinned-bar`
   // carries the amber pinned highlight (the operator's "highlighted background").
   // We wrap in `min-w-0` so RGL's WidthProvider measures the column width correctly.
@@ -694,8 +745,12 @@ export function WidgetLayout(props: WidgetLayoutProps) {
         isDraggable={customizing}
         isResizable={customizing}
         draggableCancel=".rgl-no-drag, button, a, input, label, select, textarea"
-        compactType={null}
-        preventCollision
+        // The strip uses the SAME displacement+compaction model as the page grid
+        // (CHANGE 2): dragging a strip card makes the others move aside and the band
+        // stays gap-collapsed. Horizontal compaction keeps the single-row strip
+        // packed left without wrapping a card to a new row on a small nudge.
+        compactType="horizontal"
+        preventCollision={false}
         onDragStop={(layout) => onStripGestureStop(layout)}
         onResizeStop={(layout) => onStripGestureStop(layout)}
         measureBeforeMount={false}
@@ -750,9 +805,10 @@ export function WidgetLayout(props: WidgetLayoutProps) {
   }, [fitActive, layouts, gridLgPlacements, rowsPerPage]);
 
   // A shared RGL builder so VIEW and CUSTOMIZE/scroll grids stay identical except
-  // for the few axes that differ (which layout + ids, draggable, maxRows). Both
-  // run FREE PLACEMENT (compactType=null + preventCollision) so tiles stay exactly
-  // where placed and gaps survive the round-trip. The persist handlers only fire
+  // for the few axes that differ (which layout + ids, draggable, maxRows). Both run
+  // DISPLACEMENT + VERTICAL COMPACTION (CHANGE 2): dragging a panel reflows the
+  // others out of the way and the grid stays gap-collapsed; intentional spacing
+  // comes from SPACER tiles, not free-floating gaps. The persist handlers only fire
   // on real gestures (drag/resize stop), so the static VIEW grid never persists.
   const buildGrid = (opts: {
     gridLayouts: Placements;
@@ -774,16 +830,18 @@ export function WidgetLayout(props: WidgetLayoutProps) {
       isDraggable={opts.draggable}
       isResizable={opts.draggable}
       draggableCancel=".rgl-no-drag, button, a, input, label, select, textarea"
-      // FREE PLACEMENT — the Android-home-screen model (CHANGE 2). compactType=null
-      // turns OFF RGL's auto-packing so a tile stays EXACTLY where it's dropped and
-      // empty cells/gaps between tiles are preserved (vertical compaction used to
-      // collapse every gap upward, which is what prevented free placement).
-      // preventCollision=true makes a drag/resize STOP if it would overlap another
-      // tile, so tiles can't stack on top of each other — they keep their own
-      // cells on the fixed 12-col × fit-rowHeight grid. Together: a fixed cell
-      // matrix you can drop tiles anywhere on, with the space between them intact.
-      compactType={null}
-      preventCollision
+      // DISPLACEMENT + COMPACTION (CHANGE 2 — replaces the old free-placement
+      // model). compactType="vertical" makes RGL pack tiles upward so the grid
+      // stays gap-collapsed (no arbitrary floating gaps), and preventCollision=false
+      // lets a dragged tile PUSH the others out of its way (they reflow around it)
+      // instead of the drag stopping at the first collision. Together: reordering a
+      // panel makes the rest move aside — the operator's "I want other panels to
+      // move out of the way when reordering." Intentional spacing is created with
+      // SPACER tiles (a real placement that holds a cell under compaction), not with
+      // free-floating gaps. Adds/pins still drop sensibly: findFreeSlot lands the new
+      // tile on an empty cell, and vertical compaction tidies it into place.
+      compactType="vertical"
+      preventCollision={false}
       onLayoutChange={onLayoutChange}
       onDragStop={(layout) => onGestureStop(layout)}
       onResizeStop={(layout) => onGestureStop(layout)}
@@ -905,8 +963,8 @@ export function WidgetLayout(props: WidgetLayoutProps) {
           {buildGrid({ gridLayouts: canvasLayouts, ids: gridIds, draggable: true })}
         </div>
       ) : (
-        // Below the fit breakpoint (or comfortable density): the page scrolls
-        // normally, no pager — today's mobile/md behaviour.
+        // Below the fit breakpoint: the page scrolls normally, no pager —
+        // today's mobile/md behaviour.
         buildGrid({ gridLayouts: canvasLayouts, ids: gridIds, draggable: customizing })
       )}
     </div>

@@ -282,7 +282,3 @@ export async function runScrape(
   task.catch(() => {});
   return run.id;
 }
-
-export function isScraping(): boolean {
-  return inFlight !== null;
-}

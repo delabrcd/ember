@@ -155,9 +155,9 @@ const CloseIcon = (
 // `fill` makes the chart FILL its placed grid cell (Phase E, #73). The cell's
 // height is now supplied by the react-grid-layout engine — at the lg/fit
 // breakpoint it's the runtime-computed `rowHeight × h` (the no-scroll fit
-// COMPUTED from the measured chrome height in WidgetLayout, NOT the old
-// hand-tuned `FILL_BODY_CLASSES` magic constant); at scrolling breakpoints it's a
-// fixed rowHeight × h. Either way the cell already has a definite pixel height, so
+// COMPUTED from the measured chrome height in WidgetLayout); at scrolling
+// breakpoints it's a fixed rowHeight × h. Either way the cell already has a
+// definite pixel height, so
 // the chart just needs to fill it 100% top-to-bottom.
 //
 // To make Recharts' ResponsiveContainer (height="100%") measure a non-zero box,

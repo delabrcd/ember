@@ -17,19 +17,6 @@ export function mergeOrder(savedOrder: string[] | undefined, defaultOrder: strin
   return [...saved, ...appended];
 }
 
-// Split a list into fixed-size pages (issue #38: paginated chart panels in the
-// "fit" density). `perPage` is clamped to ≥1 so a bad caller can't divide by zero
-// or loop forever; an empty input yields no pages. PURE — unit-tested. Exported
-// for the cockpit (page through the visible charts in their chosen order) and tests.
-export function paginate<T>(items: readonly T[], perPage: number): T[][] {
-  const size = Math.max(1, Math.floor(perPage));
-  const pages: T[][] = [];
-  for (let i = 0; i < items.length; i += size) {
-    pages.push(items.slice(i, i + size));
-  }
-  return pages;
-}
-
 // Wrap/clamp a desired page index to the valid range for a given page count, so
 // the cockpit's prev/next arrows can never select an out-of-range page even if
 // the visible-chart set shrinks underneath the active index. Returns 0 when there

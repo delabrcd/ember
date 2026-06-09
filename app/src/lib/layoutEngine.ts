@@ -17,8 +17,9 @@
 //   • `mergePlacements(...)` — the migration safety net: a saved blob is repaired
 //     against a freshly generated default (unknown widgets dropped, newly-added
 //     widgets appended) so a round-trip never loses or corrupts placements.
-//   • `computeFitRowHeight(...)` — the runtime no-scroll fit math (RFC §3.3),
-//     replacing ConfigurableChart's `FILL_BODY_CLASSES` magic constant.
+//   • `computeFitRowHeight(...)` — the runtime no-scroll fit math (RFC §3.3): it
+//     derives the grid rowHeight from the measured chrome so the page fills the
+//     viewport without scrolling.
 
 // The responsive breakpoints, widest → narrowest, mirroring RGL's keys. We use
 // four (RFC §3.3: "lg ≥1280 / md / sm / xs"):
@@ -91,9 +92,14 @@ export type Placements = Partial<Record<Breakpoint, Placement[]>> & {
 // with a real breakpoint id ('lg'/'md'/'sm'/'xs').
 export const STRIP_KEY = '__strip' as const;
 
-// The pinned strip is a 12-col band (matching the lg grid's column count) so its
-// 8-across default lands cleanly. Exported for the component's strip RGL.
-export const STRIP_COLS = 12;
+// The pinned strip is its OWN grid, separate from the 12-col page grid. We use a
+// FINE 24-col band (CHANGE 1, the even-strip iteration) so the 8 default stat cards
+// tile EVENLY: 24 / 8 = 3 cols each, all equal width, summing to 24 with no
+// remainder — the operator's "evenly spaced" ask. (At 12 cols, 12 % 8 = 4 forced a
+// mixed 4×w=2 + 4×w=1 distribution, which read as unbalanced.) 24 is divisible by
+// the common card counts (8→3, 6→4, 4→6, 3→8, 2→12), so the strip stays even as
+// cards are added/removed. Exported for the component's strip RGL.
+export const STRIP_COLS = 24;
 
 // Read the strip placements out of a (possibly absent) blob — never the
 // per-breakpoint paths, which must ignore the reserved key. PURE.
@@ -189,19 +195,22 @@ function withMins(p: Placement, mins: WidgetMins | undefined): Placement {
 
 // Row heights (in grid units) for each widget kind. The grid uses a FINE row
 // unit so the stat band and charts get proportional heights from one uniform
-// rowHeight. The operator feedback (issue #73 iteration) is that several stat
-// cards (carbon, vs-last-year, budget) were CLIPPED at the old 2-row default:
-//   • the carbon card has a title + a big number + a THREE-fact sub line
-//     ("≈ N gal gas · N tree-yrs · estimate") that wraps,
-//   • vs-last-year shows two fuel deltas plus a sub line,
-//   • budget has a title + headline + a progress BAR + a status sub line.
-// At the fit rowHeight a single grid row is ~36–44px, so 2 rows (~80px) clipped
-// the bar/wrapped sub lines. We bump a stat card to STAT_ROWS = 3 (~120px) so the
-// tallest card (budget: ~16px title + ~30px stat + ~10px bar + ~16px sub +
-// padding ≈ 96px) fits with headroom, and widen the per-widget default to w=3 so
-// the three-fact carbon sub line and the two-fuel YoY row don't wrap awkwardly.
+// rowHeight.
+//
+// COMPACT STAT CARDS (compact-stat-cards iteration). The operator's ask: the
+// default pinned strip took ~half the screen (two card-rows of tall cards); it
+// should be a SINGLE compact row. Two changes deliver that — (1) the stat card's
+// minW is now 1, so all 8 cards lay out in ONE row of the 12-col strip (was minW=2
+// → 8 cards forced onto two card-rows), and (2) the card body is trimmed to just
+// the brief title + the headline value (the old sub/detail line moved into the ⓘ
+// tooltip), so a card needs only ~2 grid rows of height. We drop STAT_ROWS 3 → 2:
+// EVERY card (title + headline = 66px) fits in 2 strip rows (2*30 + 8 = 68px),
+// INCLUDING the budget card — its ~6px progress bar now fits WITHIN that shared
+// height (visual-uniformity pass) instead of reserving an extra row, so all cards
+// derive minH=2 via cardFit and the strip is one UNIFORM-height compact row (~68px
+// at STRIP_ROW_HEIGHT=30) instead of the old budget-driven ~106px / ~208px blocks.
 // A chart stays ~7 units (a comfortably tall plot).
-const STAT_ROWS = 3;
+export const STAT_ROWS = 2;
 // Exported so WidgetLayout can pass it as computePageFit's `rowQuantum` — keeping
 // each fit page a whole number of CHART rows so the 2×2 aligns to page boundaries
 // (no partial chart row straddling a page → no wasted empty band).
@@ -273,7 +282,12 @@ function band(
 //     short last row (2 cards) spreads to w=6 each rather than leaving 8 cols empty.
 //   • Each tile is stamped with (and never dropped below) its widget's min.
 // PURE.
-function statBand(ids: string[], cols: number, mins?: WidgetMins): { items: Placement[]; nextY: number } {
+function statBand(
+  ids: string[],
+  cols: number,
+  mins?: WidgetMins,
+  wideIds?: ReadonlySet<string>
+): { items: Placement[]; nextY: number } {
   const n = ids.length;
   if (n === 0) return { items: [], nextY: 0 };
   // The widest min among the cards bounds how many fit in one row at ≥ minW each.
@@ -287,10 +301,29 @@ function statBand(ids: string[], cols: number, mins?: WidgetMins): { items: Plac
     const row = ids.slice(start, start + perRow);
     const rowCount = row.length;
     const baseW = Math.floor(cols / rowCount);
-    const extra = cols % rowCount; // the first `extra` cards in this row get +1 col
+    const extra = cols % rowCount; // this many cards in the row get +1 col
+    // WHICH cards get the extra column: by default the first `extra` (row order),
+    // but when `wideIds` is supplied (the strip's wide-content cards: yoy / budget /
+    // the rate cards) the extra goes to THOSE first, so the cards whose headline is
+    // widest get the +1 col and don't truncate their number. Any leftover extra
+    // (more `extra` than wide cards in this row) falls back to the first non-wide
+    // cards in order, so the row still sums to exactly `cols`. PURE.
+    const getsExtra = new Set<number>();
+    if (wideIds && wideIds.size > 0) {
+      const wideCols = row.map((i, c) => (wideIds.has(i) ? c : -1)).filter((c) => c >= 0);
+      for (const c of wideCols) {
+        if (getsExtra.size >= extra) break;
+        getsExtra.add(c);
+      }
+      for (let c = 0; c < rowCount && getsExtra.size < extra; c++) {
+        if (!getsExtra.has(c)) getsExtra.add(c);
+      }
+    } else {
+      for (let c = 0; c < extra; c++) getsExtra.add(c);
+    }
     let x = 0;
     row.forEach((i, col) => {
-      const w = baseW + (col < extra ? 1 : 0);
+      const w = baseW + (getsExtra.has(col) ? 1 : 0);
       items.push(withMins({ i, x, y, w, h: STAT_ROWS }, mins));
       x += w;
     });
@@ -299,19 +332,56 @@ function statBand(ids: string[], cols: number, mins?: WidgetMins): { items: Plac
   return { items, nextY: y };
 }
 
-// Generate the PINNED STRIP's own placements (issue #73 iteration). The strip is
-// an independent 12-col RGL grid of the stat cards, pinned above every page. Its
-// default is today's full-width 8-across band — reusing statBand so it's byte-
-// identical to the stat row the lg default cockpit lays out (widths summing to 12,
-// each STAT_ROWS tall), wrapping to a SECOND row when more cards than fit at ≥
-// minW each (issue #73 fix: 8 cards × minW=2 → max 6 per row → 6 + 2). Each card
-// carries the same content-fit min bounds the registry's defaultSize uses so it
-// can't be dragged (or DEFAULTED) uselessly small. The min lookup is passed in by
-// the component (this module stays pure + registry-free); when supplied, the strip
-// is wrapped to respect minW and each tile is stamped with its min. PURE —
-// unit-tested.
+// (RETIRED, CHANGE 1) `WIDE_STAT_TYPES` used to hand the strip's leftover `+1`
+// columns to the widest-content cards, producing the mixed 4×w=2 + 4×w=1 strip the
+// operator found "unbalanced". The even-strip iteration drops that distribution: the
+// strip is now a FINE 24-col grid where 24 / 8 divides evenly, so every card gets
+// the SAME width (no remainder to hand out). The set is now EMPTY but is still
+// threaded through `generateLg`'s (toggle-off) stat band: it's passed to `statBand`
+// (the lg-cockpit band used only when the strip is toggled OFF), where an empty set
+// means no card is singled out for extra width — every card gets an even fill.
+export const WIDE_STAT_TYPES: ReadonlySet<string> = new Set<string>();
+
+// Lay a list of ids as an EVENLY-spaced single band that fills `cols` exactly: each
+// card gets floor(cols / n) columns, ALL EQUAL, and any remainder (cols % n) is left
+// as a small trailing gap rather than handed to a subset (which would make some
+// cards wider — the "unbalanced" look CHANGE 1 fixes). When `cols` is divisible by
+// `n` (the default 24/8 strip) there is NO remainder, so the row fills edge to edge
+// with every card identical. Cards are clamped UP to the widest minW (so none falls
+// below its floor) — if that forces unequal totals the band still keeps every card
+// the same width (the common, divisible case stays perfectly even). Each tile is
+// stamped with its registry min. PURE.
+function evenBand(
+  ids: string[],
+  cols: number,
+  mins?: WidgetMins
+): { items: Placement[]; nextY: number } {
+  const n = ids.length;
+  if (n === 0) return { items: [], nextY: 0 };
+  // The widest min bounds the smallest equal width we may use (no card below minW).
+  const maxMinW = Math.max(1, ...ids.map((i) => minWOf(i, mins)));
+  // The largest EQUAL width that fits all n cards in one row at ≥ minW each. If the
+  // cards don't all fit one even row at the floor (n*maxMinW > cols), fall back to
+  // the floor width (cards may then exceed `cols` slightly — RGL wraps them, the
+  // documented "fewest even rows" fallback), but EVERY card stays the same width.
+  const fitW = Math.floor(cols / n);
+  const cellW = Math.max(maxMinW, fitW);
+  const items: Placement[] = ids.map((i, idx) =>
+    withMins({ i, x: idx * cellW, y: 0, w: cellW, h: STAT_ROWS }, mins)
+  );
+  return { items, nextY: STAT_ROWS };
+}
+
+// Generate the PINNED STRIP's own placements (issue #73; CHANGE 1 — even strip).
+// The strip is an independent 24-col RGL grid of the stat cards, pinned above every
+// page. Its default is a SINGLE row of EQUAL-WIDTH cards (evenBand): 8 cards on the
+// 24-col band → 3 cols each, all identical, summing to 24 edge to edge — the
+// operator's "evenly spaced" ask (replacing the old mixed w=1/w=2 distribution).
+// Each card carries the registry's content-fit min bounds so it can't be dragged (or
+// DEFAULTED) below its floor. The min lookup is passed in by the component (this
+// module stays pure + registry-free). PURE — unit-tested.
 export function generateStripPlacements(statIds: string[], mins?: WidgetMins): Placement[] {
-  return statBand(statIds, STRIP_COLS, mins).items;
+  return evenBand(statIds, STRIP_COLS, mins).items;
 }
 
 // Generate the lg (12-col) cockpit: stat band on top, then a 2×2 chart GRID
@@ -343,7 +413,7 @@ function generateLg(input: DefaultLayoutInput): Placement[] {
   // fix). Each card gets floor(cols/perRow), the first (cols % perRow) get +1, so
   // a row's widths SUM TO `cols` (fills edge to edge); surplus cards wrap to a
   // second STAT_ROWS-tall row. 8 cards × minW=2 on 12 cols → 6 per row → 6 + 2.
-  const stat = statBand(input.statIds, cols, mins);
+  const stat = statBand(input.statIds, cols, mins, WIDE_STAT_TYPES);
   out.push(...stat.items);
   const afterStats = stat.nextY;
 
@@ -600,7 +670,7 @@ export function placementsEqual(a: Placements, b: Placements): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// No-scroll fit math — replaces ConfigurableChart's FILL_BODY_CLASSES constant.
+// No-scroll fit math — derives the grid rowHeight from the measured chrome.
 // ---------------------------------------------------------------------------
 //
 // THE FORMULA (RFC §3.3). At lg we pin the page to the viewport and want the
@@ -667,11 +737,11 @@ function boxesOverlap(
 // Find a free top-left cell for a new w×h tile on a `cols`-wide grid that already
 // holds `existing` placements, scanning rows top-to-bottom then columns left-to-
 // right (reading order). Returns the first {x, y} where the tile fits without
-// overlapping anything. With FREE PLACEMENT (compactType=null + preventCollision,
-// CHANGE 2) RGL no longer auto-tucks a tile dropped at (0,0), and would REJECT a
-// drop that collides — so an "add widget" must land the tile on an empty patch
-// itself. We always find a slot: a row below every existing tile is guaranteed
-// empty, so the scan terminates there at worst. PURE — hand-calc unit-tested.
+// overlapping anything. RGL runs with compactType="vertical" + preventCollision=
+// false, so a tile dropped onto an occupied spot would shove others around; to add
+// a widget cleanly we instead pre-compute an empty patch and drop it there. We
+// always find a slot: a row below every existing tile is guaranteed empty, so the
+// scan terminates there at worst. PURE — hand-calc unit-tested.
 export function findFreeSlot(
   existing: Placement[],
   size: { w: number; h: number },

@@ -20,6 +20,7 @@
 
 import type { Overview } from '@/components/useDashboardData';
 import type { MonthRow } from '@/lib/chartSpec';
+import type { RateCardMode } from '@/lib/prefs';
 import { dateLabel, estimateTooltip, num, rate, signedPct, usd } from '@/lib/format';
 
 // The exact inputs the stat cards read today. Computed in Dashboard.tsx (the
@@ -32,6 +33,14 @@ export interface StatData {
   gasAllIn: number | null;
   lastRow: MonthRow | undefined;
   currencyDecimals: number;
+  // Which rate the elec/gas rate cards show (compact-stat-cards iteration): the
+  // trailing-12-mo average all-in rate ('avg', the default) or the latest month's
+  // all-in rate ('current'). Flicked per-browser by clicking the card; threaded in
+  // here (like currencyDecimals) so the rate SELECTORS stay pure functions of
+  // StatData. Display-only — it just PICKS between two values already in the bag
+  // (elecAllIn/gasAllIn vs lastRow.elecRateAllIn/gasRateAllIn); no number's source
+  // or meaning changes.
+  rateCardMode: RateCardMode;
 }
 
 // One ⓘ tooltip on a simple card: the text (used for both aria-label + title)
@@ -42,19 +51,27 @@ export interface StatTooltip {
   accent: 'amber' | 'emerald';
 }
 
-// The shape the shared <StatCard> renders for a SIMPLE card. `value`/`sub` are
-// React nodes because a couple of cards interpolate a smaller-unit <span> (e.g.
-// "/kWh", " kg CO₂e") — exactly the markup the old JSX produced, kept byte-for-
-// byte. A pure selector building these uses only React.createElement-free JSX in
-// the renderer; here it returns plain data + the optional tooltip.
+// The shape the shared <StatCard> renders for a SIMPLE card. The compact card body
+// is just the (brief) title + the headline value — the old sub/detail line moved
+// into the ⓘ tooltip (the compact-stat-cards iteration), so a card needs only its
+// title + headline of height. Every simple card now carries a `tooltip` (no info is
+// lost — it's relocated). `value` is either a plain string or { lead, unit } when
+// the card shows a smaller trailing unit span (e.g. "/kWh", " kg") — the renderer
+// applies the `text-sm text-slate-500` unit styling.
 export interface StatCardModel {
   title: string;
   // The main stat. Either a plain string, or { lead, unit } when the card shows
   // a smaller trailing unit span (rate + carbon cards) — the renderer applies
-  // the `text-sm text-slate-500` unit styling so the markup matches today.
+  // the `text-sm text-slate-500` unit styling.
   value: string | { lead: string; unit: string };
-  sub: string;
-  tooltip?: StatTooltip;
+  tooltip: StatTooltip;
+  // Optional FLICK affordance (compact-stat-cards iteration): the rate cards toggle
+  // their headline between the trailing-12-mo average and the current rate. When
+  // present, the card renders a small clickable label (e.g. "12-mo avg" / "current")
+  // and the renderer wires the click/Enter/Space to toggle the rateCardMode pref.
+  // PURE selectors only emit the LABEL string here (which mode is showing); the
+  // toggle callback is supplied by the renderer/host, not the selector.
+  flick?: { label: string };
 }
 
 // vs-last-year selector output (issue #47). Pure: the two per-fuel normalized
@@ -105,6 +122,46 @@ const yoyFuels = (ov: Overview | null) => {
   return c ? [c.elec, c.gas].filter((r) => r != null) : [];
 };
 
+// Human label for each rate-card mode — shown as the card's flick affordance and
+// woven into the ⓘ tooltip so the two modes are discoverable.
+export const RATE_MODE_LABEL: Record<RateCardMode, string> = {
+  avg: 'avg',
+  current: 'now',
+};
+
+// PURE rate-card model builder shared by elecRate + gasRate. Picks the headline
+// value by mode (trailing-12-mo average vs the latest month's all-in rate — both
+// already in StatData, this only SELECTS one; no number changes meaning), formats
+// it at `dp` decimals so it fits a w=1 tile, and folds BOTH modes' values + the
+// supply-part detail into the ⓘ tooltip. Emits the flick label so the renderer can
+// show the affordance and wire the toggle. Hand-calc unit-tested.
+function rateCard(o: {
+  title: string;
+  unit: string;
+  dp: number;
+  avg: number | null;
+  current: number | null;
+  supply: number | null;
+  fuel: string;
+  mode: RateCardMode;
+}): StatCardModel {
+  const shown = o.mode === 'current' ? o.current : o.avg;
+  return {
+    title: o.title,
+    value: { lead: rate(shown, o.dp), unit: o.unit },
+    flick: { label: RATE_MODE_LABEL[o.mode] },
+    tooltip: {
+      text: `Full all-in ${o.fuel} price (supply + delivery). Showing the ${
+        o.mode === 'current' ? 'CURRENT (latest month)' : '12-MONTH AVERAGE'
+      } rate — click the card to flick between them. 12-mo average ${rate(o.avg, o.dp)}${o.unit}; current ${rate(
+        o.current,
+        o.dp
+      )}${o.unit}. The supply part of your latest bill is ${rate(o.supply, o.dp)}${o.unit}.`,
+      accent: 'amber',
+    },
+  };
+}
+
 // Discriminated StatSpec. `kind:'simple'` carries the value-selector → a
 // StatCardModel; the bespoke kinds carry their own pure selector. Every spec has
 // a stable id (its registry key) and an isVisible predicate mirroring today's
@@ -137,73 +194,98 @@ export const STAT_SPECS: StatSpec[] = [
     id: 'latestBill',
     kind: 'simple',
     isVisible: () => true,
+    // Compact card: title + the amount only; the statement date moved to the ⓘ.
     select: ({ ov, currencyDecimals: dp }) => ({
       title: 'Latest bill',
       value: usd(ov?.latestBill?.totalDueAmount, dp),
-      sub: dateLabel(ov?.latestBill?.statementDate),
+      tooltip: { text: `Amount due on your latest statement, dated ${dateLabel(ov?.latestBill?.statementDate)}.`, accent: 'amber' },
     }),
   },
   {
     id: 'lifetimeSpend',
     kind: 'simple',
     isVisible: () => true,
+    // "across N bills" moved to the ⓘ.
     select: ({ ov }) => ({
-      title: 'Lifetime spend',
+      title: 'Lifetime',
       value: usd(ov?.lifetimeSpend, 0),
-      sub: `across ${num(ov?.billCount)} bills`,
+      tooltip: { text: `Total spent across all ${num(ov?.billCount)} bills on record.`, accent: 'amber' },
     }),
   },
   {
     id: 'elecRate',
+    // Electricity all-in rate. Flicks between the trailing-12-mo average (default)
+    // and the current (latest-month) all-in rate; both already live in StatData, the
+    // mode just PICKS which the headline shows. 2-dp ($0.22/kWh) so it fits w=1; the
+    // supply-part detail + the inactive mode's value live in the ⓘ tooltip.
     kind: 'simple',
     isVisible: () => true,
-    select: ({ elecAllIn, lastRow }) => ({
-      title: 'Electric rate',
-      value: { lead: rate(elecAllIn), unit: '/kWh' },
-      sub: `full price, last 12 mo · supply part ${rate(lastRow?.elecRateSupply)}`,
-    }),
+    select: ({ elecAllIn, lastRow, rateCardMode }) =>
+      rateCard({
+        // Brief title ("Elec", not "Elec rate") so the w=1 tile's title row also fits
+        // the flick affordance (⇄ + mode) without truncating; the $/kWh unit + the ⓘ
+        // ("Full all-in electricity price") keep it unambiguous it's a rate.
+        title: 'Elec',
+        unit: '/kWh',
+        dp: 2,
+        avg: elecAllIn,
+        current: lastRow?.elecRateAllIn ?? null,
+        supply: lastRow?.elecRateSupply ?? null,
+        fuel: 'electricity',
+        mode: rateCardMode,
+      }),
   },
   {
     id: 'gasRate',
+    // Gas all-in rate. Same flick (12-mo avg ↔ current); 2-dp $/therm so it fits w=1.
     kind: 'simple',
     isVisible: () => true,
-    select: ({ gasAllIn, lastRow }) => ({
-      title: 'Gas rate',
-      value: { lead: rate(gasAllIn, 2), unit: '/therm' },
-      sub: `full price, last 12 mo · supply part ${rate(lastRow?.gasRateSupply, 2)}`,
-    }),
+    select: ({ gasAllIn, lastRow, rateCardMode }) =>
+      rateCard({
+        // Brief title ("Gas", not "Gas rate") — same w=1 title-row fit reasoning as
+        // the elec card; the $/therm unit + the ⓘ disambiguate it as a rate.
+        title: 'Gas',
+        unit: '/therm',
+        dp: 2,
+        avg: gasAllIn,
+        current: lastRow?.gasRateAllIn ?? null,
+        supply: lastRow?.gasRateSupply ?? null,
+        fuel: 'gas',
+        mode: rateCardMode,
+      }),
   },
   {
-    // Compact estimate card (issue #38): "Est. next bill", "~$X" and the short
-    // range; the verbose basis + disclaimer live behind the ⓘ tooltip.
+    // Compact estimate card (issue #38): "Est. next", "~$X"; the low–high range +
+    // the verbose basis + disclaimer all live behind the ⓘ tooltip.
     id: 'nextBillEstimate',
     kind: 'simple',
     isVisible: ({ ov }) => !!ov?.nextBillEstimate,
     select: ({ ov, currencyDecimals: dp }) => {
       const e = ov!.nextBillEstimate!;
       return {
-        title: 'Est. next bill',
+        title: 'Est. next',
         value: `~${usd(e.point, dp)}`,
-        sub: `${usd(e.low, dp)}–${usd(e.high, dp)}`,
-        tooltip: { text: estimateTooltip(e.basis), accent: 'amber' },
+        tooltip: {
+          text: `Likely range ${usd(e.low, dp)}–${usd(e.high, dp)}. ${estimateTooltip(e.basis)}`,
+          accent: 'amber',
+        },
       };
     },
   },
   {
-    // Carbon-footprint estimate (issue #49): trailing-12 combined CO2e in kg,
-    // with a friendly equivalence and the location-based-ESTIMATE caveat behind
-    // the ⓘ tooltip. Never a cost number.
+    // Carbon-footprint estimate (issue #49): trailing-12 combined CO2e in kg. The
+    // friendly equivalences (gal gas / tree-yrs) + the location-based-ESTIMATE
+    // caveat live behind the ⓘ tooltip. Never a cost number.
     id: 'emissions',
     kind: 'simple',
     isVisible: ({ ov }) => !!ov?.emissions,
     select: ({ ov }) => {
       const e = ov!.emissions!;
       return {
-        title: 'Carbon (12 mo)',
-        value: { lead: `~${num(Math.round(e.totalKg))}`, unit: ' kg CO₂e' },
-        sub: `≈ ${num(Math.round(e.gallonsGasoline))} gal gas · ${num(Math.round(e.treeYears))} tree-yrs · estimate`,
+        title: 'Carbon',
+        value: { lead: `~${num(Math.round(e.totalKg))}`, unit: ' kg' },
         tooltip: {
-          text: "An estimate of the carbon emissions from your energy use, based on your electricity and gas and a regional grid average. It reflects the typical mix of power in your area, not your specific plan. You can set your own electricity factor in Settings if you're on a green plan.",
+          text: `~${num(Math.round(e.totalKg))} kg CO₂e over the last 12 months — roughly ${num(Math.round(e.gallonsGasoline))} gal of gasoline, or ${num(Math.round(e.treeYears))} tree-years to offset. An estimate of the carbon emissions from your energy use, based on your electricity and gas and a regional grid average. It reflects the typical mix of power in your area, not your specific plan. You can set your own electricity factor in Settings if you're on a green plan.`,
           accent: 'emerald',
         },
       };
@@ -262,7 +344,7 @@ export const STAT_SPECS: StatSpec[] = [
         spentPct,
         remPct,
         targetPct,
-        tooltip: `You've spent ${usd(spent, 0)} of your ${usd(target, 0)} target for ${fromY} so far, and we expect about ${usd(projected, 0)} by year's end (range ${usd(projectedLow, 0)}–${usd(projectedHigh, 0)}). "Spent" adds up what you were actually charged for energy on this year's bills; the rest of the year is estimated. On-track vs. over budget accounts for winter naturally costing more. Click for the month-by-month breakdown, or set your target in Settings. Not a real charge.`,
+        tooltip: `Projected ${usd(projected, 0)} vs your ${usd(target, 0)} target for ${fromY} — ${statusLabel}. You've spent ${usd(spent, 0)} so far, and we expect about ${usd(projected, 0)} by year's end (range ${usd(projectedLow, 0)}–${usd(projectedHigh, 0)}). "Spent" adds up what you were actually charged for energy on this year's bills; the rest of the year is estimated. On-track vs. over budget accounts for winter naturally costing more. Click for the month-by-month breakdown, or set your target in Settings. Not a real charge.`,
       };
     },
   },
