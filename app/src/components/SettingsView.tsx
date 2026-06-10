@@ -334,7 +334,11 @@ export function SettingsView() {
       searchText: 'upcoming scheduled actions next 7 days timeline projection full check fetch pdf interval weather notifications planned',
       node: (
         <div key="upcoming-actions" className="border-t border-slate-800 pt-4">
-          <h3 className="mb-3 text-sm font-semibold text-slate-300">Upcoming actions (next 7 days)</h3>
+          <h3 className="mb-1 text-sm font-semibold text-slate-300">Upcoming actions (next 7 days)</h3>
+          <p className="mb-3 text-xs text-slate-500">
+            Projected from each task’s cadence. A “—” means no fixed time — that task runs in
+            response to a full check (see Details).
+          </p>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>

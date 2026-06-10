@@ -90,17 +90,21 @@ function nextFire(task: ProjectionTaskInput, virtualNow: Date): Date | null {
 }
 
 // Honest one-line annotation for a reactive/inactive task.
+// User-facing trigger text for a task that has no fixed time. Say WHAT KICKS IT
+// OFF rather than jargon ("reactive"/"inactive") — these run in response to a
+// full check, not on a schedule.
 function inactiveReason(kind: TaskKind): string {
   switch (kind) {
     case 'weather-sync':
+      return 'Runs right after each full check';
     case 'notify-sync':
-      return 'runs after the next full check (reactive)';
+      return 'Runs right after each full check (new-bill / anomaly alerts)';
     case 'pdf-fetch':
-      return 'inactive — re-armed by the next full check';
+      return 'Runs when a new bill is found but its PDF hasn’t published yet';
     case 'interval-pull':
-      return 'no AMI meter — inactive';
+      return 'No smart meter on this account — won’t run';
     default:
-      return 'inactive';
+      return 'Triggered by a full check';
   }
 }
 

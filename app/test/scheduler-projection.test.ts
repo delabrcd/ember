@@ -117,7 +117,7 @@ describe('projectTask — reactive / inactive', () => {
     );
     expect(out).toHaveLength(1);
     expect(out[0].at).toBeNull(); // reactive: no bogus "just now" timestamp
-    expect(out[0].reason).toMatch(/reactive/);
+    expect(out[0].reason).toMatch(/after each full check/i);
   });
 
   it('notify-sync (nextRunAt=null) yields one reactive annotation', () => {
@@ -127,7 +127,7 @@ describe('projectTask — reactive / inactive', () => {
       7
     );
     expect(out).toHaveLength(1);
-    expect(out[0].reason).toMatch(/reactive/);
+    expect(out[0].reason).toMatch(/after each full check/i);
   });
 
   it('a disabled task yields one inactive annotation with NO time', () => {
@@ -147,7 +147,7 @@ describe('projectTask — reactive / inactive', () => {
       now,
       7
     );
-    expect(out[0].reason).toMatch(/no AMI meter/);
+    expect(out[0].reason).toMatch(/smart meter/i);
   });
 });
 
