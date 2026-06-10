@@ -34,11 +34,18 @@ export type ProfileBucket = {
 // are tolerated. `intervalSeconds` is carried for completeness/symmetry with the
 // DB row; the hourly-bucket shaping keys off the local clock time, not the read
 // length, so the shaper does not currently weight by duration.
+// `fuelType` is optional here so the base type stays lean; reconcileToHourly
+// accepts a superset that carries it (ReconcileRow) and groups by (fuelType, hour).
 export type IntervalProfileRow = {
   intervalStart: Date | string;
   intervalSeconds: number;
   quantity: number;
+  fuelType?: string;
 };
+
+// Extended row type accepted by reconcileToHourly — a strict superset of
+// IntervalProfileRow so averageDayProfile's signature is unchanged.
+type ReconcileRow = IntervalProfileRow & { fuelType?: string };
 
 export type AverageDayProfileOpts = {
   // The IANA timezone the time-of-day buckets are computed in. Defaults to the
@@ -162,4 +169,90 @@ export function averageDayProfile(
         count: acc.count,
       };
     });
+}
+
+// ---------------------------------------------------------------------------
+// reconcileToHourly — deduplicate dual-grain interval rows (issue #121)
+// ---------------------------------------------------------------------------
+// The DB may contain BOTH 15-min rows (intervalSeconds=900) AND hourly rows
+// (intervalSeconds=3600) for the same fuel+hour. Feeding both grains straight
+// to averageDayProfile would double-count because it treats every row as an
+// independent reading. This helper collapses mixed-grain input to one row per
+// (fuelType, UTC-hour) before handing off to the profiler.
+//
+// COLLAPSE RULES (non-destructive — we never delete/override either grain):
+//   • EXACTLY four 900-s slots in the hour? → SUM them → one 3600-s row
+//     (15-min wins: four complete slots are more accurate than the API hourly).
+//   • An hourly (3600-s) row exists but 15-min is absent or incomplete? → use
+//     the hourly row as-is.
+//   • Partial 15-min (1–3 slots) and no hourly row? → SKIP that hour
+//     (incomplete → would underreport usage).
+//   • Never emit both grains for the same hour; never sum across grains.
+//
+// WHY UTC HOUR: America/New_York is always a whole-hour UTC offset, so the
+// four 15-min slots of a local clock-hour all share the same UTC hour. Grouping
+// by `Math.floor(utcMs / 3_600_000)` is therefore equivalent to grouping by the
+// local clock-hour and is DST-safe.
+//
+// Input type is the same superset (ReconcileRow ⊇ IntervalProfileRow) so callers
+// can pass widget rows (which carry fuelType) without a cast. Tolerates
+// string/Date intervalStart and drops rows with non-finite quantity. Returns rows
+// sorted ascending by intervalStart. PURE — no React/DOM/DB.
+export function reconcileToHourly(rows: ReconcileRow[]): IntervalProfileRow[] {
+  // Group by (fuelType, UTC-hour-epoch). The key is `"${fuelType}|${hourEpoch}"`.
+  type Slot = { slot900: number[]; row3600: ReconcileRow | null; hourEpoch: number; fuelType: string };
+  const groups = new Map<string, Slot>();
+
+  for (const row of rows) {
+    const q = Number(row.quantity);
+    if (!Number.isFinite(q)) continue;
+    const instant = row.intervalStart instanceof Date ? row.intervalStart : new Date(row.intervalStart as string);
+    const t = instant.getTime();
+    if (!Number.isFinite(t)) continue;
+
+    const hourEpoch = Math.floor(t / 3_600_000); // UTC-hour bucket
+    const fuel = row.fuelType ?? '';
+    const key = `${fuel}|${hourEpoch}`;
+
+    let g = groups.get(key);
+    if (!g) {
+      g = { slot900: [], row3600: null, hourEpoch, fuelType: fuel };
+      groups.set(key, g);
+    }
+
+    if (row.intervalSeconds === 900) {
+      g.slot900.push(q);
+    } else if (row.intervalSeconds === 3600) {
+      // Keep the first (or only) hourly row; duplicates shouldn't exist but if
+      // they do, the first one wins (stable, deterministic).
+      if (g.row3600 === null) g.row3600 = row;
+    }
+    // Any other intervalSeconds is ignored (future-proof).
+  }
+
+  const out: IntervalProfileRow[] = [];
+
+  for (const g of groups.values()) {
+    const hourStart = new Date(g.hourEpoch * 3_600_000);
+
+    if (g.slot900.length === 4) {
+      // Complete 15-min hour → sum the four slots (their sum equals the hour's usage).
+      const quantity = g.slot900.reduce((acc, v) => acc + v, 0);
+      out.push({ fuelType: g.fuelType, intervalStart: hourStart, intervalSeconds: 3600, quantity });
+    } else if (g.row3600 !== null) {
+      // No complete 15-min set → fall back to the hourly row.
+      out.push({
+        fuelType: g.fuelType,
+        intervalStart: hourStart,
+        intervalSeconds: 3600,
+        quantity: Number(g.row3600.quantity),
+      });
+    }
+    // else: partial 15-min slots + no hourly → skip (incomplete hour would underreport).
+  }
+
+  // Sort ascending by intervalStart so the profiler receives chronological input.
+  out.sort((a, b) => (a.intervalStart as Date).getTime() - (b.intervalStart as Date).getTime());
+
+  return out;
 }

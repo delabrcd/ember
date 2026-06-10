@@ -23,7 +23,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { averageDayProfile, type IntervalProfileRow } from '@/lib/intervalProfile';
+import { averageDayProfile, reconcileToHourly, type IntervalProfileRow } from '@/lib/intervalProfile';
 
 // The dashboard's dark-slate theme + the elec amber / gas blue tokens (mirrors
 // chartSpec.ts and ConfigurableChart so the widget matches the surrounding charts).
@@ -108,7 +108,16 @@ export function IntervalLoadShape({ accountId }: { accountId?: number | null }) 
     // as 0 and fill in later, which would bias the "typical day" curve down. A
     // typical-day profile doesn't need the last couple of days anyway.
     const before = new Date(Date.now() - SETTLE_HOURS * 3600_000);
-    return averageDayProfile(state.rows, { before }).map((b) => ({ ...b, base: b.min, band: b.max - b.min }));
+    // Reconcile dual-grain input (15-min + hourly may coexist for ELECTRIC) before
+    // profiling. A complete four-slot 15-min hour wins over its hourly counterpart;
+    // an incomplete 15-min hour without a paired hourly row is dropped. This ensures
+    // no double-count and no partial-hour underreporting. The `before` cutoff is
+    // applied afterwards by averageDayProfile (order matters: reconcile → then cut).
+    return averageDayProfile(reconcileToHourly(state.rows), { before }).map((b) => ({
+      ...b,
+      base: b.min,
+      band: b.max - b.min,
+    }));
   }, [state]);
 
   const loading = state === undefined;
