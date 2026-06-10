@@ -19,6 +19,7 @@ import { shouldSkipScheduled } from '@/lib/ngrid/loginStatus';
 import { seedScheduledTasks } from '@/lib/scheduler/seed';
 import { runWithScrapeRun } from '@/lib/scheduler/progress';
 import { HANDLERS } from '@/lib/scheduler/handlers';
+import { TASK_DEFS } from '@/lib/scheduler/tasks';
 import {
   groupByLogin,
   needsFreshInstall,
@@ -307,7 +308,7 @@ export async function runTick(
 
   if (due.length === 0) return { ran: false, reason: 'not-due' };
 
-  const { portal, nonPortal } = splitDue(due, (k) => HANDLERS[k].portal);
+  const { portal, nonPortal } = splitDue(due, (k) => TASK_DEFS[k].portal);
 
   // Throttle floor: if any portal task is due and the most recent SUCCESS run is
   // within MIN_SCHEDULED_GAP_MS, DEFER the portal tasks (push nextRunAt forward,

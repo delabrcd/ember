@@ -5,13 +5,14 @@
 // each fire until now + horizonDays. Reactive/inactive tasks (disabled or
 // nextRunAt=null) emit a single honest annotation, not a periodic series.
 //
-// Hermetic: NO prisma/browser imports. Reuses the cadence fns from ./cadence.
+// Hermetic: NO prisma/browser imports. All per-task metadata (cadence, trigger/
+// collapsed wording, label) comes from the PURE descriptor registry in ./tasks.
 import type { TaskKind } from './types';
-import {
-  computeFullScrapeNextRun,
-  computePdfFetchNextRun,
-  computeIntervalNextRun,
-} from './cadence';
+import { TASK_DEFS } from './tasks';
+
+// Re-export so existing importers of taskKindLabel from this module keep working
+// (the canonical source is now the registry).
+export { taskKindLabel } from './tasks';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -32,25 +33,6 @@ export interface ProjectedAction {
   reason: string;
 }
 
-// Human label for a task kind, for the "upcoming actions" UI. Pure + exhaustive
-// over TaskKind (the default keeps it total if a kind is ever added).
-export function taskKindLabel(kind: TaskKind): string {
-  switch (kind) {
-    case 'full-scrape':
-      return 'Full check';
-    case 'pdf-fetch':
-      return 'Fetch bill PDF';
-    case 'interval-pull':
-      return 'Pull interval usage';
-    case 'weather-sync':
-      return 'Sync weather';
-    case 'notify-sync':
-      return 'Send notifications';
-    default:
-      return kind;
-  }
-}
-
 export interface ProjectionTaskInput {
   kind: TaskKind;
   enabled: boolean;
@@ -64,65 +46,11 @@ export interface ProjectionTaskInput {
   };
 }
 
-// Advance a task's virtual clock by one fire using its own cadence fn with the
-// held-constant facts. Returns the next fire instant, or null to stop (the
-// cadence self-deactivated).
+// Advance a task's virtual clock by one fire using its own cadence fn (from the
+// registry) with the held-constant facts. Returns the next fire instant, or null
+// to stop (the cadence self-deactivated / the task is reactive).
 function nextFire(task: ProjectionTaskInput, virtualNow: Date): Date | null {
-  const f = task.facts;
-  switch (task.kind) {
-    case 'full-scrape':
-      return computeFullScrapeNextRun(virtualNow, {
-        statementDates: f.statementDates ?? [],
-        hasIntervalData: f.hasIntervalData ?? false,
-        hasRecentPendingPdf: f.hasRecentPendingPdf ?? false,
-      });
-    case 'pdf-fetch':
-      return computePdfFetchNextRun(virtualNow, {
-        hasRecentPendingPdf: f.hasRecentPendingPdf ?? false,
-      });
-    case 'interval-pull':
-      return computeIntervalNextRun(virtualNow, { hasAmiMeter: f.hasAmiMeter ?? false });
-    // weather-sync / notify-sync are reactive; they have no periodic cadence and
-    // never simulate forward (handled by the !enabled/null branch in projectTask).
-    default:
-      return null;
-  }
-}
-
-// Honest one-line annotation for a reactive/inactive task.
-// User-facing trigger text for a task that has no fixed time. Say WHAT KICKS IT
-// OFF rather than jargon ("reactive"/"inactive") — these run in response to a
-// full check, not on a schedule.
-function inactiveReason(kind: TaskKind): string {
-  switch (kind) {
-    case 'weather-sync':
-      return 'Runs right after each full check';
-    case 'notify-sync':
-      return 'Runs right after each full check (new-bill / anomaly alerts)';
-    case 'pdf-fetch':
-      return 'Runs when a new bill is found but its PDF hasn’t published yet';
-    case 'interval-pull':
-      return 'No smart meter on this account — won’t run';
-    default:
-      return 'Triggered by a full check';
-  }
-}
-
-// Reason for a collapsed tight-cadence series. `deltaMs` is the (near-constant)
-// gap between consecutive fires, used to phrase the default cadence honestly.
-function collapsedReason(kind: TaskKind, deltaMs: number): string {
-  switch (kind) {
-    case 'pdf-fetch':
-      return 'every ~6h until the PDF publishes, then relaxes';
-    case 'interval-pull':
-      return '~daily while AMI interval data is captured';
-    default: {
-      const hours = deltaMs / (60 * 60 * 1000);
-      // ≥~20h reads as "about daily"; otherwise quote the rounded hour cadence.
-      if (hours >= 20) return 'recurring about daily';
-      return `recurring about every ${Math.round(hours)}h`;
-    }
-  }
+  return TASK_DEFS[task.kind].cadence(virtualNow, task.facts);
 }
 
 export function projectTask(
@@ -133,7 +61,7 @@ export function projectTask(
   // Reactive / inactive: a single annotated entry with NO time, never a periodic
   // series. (Defaulting `at` to `now` here would render a bogus "just now".)
   if (!task.enabled || task.nextRunAt == null) {
-    return [{ kind: task.kind, at: null, reason: inactiveReason(task.kind) }];
+    return [{ kind: task.kind, at: null, reason: TASK_DEFS[task.kind].inactiveReason }];
   }
 
   const horizonEnd = now.getTime() + horizonDays * DAY_MS;
@@ -168,7 +96,9 @@ export function projectTask(
         return Math.abs(delta - firstDelta) <= firstDelta * COLLAPSE_DELTA_TOLERANCE;
       });
     if (roughlyConstant) {
-      return [{ kind: task.kind, at: fires[0], reason: collapsedReason(task.kind, firstDelta) }];
+      return [
+        { kind: task.kind, at: fires[0], reason: TASK_DEFS[task.kind].collapsedReason(firstDelta) },
+      ];
     }
   }
 

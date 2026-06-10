@@ -4,6 +4,7 @@
 // detection, login grouping, portal ordering) without the prisma singleton or a
 // browser. runner.ts holds the impure orchestration.
 import type { ScheduledTaskRow, TaskKind } from './types';
+import { TASK_DEFS } from './tasks';
 
 // Don't run portal tasks more often than this (mirrors run.ts:17). The runner
 // enforces it as a per-tick floor on portal tasks; non-portal exempt.
@@ -59,14 +60,8 @@ export function groupByLogin(
 }
 
 // Fixed run order for a login's portal handlers (headers warm): full-scrape →
-// interval-pull → pdf-fetch. Non-portal kinds sort last (never grouped here).
-const PORTAL_ORDER: Record<TaskKind, number> = {
-  'full-scrape': 0,
-  'interval-pull': 1,
-  'pdf-fetch': 2,
-  'weather-sync': 9,
-  'notify-sync': 9,
-};
+// interval-pull → pdf-fetch. Sourced from the registry's `order` (the authoritative
+// source); non-portal kinds carry a higher order and sort last (never grouped here).
 export function orderPortalTasks(tasks: ScheduledTaskRow[]): ScheduledTaskRow[] {
-  return [...tasks].sort((a, b) => (PORTAL_ORDER[a.kind] ?? 9) - (PORTAL_ORDER[b.kind] ?? 9));
+  return [...tasks].sort((a, b) => TASK_DEFS[a.kind].order - TASK_DEFS[b.kind].order);
 }

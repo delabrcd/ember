@@ -6,7 +6,7 @@ import { usePrefs } from '@/lib/prefs';
 import { resolveSelectedAccountId, type AccountSummary } from '@/lib/accountSwitcher';
 import { resolveRange, ymOfDate, ymdToYm } from '@/lib/range';
 import { dateLabel, relativeFromNow } from '@/lib/format';
-import { taskKindLabel } from '@/lib/scheduler/projection';
+import { taskKindLabel } from '@/lib/scheduler/tasks';
 import type { TaskKind } from '@/lib/scheduler/types';
 import { matchesSearch } from '@/lib/settingsSearch';
 import { RefreshButton } from './RefreshButton';

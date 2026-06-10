@@ -5,7 +5,16 @@ import {
   taskKindLabel,
   type ProjectionTaskInput,
 } from '../src/lib/scheduler/projection';
+import { TASK_DEFS } from '../src/lib/scheduler/tasks';
 import type { TaskKind } from '../src/lib/scheduler/types';
+
+const ALL_KINDS: TaskKind[] = [
+  'full-scrape',
+  'pdf-fetch',
+  'interval-pull',
+  'weather-sync',
+  'notify-sync',
+];
 
 const D = (s: string) => new Date(s + 'T00:00:00Z');
 const HOUR = 60 * 60 * 1000;
@@ -225,5 +234,38 @@ describe('taskKindLabel', () => {
     for (const [kind, label] of Object.entries(labels)) {
       expect(taskKindLabel(kind as TaskKind)).toBe(label);
     }
+  });
+});
+
+describe('TASK_DEFS registry', () => {
+  it('has an entry for every TaskKind (exhaustive)', () => {
+    for (const kind of ALL_KINDS) {
+      const def = TASK_DEFS[kind];
+      expect(def).toBeDefined();
+      expect(def.kind).toBe(kind); // self-consistent key
+      expect(def.label.length).toBeGreaterThan(0);
+    }
+    // No stray keys beyond the known kinds.
+    expect(Object.keys(TASK_DEFS).sort()).toEqual([...ALL_KINDS].sort());
+  });
+
+  it('gives portal tasks distinct run orders (deterministic per-login ordering)', () => {
+    const portalOrders = ALL_KINDS.filter((k) => TASK_DEFS[k].portal).map((k) => TASK_DEFS[k].order);
+    expect(new Set(portalOrders).size).toBe(portalOrders.length);
+  });
+
+  it('orders portal tasks below non-portal tasks (portal run first within a login)', () => {
+    const maxPortal = Math.max(...ALL_KINDS.filter((k) => TASK_DEFS[k].portal).map((k) => TASK_DEFS[k].order));
+    const minNonPortal = Math.min(
+      ...ALL_KINDS.filter((k) => !TASK_DEFS[k].portal).map((k) => TASK_DEFS[k].order)
+    );
+    expect(maxPortal).toBeLessThan(minNonPortal);
+  });
+
+  it('reproduces the runner portal order full-scrape → interval-pull → pdf-fetch', () => {
+    const portalKinds = ALL_KINDS.filter((k) => TASK_DEFS[k].portal).sort(
+      (a, b) => TASK_DEFS[a].order - TASK_DEFS[b].order
+    );
+    expect(portalKinds).toEqual(['full-scrape', 'interval-pull', 'pdf-fetch']);
   });
 });
