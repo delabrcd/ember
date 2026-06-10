@@ -29,6 +29,10 @@ import { averageDayProfile, type IntervalProfileRow } from '@/lib/intervalProfil
 // chartSpec.ts and ConfigurableChart so the widget matches the surrounding charts).
 const ELEC = '#f59e0b';
 const GAS = '#38bdf8';
+// AMI meters lag ~1–2 days (the freshest hours read 0, then fill in). Exclude the
+// last SETTLE_HOURS from the average-day profile so those provisional zeros don't
+// bias the curve down. 48h covers the typical lag with margin.
+const SETTLE_HOURS = 48;
 const tooltipStyle = { backgroundColor: '#0f172a', border: '1px solid #1e293b', borderRadius: 12, fontSize: 12 } as const;
 const axisStyle = { stroke: '#475569', fontSize: 11 } as const;
 
@@ -100,7 +104,11 @@ export function IntervalLoadShape({ accountId }: { accountId?: number | null }) 
   // background. Memoized on the loaded rows so a resize doesn't re-bucket.
   const data = useMemo(() => {
     if (!state || 'error' in state) return [];
-    return averageDayProfile(state.rows).map((b) => ({ ...b, base: b.min, band: b.max - b.min }));
+    // Exclude the unsettled tail (last ~48h): AMI meters report the freshest hours
+    // as 0 and fill in later, which would bias the "typical day" curve down. A
+    // typical-day profile doesn't need the last couple of days anyway.
+    const before = new Date(Date.now() - SETTLE_HOURS * 3600_000);
+    return averageDayProfile(state.rows, { before }).map((b) => ({ ...b, base: b.min, band: b.max - b.min }));
   }, [state]);
 
   const loading = state === undefined;

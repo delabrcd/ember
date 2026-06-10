@@ -49,6 +49,13 @@ export type AverageDayProfileOpts = {
   // electric and hourly gas (see file header). Sub-hour values (e.g. 15) bucket
   // electric finer; must divide evenly into the day to tile it cleanly.
   bucketMinutes?: number;
+  // Exclude reads at/after this instant from the average — the UNSETTLED TAIL.
+  // AMI meters lag ~1–2 days and report the freshest hours as 0, then fill in, so
+  // including them biases the "typical day" curve DOWN (~10%+ on a short window).
+  // The widget passes `now − ~48h`; a typical-day profile doesn't need the last
+  // couple of days anyway. Omitted = include all reads. PURE (caller supplies the
+  // instant; the shaper stays clock-free).
+  before?: Date;
 };
 
 const DEFAULT_TZ = 'America/New_York';
@@ -114,6 +121,7 @@ export function averageDayProfile(
   const bucketMinutes =
     opts.bucketMinutes && opts.bucketMinutes > 0 ? Math.floor(opts.bucketMinutes) : DEFAULT_BUCKET_MINUTES;
   const bucketCount = Math.max(1, Math.ceil(MINUTES_PER_DAY / bucketMinutes));
+  const beforeMs = opts.before instanceof Date && Number.isFinite(opts.before.getTime()) ? opts.before.getTime() : null;
 
   // Accumulator per bucket index: running sum/count + min/max, only materialized
   // for buckets that receive a read (so we can drop empty buckets at the end).
@@ -124,6 +132,7 @@ export function averageDayProfile(
     const q = Number(row.quantity);
     if (!Number.isFinite(q)) continue;
     const instant = row.intervalStart instanceof Date ? row.intervalStart : new Date(row.intervalStart);
+    if (beforeMs != null && instant.getTime() >= beforeMs) continue; // drop the unsettled tail
     const mod = localMinuteOfDay(instant, tz);
     if (mod == null) continue;
     const idx = Math.min(bucketCount - 1, Math.floor(mod / bucketMinutes));

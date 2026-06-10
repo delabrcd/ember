@@ -93,4 +93,19 @@ describe('averageDayProfile (hand-calculated)', () => {
   it('returns [] for empty input', () => {
     expect(averageDayProfile([], { tz: TZ })).toEqual([]);
   });
+
+  it('excludes the unsettled tail (reads at/after `before`) so lagged zeros do not bias the mean', () => {
+    // Same local hour across two days: a settled real reading and an unsettled 0.
+    const rows: IntervalProfileRow[] = [
+      { intervalStart: '2026-06-05T14:00:00-04:00', intervalSeconds: 3600, quantity: 2 }, // settled
+      { intervalStart: '2026-06-09T14:00:00-04:00', intervalSeconds: 3600, quantity: 0 }, // lagged 0
+    ];
+    // Without a cutoff the 0 drags the 14:00 mean to 1.
+    expect(averageDayProfile(rows, { tz: TZ })[0]).toMatchObject({ label: '14:00', mean: 1, count: 2 });
+    // With `before` set before the lagged read, only the real 2 counts.
+    const before = new Date('2026-06-08T00:00:00Z');
+    const out = averageDayProfile(rows, { tz: TZ, before });
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ label: '14:00', mean: 2, count: 1 });
+  });
 });
