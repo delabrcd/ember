@@ -134,42 +134,38 @@ export async function persist(result: CollectResult): Promise<PersistSummary> {
 
   // Smart-meter AMI interval reads (issue #76). The windowed tail OVERLAPS what we
   // already have on purpose: AMI meters lag ~1–2 days and first report the freshest
-  // hours as 0 / partial, then fill in the real value, so a re-scrape must CORRECT
-  // those hours. We therefore UPSERT on the [accountId, fuelType, intervalStart,
-  // intervalSeconds] unique key — updating quantity/unit/source — rather than
-  // skip-duplicates (which would freeze a stale 0 forever). Chunked in a transaction
-  // to keep round-trips bounded. PURELY additive — never touches the monthly
-  // Usage/Cost logic or /api/verify.
+  // hours as 0, then fill in the real value, so a re-scrape must be able to CORRECT
+  // those hours. But we must NOT trust the API blindly: if it ever changes, glitches,
+  // or returns 0/garbage for an hour we already have a GOOD reading for, an
+  // unconditional upsert would clobber real history. So this is a CONDITIONAL,
+  // FILL-ONLY upsert: insert new rows, and on conflict only overwrite when the stored
+  // value is a provisional 0 AND the incoming value is real (non-zero). An
+  // established non-zero reading is effectively write-once — never overwritten — so
+  // historical data is immune to an upstream change. (A genuine idle 0 hour simply
+  // stays 0.) Raw ON CONFLICT … WHERE because Prisma's upsert can't gate the UPDATE
+  // on the existing row. Column/table names are the unmapped Prisma field names.
+  // PURELY additive — never touches the monthly Usage/Cost logic or /api/verify.
   let intervalsAdded = 0;
   if (result.intervals.length) {
     const CHUNK = 500;
     for (let i = 0; i < result.intervals.length; i += CHUNK) {
       const chunk = result.intervals.slice(i, i + CHUNK);
-      const res = await prisma.$transaction(
-        chunk.map((iv) =>
-          prisma.intervalUsage.upsert({
-            where: {
-              accountId_fuelType_intervalStart_intervalSeconds: {
-                accountId: account.id,
-                fuelType: iv.fuelType,
-                intervalStart: iv.intervalStart,
-                intervalSeconds: iv.intervalSeconds,
-              },
-            },
-            create: {
-              accountId: account.id,
-              fuelType: iv.fuelType,
-              intervalStart: iv.intervalStart,
-              intervalSeconds: iv.intervalSeconds,
-              quantity: iv.quantity,
-              unit: iv.unit,
-              source: iv.source,
-            },
-            update: { quantity: iv.quantity, unit: iv.unit, source: iv.source },
-          })
+      const counts = await prisma.$transaction(
+        chunk.map(
+          (iv) => prisma.$executeRaw`
+            INSERT INTO "IntervalUsage"
+              ("accountId","fuelType","intervalStart","intervalSeconds","quantity","unit","source")
+            VALUES (${account.id}, ${iv.fuelType}, ${iv.intervalStart}, ${iv.intervalSeconds},
+                    ${iv.quantity}, ${iv.unit}, ${iv.source})
+            ON CONFLICT ("accountId","fuelType","intervalStart","intervalSeconds")
+            DO UPDATE SET "quantity" = EXCLUDED."quantity",
+                          "unit" = EXCLUDED."unit",
+                          "source" = EXCLUDED."source"
+            WHERE "IntervalUsage"."quantity" = 0 AND EXCLUDED."quantity" <> 0
+          `
         )
       );
-      intervalsAdded += res.length; // rows written (created or refreshed) this run
+      intervalsAdded += counts.reduce((a, b) => a + b, 0); // rows inserted or filled
     }
   }
 
