@@ -30,6 +30,7 @@ import { dateLabel, relativeFromNow } from '@/lib/format';
 import { STAT_SPECS, type StatData } from '@/lib/widgets/statSpec';
 import {
   BILLS_PANEL_TYPE,
+  INTERVAL_HISTORY_WIDGET_TYPE,
   INTERVAL_WIDGET_TYPE,
   SPACER_PREFIX,
   chartWidgetType,
@@ -215,13 +216,14 @@ export function Dashboard() {
     : [];
   const availableStats = visibleStats.map((s) => statWidgetType(s.id));
   const availablePanels = [BILLS_PANEL_TYPE];
-  // The interval load-shape widget (#76) is a chart-category tile that is NOT a
-  // ChartSpec (it self-fetches, no `widgetConfig.visible` flag), so — like the
-  // panels — placement PRESENCE is its only removed/shown signal. It lays out as a
-  // normal chart tile (2×2 grid) AFTER the 7 monthly charts, so we append it to the
-  // chart band's id list; `isPlaced` (below) gates it so a brand-new user (no saved
-  // layout) gets it visible and a removal sticks.
-  const availableChartsAll = [...availableCharts, INTERVAL_WIDGET_TYPE];
+  // The interval load-shape widget (#76) and the interval history widget (#121
+  // part 2) are chart-category tiles that are NOT ChartSpecs (they self-fetch, no
+  // `widgetConfig.visible` flag), so — like the panels — placement PRESENCE is
+  // their only removed/shown signal. They lay out as normal chart tiles (2×2 grid)
+  // AFTER the 7 monthly charts, in order: load-shape then history. `isPlaced`
+  // (below) gates them so a brand-new user (no saved layout) gets both visible and
+  // a removal sticks.
+  const availableChartsAll = [...availableCharts, INTERVAL_WIDGET_TYPE, INTERVAL_HISTORY_WIDGET_TYPE];
 
   // SPACER instances (CHANGE 2) currently placed: read straight off the saved blob
   // (the lg page grid + the pinned strip), since spacers aren't a Phase-D-tracked
@@ -492,13 +494,14 @@ export function Dashboard() {
   const removedCharts = layout
     ? layout.order.filter((id) => SPEC_BY_ID[id] && !layout.widgetConfig[id]?.visible).map(chartWidgetType)
     : [];
-  // The interval load-shape widget (#76) is a chart tile gated on placement
-  // presence (no widgetConfig flag), so it joins the Charts palette group when it's
-  // been removed (not currently placed).
+  // The interval load-shape (#76) and interval history (#121 part 2) widgets are
+  // chart tiles gated on placement presence (no widgetConfig flag), so they join
+  // the Charts palette group when they've been removed (not currently placed).
   const removedIntervalWidget = !isPlaced(INTERVAL_WIDGET_TYPE) ? [INTERVAL_WIDGET_TYPE] : [];
+  const removedIntervalHistory = !isPlaced(INTERVAL_HISTORY_WIDGET_TYPE) ? [INTERVAL_HISTORY_WIDGET_TYPE] : [];
   const paletteGroups: PaletteGroup[] = [
     { label: 'Stat cards', types: availableStats.filter((t) => !isPlaced(t)) },
-    { label: 'Charts', types: [...removedCharts, ...removedIntervalWidget] },
+    { label: 'Charts', types: [...removedCharts, ...removedIntervalWidget, ...removedIntervalHistory] },
     { label: 'Panels', types: availablePanels.filter((t) => !isPlaced(t)) },
   ];
 

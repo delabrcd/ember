@@ -23,6 +23,7 @@ import { getVizRenderer } from '@/lib/widgets/vizRenderers';
 import { STAT_SPECS, type StatData, type StatSpec } from '@/lib/widgets/statSpec';
 import { BudgetStatCard, StatCard, YoyStatCard } from '@/components/widgets/StatCard';
 import { BillsPanel, type BillsPanelData } from '@/components/widgets/BillsPanel';
+import { IntervalHistory } from '@/components/widgets/IntervalHistory';
 import { IntervalLoadShape } from '@/components/widgets/IntervalLoadShape';
 import { Spacer } from '@/components/widgets/Spacer';
 import type { ChartConfig } from '@/lib/prefs';
@@ -243,6 +244,25 @@ const INTERVAL_WIDGET: WidgetDef = {
   render: (host) => <IntervalLoadShape accountId={host.accountId} />,
 };
 
+// The interval HISTORY widget (issue #121 part 2). A SELF-CONTAINED chart tile
+// showing the RAW historical timeline of smart-meter reads. Like the load-shape
+// widget it self-fetches /api/interval (scoped to host.accountId) and does NOT
+// go through resolveDataset — `dataDeps: []`. Categorized 'chart' so it lays
+// out as a normal half-width chart tile (the default generator's 2×2), sized
+// like the other charts. Placed on the dashboard as a default-visible tile
+// after the load-shape widget.
+export const INTERVAL_HISTORY_WIDGET_TYPE = 'interval-history' as const;
+const INTERVAL_HISTORY_WIDGET: WidgetDef = {
+  type: INTERVAL_HISTORY_WIDGET_TYPE,
+  category: 'chart',
+  title: 'Usage history',
+  dataDeps: [],
+  // Same footprint as the other chart widgets (half the lg grid, tall) so it
+  // tiles in the 2×2 chart grid alongside the monthly charts and the load-shape.
+  defaultSize: { w: 6, h: 7, minW: 3, minH: 3 },
+  render: (host) => <IntervalHistory accountId={host.accountId} />,
+};
+
 // The SPACER widget (CHANGE 2, issue #73). Unlike every other widget type — which
 // is a SINGLETON keyed by a fixed id — the spacer is MULTI-INSTANCE: the user can
 // add as many as they like, keyed `spacer:1`, `spacer:2`, … . The registry stores
@@ -278,6 +298,7 @@ export const WIDGETS: Record<string, WidgetDef> = Object.fromEntries([
   ...STAT_SPECS.map((s) => [`stat:${s.id}`, statWidget(s)] as const),
   [BILLS_PANEL.type, BILLS_PANEL] as const,
   [INTERVAL_WIDGET.type, INTERVAL_WIDGET] as const,
+  [INTERVAL_HISTORY_WIDGET.type, INTERVAL_HISTORY_WIDGET] as const,
   [SPACER_PREFIX, SPACER_WIDGET] as const,
 ]);
 
