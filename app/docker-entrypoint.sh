@@ -184,8 +184,16 @@ export CRON_KEY="${CRON_KEY:-$(head -c24 /dev/urandom | base64 | tr -dc 'a-zA-Z0
 (
   sleep 25
   while true; do
-    curl -fsS -m 290 -X POST -H "x-cron-key: ${CRON_KEY}" http://127.0.0.1:3000/api/cron/tick \
-      && echo "" || echo "[entrypoint] cron tick failed (will retry)"
+    # -m must stay >= the tick route's `maxDuration` (app/src/app/api/cron/tick/route.ts,
+    # currently 300) plus a small margin, so a slow-but-successful scrape isn't killed
+    # client-side and logged as a false failure. Bump both together.
+    if curl -fsS -m 310 -X POST -H "x-cron-key: ${CRON_KEY}" http://127.0.0.1:3000/api/cron/tick; then
+      echo ""
+    elif [ "$?" -eq 28 ]; then
+      echo "[entrypoint] cron tick exceeded 310s curl timeout (server may still be finishing; will retry)"
+    else
+      echo "[entrypoint] cron tick failed (will retry)"
+    fi
     sleep 3600
   done
 ) &
