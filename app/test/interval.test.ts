@@ -6,7 +6,7 @@ import {
   amiIntervalUrl,
   amiEnergyUsagesBody,
   intervalDateWindow,
-  gqlBackfillWindowDays,
+  backwardChunks,
   backfillStartFor,
   normalizeFuel,
   unitForFuel,
@@ -357,24 +357,61 @@ describe('intervalDateWindow', () => {
   });
 });
 
-describe('gqlBackfillWindowDays', () => {
-  it('widens to the auto-backfill on a first run with no env override', () => {
-    expect(gqlBackfillWindowDays(true, false, 10, 400)).toBe(400);
-    expect(gqlBackfillWindowDays(true, false, 35, 400)).toBe(400);
+describe('backwardChunks (hand-calculated)', () => {
+  // 2026-06-09T12:00:00Z minus N*86400s, formatted UTC YYYY-MM-DD.
+  const now = new Date('2026-06-09T12:00:00Z');
+
+  it('first chunk is [now−chunkDays, now], newest-first', () => {
+    const chunks = backwardChunks(now, 31, 93);
+    expect(chunks[0]).toEqual({ from: '2026-05-09', to: '2026-06-09' });
+    // now − 31d = 2026-05-09; now − 62d = 2026-04-08; now − 93d = 2026-03-08.
+    expect(chunks[1]).toEqual({ from: '2026-04-08', to: '2026-05-09' });
+    expect(chunks[2]).toEqual({ from: '2026-03-08', to: '2026-04-08' });
   });
 
-  it('keeps the larger of normal/auto on a first run (never shrinks the tail)', () => {
-    expect(gqlBackfillWindowDays(true, false, 500, 400)).toBe(500);
+  it('chunks are contiguous (each from === next to) and non-overlapping', () => {
+    const chunks = backwardChunks(now, 31, 93);
+    for (let i = 0; i + 1 < chunks.length; i++) {
+      // The older chunk ends exactly where the newer chunk begins (shared seam).
+      expect(chunks[i + 1].to).toBe(chunks[i].from);
+      // Strictly newest-first: each chunk's `to` is earlier than the previous one's.
+      expect(Date.parse(chunks[i + 1].to)).toBeLessThan(Date.parse(chunks[i].to));
+    }
   });
 
-  it('uses the normal tail once the account has interval rows', () => {
-    expect(gqlBackfillWindowDays(false, false, 10, 400)).toBe(10);
-    expect(gqlBackfillWindowDays(false, false, 35, 400)).toBe(35);
+  it('count respects maxDays (ceil(maxDays / chunkDays) chunks)', () => {
+    // 93 / 31 = 3 exact chunks.
+    expect(backwardChunks(now, 31, 93)).toHaveLength(3);
+    // 90 / 31 → 3 chunks (two full + one partial), never paging past maxDays.
+    expect(backwardChunks(now, 31, 90)).toHaveLength(3);
+    // 31 / 31 = 1 chunk.
+    expect(backwardChunks(now, 31, 31)).toHaveLength(1);
   });
 
-  it('does not widen when an env override is present (override wins downstream)', () => {
-    expect(gqlBackfillWindowDays(true, true, 10, 400)).toBe(10);
-    expect(gqlBackfillWindowDays(false, true, 35, 400)).toBe(35);
+  it('clamps a partial final chunk to maxDays (no over-paging)', () => {
+    // maxDays 40, chunkDays 31 → chunk0 [now−31, now], chunk1 [now−40, now−31].
+    const chunks = backwardChunks(now, 31, 40);
+    expect(chunks).toHaveLength(2);
+    expect(chunks[0]).toEqual({ from: '2026-05-09', to: '2026-06-09' });
+    // now − 40d = 2026-04-30; the final chunk stops AT maxDays, not at now−62d.
+    expect(chunks[1]).toEqual({ from: '2026-04-30', to: '2026-05-09' });
+  });
+
+  it('respects the 20-year safety ceiling (no infinite loop)', () => {
+    const chunks = backwardChunks(now, 31, 20 * 365);
+    expect(chunks).toHaveLength(Math.ceil((20 * 365) / 31));
+    // Oldest chunk reaches exactly now − maxDays.
+    const oldest = chunks[chunks.length - 1];
+    const expectedOldest = new Date(now.getTime() - 20 * 365 * 24 * 60 * 60 * 1000);
+    const p = (n: number) => String(n).padStart(2, '0');
+    const fmt = `${expectedOldest.getUTCFullYear()}-${p(expectedOldest.getUTCMonth() + 1)}-${p(expectedOldest.getUTCDate())}`;
+    expect(oldest.from).toBe(fmt);
+  });
+
+  it('returns [] for non-positive chunkDays or maxDays', () => {
+    expect(backwardChunks(now, 0, 93)).toEqual([]);
+    expect(backwardChunks(now, 31, 0)).toEqual([]);
+    expect(backwardChunks(now, -5, 93)).toEqual([]);
   });
 });
 

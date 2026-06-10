@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
-import { runScrape, ScrapeBusyError, ScrapeThrottledError } from '@/lib/ngrid/run';
+import { runManual } from '@/lib/scheduler/runner';
+import { ScrapeBusyError, ScrapeThrottledError } from '@/lib/scheduler/progress';
 import { errorResponse } from '@/lib/route';
 
 export const dynamic = 'force-dynamic';
@@ -10,7 +11,10 @@ export const maxDuration = 300;
 
 export async function POST() {
   try {
-    const runId = await runScrape('MANUAL');
+    // The manual refresh runs the generic runner's full portal pass. runManual()
+    // shares the runner's inFlight lock and throws ScrapeBusyError on a busy lock,
+    // so the catch below covers the busy/throttled cases.
+    const runId = await runManual();
     return NextResponse.json({ runId });
   } catch (e) {
     if (e instanceof ScrapeBusyError) return NextResponse.json({ error: 'busy' }, { status: 409 });

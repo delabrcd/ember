@@ -17,20 +17,11 @@ import { chromium } from 'playwright';
 import type { Page, Route } from 'playwright';
 import { contextOptions, ensureLoggedIn, dataDir, saveState } from './auth';
 import { extractAccountLinks, buildNavUrl } from './accounts';
-import { parseBillPdf } from './parsePdf';
 import { summarizeGqlRequest, summarizeGqlResponse } from './intervalDebug';
-import {
-  amiEnergyUsagesBody,
-  amiIntervalUrl,
-  backfillStartFor,
-  extractAmiMeters,
-  gqlBackfillWindowDays,
-  intervalDateWindow,
-  parseAmiEnergyUsages,
-  parseIntervalReads,
-  unitForFuel,
-  type IntervalReadRow,
-} from './interval';
+import { captureAuthHeaders } from './session';
+import type { PortalSession } from './session';
+import { downloadBillPdfs, fetchAmiIntervals } from './portalFetch';
+import { type IntervalReadRow } from './interval';
 import type {
   AccountInfo,
   BillRow,
@@ -50,22 +41,16 @@ export interface CollectOptions {
   // a one-time wide first-run hourly backfill. Omitted → treated as "has data"
   // (normal tail window), preserving the env-only behavior exactly.
   hasIntervalData?: (accountNumber: string) => Promise<boolean>;
+  // Scheduler V2: when provided, collect() reuses this already-logged-in session's
+  // browser context + page instead of launching/closing its own, and skips its own
+  // ensureLoggedIn (the session guarantees login). The runner owns the session
+  // lifecycle (acquire/saveState/close). When omitted, collect() behaves EXACTLY as
+  // before — launches its own browser, logs in, and closes it. (Good-guest: a shared
+  // session means ≤1 login per tick across all portal tasks.)
+  session?: PortalSession;
 }
 
 const BASE = 'https://myaccount.nationalgrid.com';
-
-// One-time first-run deep pull (~13 months) of HOURLY interval history for a
-// brand-new account that has no stored interval rows yet and no env override.
-// After the first run the account has rows, so subsequent scrapes use the normal
-// tail window. INTERVAL_BACKFILL_FROM (when set) still overrides everything.
-const AUTO_BACKFILL_DAYS = 400;
-
-// Format a Date as the energy-usage gql `YYYY-MM-DD` (UTC fields), matching
-// interval.ts's window formatting — used to page a wide gas backfill in chunks.
-const fmtGqlDate = (d: Date): string => {
-  const p = (n: number) => String(n).padStart(2, '0');
-  return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}`;
-};
 
 const asArray = (x: any): any[] => (Array.isArray(x?.nodes) ? x.nodes : Array.isArray(x) ? x : []);
 const ymd = (d?: string): string | undefined => (d ? d.slice(0, 10) : undefined);
@@ -81,12 +66,17 @@ export async function collect(
   log: ProgressFn = () => {},
   opts: CollectOptions = {}
 ): Promise<CollectResult[]> {
-  const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
-  const ctx = await browser.newContext(contextOptions(opts.loginId));
-  const page = await ctx.newPage();
+  // With a session: reuse the runner's already-logged-in browser context + page
+  // (no launch, no login, no close here — the runner owns that lifecycle).
+  // Without one: the EXISTING behavior — launch our own browser, log in, close it.
+  const ownBrowser = opts.session
+    ? null
+    : await chromium.launch({ headless: true, args: ['--no-sandbox'] });
+  const ctx = opts.session ? opts.session.ctx : await ownBrowser!.newContext(contextOptions(opts.loginId));
+  const page = opts.session ? opts.session.page : await ctx.newPage();
 
   try {
-    await ensureLoggedIn(page, log, opts.loginId);
+    if (!opts.session) await ensureLoggedIn(page, log, opts.loginId);
     // The link the portal landed on after login is our default/first account and
     // the fallback if discovery turns up nothing.
     const defaultLink = new URL(page.url()).searchParams.get('accountLink') || undefined;
@@ -134,7 +124,9 @@ export async function collect(
     }
     return results;
   } finally {
-    await browser.close();
+    // Only close the browser we launched ourselves; a session-provided browser
+    // is closed by the runner (which owns its lifecycle).
+    await ownBrowser?.close();
   }
 }
 
@@ -201,11 +193,14 @@ async function collectOneAccount(
     } catch {
       /* leave body unchanged */
     }
-    if (!haveAuth && h.authorization && h['ocp-apim-subscription-key']) {
-      authHeaders.authorization = h.authorization;
-      authHeaders['ocp-apim-subscription-key'] = h['ocp-apim-subscription-key'];
-      authHeaders.origin = BASE;
-      haveAuth = true;
+    if (!haveAuth) {
+      const captured = captureAuthHeaders(h, BASE);
+      if (captured) {
+        authHeaders.authorization = captured.authorization;
+        authHeaders['ocp-apim-subscription-key'] = captured['ocp-apim-subscription-key'];
+        authHeaders.origin = captured.origin;
+        haveAuth = true;
+      }
     }
     await route.continue({ postData: post });
   };
@@ -418,221 +413,30 @@ async function collectOneAccount(
 
   // ---- download new PDFs --------------------------------------------------
   let pdfsDownloaded = 0;
-  let parseFailures = 0;
   if (haveAuth) {
-    const pdfDir = path.join(dataDir(), 'pdfs', accountNumber);
-    fs.mkdirSync(pdfDir, { recursive: true });
-    const headers = { ...authHeaders, 'account-number': accountNumber };
-    log(`downloading PDFs (${bills.length} bills)`);
-    for (const b of bills) {
-      const dest = path.join(pdfDir, `${b.statementDate}.pdf`);
-      if (fs.existsSync(dest) && fs.statSync(dest).size > 1000) {
-        b.pdfPath = dest;
-      } else {
-        const url = `${BASE}/api/bill-cu-uwp-sys/v1/bills/view-pdf/${b.statementDate}`;
-        let saved = false;
-        for (let attempt = 1; attempt <= 3 && !saved; attempt++) {
-          try {
-            const r = await ctx.request.get(url, { headers, timeout: 30000 });
-            const ctype = (r.headers()['content-type'] || '').toLowerCase();
-            if (r.ok() && ctype.includes('pdf')) {
-              fs.writeFileSync(dest, await r.body());
-              b.pdfPath = dest;
-              saved = true;
-              pdfsDownloaded++;
-            } else if (r.status() < 500) {
-              break;
-            }
-          } catch {
-            await page.waitForTimeout(1200);
-          }
-        }
-      }
-
-      // Parse the per-fuel supply/delivery breakdown + period charges from the PDF.
-      if (b.pdfPath) {
-        const d = await parseBillPdf(b.pdfPath);
-        if (d) {
-          b.currentCharges = d.currentCharges ?? undefined;
-          const ym = yyyymm(b.statementDate);
-          const add = (fuelType: string, kind: 'SUPPLY' | 'DELIVERY', amount: number | null) => {
-            if (amount != null) costRows.push({ fuelType, kind, periodYearMonth: ym, dateFrom: b.periodFrom, dateTo: b.periodTo, amount });
-          };
-          add('ELECTRIC', 'SUPPLY', d.electric.supply);
-          add('ELECTRIC', 'DELIVERY', d.electric.delivery);
-          add('GAS', 'SUPPLY', d.gas.supply);
-          add('GAS', 'DELIVERY', d.gas.delivery);
-        } else {
-          parseFailures++;
-        }
-      }
-    }
-    if (parseFailures) log(`warning: ${parseFailures} PDFs had no parseable breakdown`);
+    const pdf = await downloadBillPdfs(ctx, page, { accountNumber, authHeaders, bills, log });
+    costRows.push(...pdf.costRows);
+    pdfsDownloaded = pdf.pdfsDownloaded;
   } else {
     log('warning: no auth headers captured; skipping PDF download');
   }
 
   // ---- smart-meter AMI interval reads (issue #76 / #121) ------------------
-  // Capture interval usage at BOTH grains, reusing the captured auth headers
-  // (same gateway as the PDF download — no account-number header here, that's
-  // PDF-specific). PURELY observational: these rows NEVER feed billed-cost
-  // numbers (AGENTS.md rule #1).
-  //
-  // Two coexisting sources per meter (issue #121):
-  //   (a) HOURLY gql backstop — ALWAYS run. The `amiEnergyUsages` query serves a
-  //       WIDE range for BOTH fuels (electric returns hourly here; gas only works
-  //       here), paged in ≤31-day chunks over the INTERVAL_WINDOW_DAYS window.
-  //       This is the gap-free continuous-hourly feed for every meter.
-  //   (b) 15-min REST overlay — BEST-EFFORT additional capture. The `amiadapter`
-  //       REST endpoint returns 15-minute electric reads but only for a SHORT
-  //       window (~2 days; it 400s on longer ranges, and gas 404s entirely). A
-  //       non-2xx here is fine — the gql backstop already covered the meter
-  //       hourly — so we skip silently with a log.
-  // The two grains share `IntervalUsage`'s unique key (which includes
-  // intervalSeconds: 900 vs 3600) and persist is a fill-only upsert, so storing
-  // both is safe and non-destructive; the read layer reconciles them.
-  //
-  // Good-guest (rule #4): AMI-gated per meter, SEQUENTIAL, bounded (one gql
-  // window-set + one short REST per meter per run), no retry storm, with the
-  // existing settle delays. Fully try/catch-wrapped — a failure of EITHER call
-  // can never break the scrape.
-  const intervals: IntervalReadRow[] = [];
-  try {
-    const meters = extractAmiMeters(cap.account);
-    if (!haveAuth) {
-      log('interval: no auth headers; skipping AMI interval fetch');
-    } else if (!meters.length) {
-      log('interval: no AMI smart meter on this account; skipping interval fetch');
-    } else if (!acct.premiseNumber) {
-      log('interval: no premise number; skipping interval fetch');
-    } else {
-      const windowDays = Number.parseInt(process.env.INTERVAL_WINDOW_DAYS || '', 10);
-      const effectiveWindowDays = Number.isFinite(windowDays) && windowDays > 0 ? windowDays : 35;
-      // First-run detection: a brand-new account (no stored interval rows) gets a
-      // one-time WIDE hourly backfill (AUTO_BACKFILL_DAYS) WITHOUT the operator
-      // setting any env var. The probe is injected (collect.ts stays DB-free);
-      // omitted or failing → safe default "has data" (normal tail window).
-      let isFirstIntervalRun = false;
-      if (hasIntervalData) {
-        try {
-          isFirstIntervalRun = !(await hasIntervalData(accountNumber));
-        } catch {
-          isFirstIntervalRun = false; // probe failure → safe default: normal tail
-        }
-      }
-      // Widen ONLY the hourly gql window on a first run, and ONLY when there's no
-      // env override (INTERVAL_BACKFILL_FROM still wins via intervalDateWindow).
-      const gqlWindowDays = gqlBackfillWindowDays(
-        isFirstIntervalRun,
-        !!process.env.INTERVAL_BACKFILL_FROM,
-        effectiveWindowDays,
-        AUTO_BACKFILL_DAYS
-      );
-      // Short window for the 15-min REST overlay — kept small so the amiadapter
-      // endpoint actually returns 15-min reads (it 400s on a long range); the
-      // hourly gql above is the wide backstop. Default 2 days.
-      const restWindowParsed = Number.parseInt(process.env.INTERVAL_REST_WINDOW_DAYS || '', 10);
-      const restWindowDays = Number.isFinite(restWindowParsed) && restWindowParsed > 0 ? restWindowParsed : 2;
-      const restStartDateTime = backfillStartFor(
-        new Date(),
-        null, // lastStored unknown here; persist's upsert makes re-fetch idempotent
-        undefined, // the wide backfill is the gql's job; the REST overlay stays short
-        restWindowDays
-      );
-      // Per-request span cap for the gql backstop (the gateway caps the range);
-      // a wider backfill is paged in ≤ MAX_GQL_SPAN_DAYS chunks. The default tail
-      // window is a single chunk.
-      const MAX_GQL_SPAN_DAYS = 31;
-      const DAY_MS = 24 * 60 * 60 * 1000;
-      for (const meter of meters) {
-        let gqlRows = 0;
-        let restRows = 0;
-        try {
-          // 1) HOURLY gql backstop — ALWAYS run (both fuels). Window the
-          //    [dateFrom, dateTo] range and page it in ≤31-day chunks (sequential,
-          //    with the existing settle delay) so a wide backfill stays a good
-          //    guest. The default tail is a single window.
-          log(`interval: fetching ${meter.fuelType} hourly gql (sp ${meter.servicePointNumber})`);
-          if (gqlWindowDays > effectiveWindowDays) {
-            log(`interval: first run for ${meter.fuelType} — backfilling ~${AUTO_BACKFILL_DAYS}d of hourly history`);
-          }
-          const { dateFrom, dateTo } = intervalDateWindow(
-            new Date(),
-            process.env.INTERVAL_BACKFILL_FROM,
-            gqlWindowDays
-          );
-          const fromMs = Date.parse(dateFrom);
-          const toMs = Date.parse(dateTo);
-          let chunkStart = Number.isFinite(fromMs) ? fromMs : toMs;
-          const endMs = Number.isFinite(toMs) ? toMs : chunkStart;
-          let chunks = 0;
-          while (chunkStart <= endMs) {
-            const chunkEnd = Math.min(chunkStart + MAX_GQL_SPAN_DAYS * DAY_MS, endMs);
-            const chunkFrom = fmtGqlDate(new Date(chunkStart));
-            const chunkTo = fmtGqlDate(new Date(chunkEnd));
-            const gqlResp = await ctx.request.post(`${BASE}/api/energyusage-cu-uwp-gql`, {
-              headers: { ...authHeaders, 'content-type': 'application/json' },
-              data: amiEnergyUsagesBody(meter, acct.premiseNumber, chunkFrom, chunkTo),
-              timeout: 30000,
-            });
-            if (gqlResp.ok()) {
-              const gjson = (await gqlResp.json().catch(() => null)) as {
-                data?: { amiEnergyUsages?: { nodes?: unknown } };
-              } | null;
-              const nodes = gjson?.data?.amiEnergyUsages?.nodes;
-              if (Array.isArray(nodes)) {
-                const rows = parseAmiEnergyUsages(
-                  nodes as Array<{ date: string; fuelType?: string; quantity: number }>,
-                  meter.fuelType
-                );
-                intervals.push(...rows);
-                gqlRows += rows.length;
-              } else {
-                log(`interval: ${meter.fuelType} gql ${chunkFrom}..${chunkTo} had no nodes`);
-              }
-            } else {
-              log(`interval: ${meter.fuelType} gql ${chunkFrom}..${chunkTo} HTTP ${gqlResp.status()}`);
-            }
-            chunks++;
-            if (chunkEnd >= endMs) break;
-            chunkStart = chunkEnd + DAY_MS;
-            // Settle between chunks (good guest).
-            await page.waitForTimeout(1500).catch(() => {});
-          }
-
-          // 2) 15-min REST overlay — best-effort. SHORT window so the amiadapter
-          //    endpoint returns 15-minute reads. A non-2xx (gas 404s; electric on
-          //    a bad range 400s) is expected and harmless: the gql above already
-          //    covered this meter hourly, so we skip silently with a log.
-          await page.waitForTimeout(1500).catch(() => {});
-          const url = amiIntervalUrl(BASE, acct.premiseNumber, meter.servicePointNumber, restStartDateTime);
-          const r = await ctx.request.get(url, { headers: authHeaders, timeout: 30000 });
-          if (r.ok()) {
-            const json = await r.json().catch(() => null);
-            if (Array.isArray(json)) {
-              const rows = parseIntervalReads(json, meter.fuelType, unitForFuel(meter.fuelType));
-              intervals.push(...rows);
-              restRows += rows.length;
-            } else {
-              log(`interval: ${meter.fuelType} REST response was not an array; skipping`);
-            }
-          } else {
-            log(
-              `interval: ${meter.fuelType} 15-min REST HTTP ${r.status()} (expected for gas / long range) — hourly gql already captured this meter`
-            );
-          }
-
-          log(`interval: ${meter.fuelType} — 15-min REST ${restRows}, hourly gql ${gqlRows}`);
-        } catch (err) {
-          log(`interval: ${meter.fuelType} fetch failed: ${err instanceof Error ? err.message : String(err)}`);
-        }
-        // Keep the per-request settle rhythm so we stay a good guest.
-        await page.waitForTimeout(1500).catch(() => {});
-      }
-    }
-  } catch (err) {
-    log(`interval: AMI ingest skipped (${err instanceof Error ? err.message : String(err)})`);
-  }
+  // Capture interval usage at BOTH grains (hourly gql backstop + best-effort
+  // 15-min REST overlay), reusing the captured auth headers. PURELY observational:
+  // these rows NEVER feed billed-cost numbers (AGENTS.md rule #1). The full logic
+  // (good-guest sequencing, settle delays, first-run backfill) lives in
+  // portalFetch.fetchAmiIntervals — a behavior-identical extraction of the block
+  // that used to be inline here.
+  const intervals: IntervalReadRow[] = await fetchAmiIntervals(ctx, page, {
+    acct,
+    rawAccount: cap.account,
+    authHeaders,
+    haveAuth,
+    accountNumber,
+    hasIntervalData,
+    log,
+  });
 
   return { account: acct, bills, usage, costs: costRows, weather, intervals, pdfsDownloaded };
 }
