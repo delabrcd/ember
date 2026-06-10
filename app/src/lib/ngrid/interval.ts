@@ -245,6 +245,24 @@ export function intervalDateWindow(
   return { dateFrom: fmtDate(new Date(now.getTime() - windowDays * DAY_MS)), dateTo };
 }
 
+// Decide how many days of HOURLY gql interval history to pull on a given scrape.
+//   - When the operator set INTERVAL_BACKFILL_FROM (hasEnvOverride), that override
+//     wins downstream (it's passed straight to intervalDateWindow), so the
+//     window-days here is irrelevant — just return normalDays.
+//   - On a FIRST run (the account has no stored interval rows yet) with NO env
+//     override, pull a WIDE one-time deep backfill: max(normalDays, autoDays).
+//   - Otherwise (steady state) use the normal tail window (normalDays).
+// PURE.
+export function gqlBackfillWindowDays(
+  isFirstRun: boolean,
+  hasEnvOverride: boolean,
+  normalDays: number,
+  autoDays: number
+): number {
+  if (isFirstRun && !hasEnvOverride) return Math.max(normalDays, autoDays);
+  return normalDays;
+}
+
 // Parse a batch of `amiEnergyUsages` nodes for ONE fuel into IntervalReadRows.
 // Unlike the REST reads, these nodes carry no endTime, so the interval LENGTH is
 // INFERRED from the gap to the NEXT node (after sorting ascending by date):
