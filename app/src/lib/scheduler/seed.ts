@@ -9,16 +9,10 @@
 // keeps the unit suite free of the prisma singleton (mirrors collect.ts's
 // dependency-injection pattern), so planAccountTasks can be tested in isolation.
 //
-// NOT WIRED into any live path this step: the runner wires seedScheduledTasks
-// behind a SCHEDULER_V2 flag in a later step. Dead-but-tested code for now.
+// Wired into the runner's one-time bootstrap (ensureBootstrapped → seedScheduledTasks).
 import type { PrismaClient } from '@prisma/client';
 import type { TaskKind } from './types';
-
-// Mirrors PDF_PENDING_RECENT_DAYS in lib/ngrid/run.ts (the PDF-pending cadence
-// cap): only a bill whose statementDate is within this window pins the tighter
-// schedule. Duplicated here (run.ts keeps prisma out of the unit suite) — a later
-// step consolidates the two when the cadence logic moves into lib/.
-export const PDF_PENDING_RECENT_DAYS = 35;
+import { PDF_PENDING_RECENT_DAYS } from '@/lib/scheduler/cadence';
 
 export interface AccountSeedFacts {
   scheduleNextCheckAt: Date | null;

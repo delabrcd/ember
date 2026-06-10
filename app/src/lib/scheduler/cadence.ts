@@ -1,9 +1,8 @@
 // Pure per-task cadence functions (docs/scheduler-v2-plan.md §5).
 //
-// These mirror the cap constants currently in lib/ngrid/run.ts; run.ts is
-// consolidated onto these in a later step (kept duplicated now to keep this
-// step purely additive — no live-path change). If you change a value, change
-// run.ts too.
+// This is the SOLE source of truth for the cadence cap constants
+// (INTERVAL_DAILY_CAP_MS / PDF_PENDING_CAP_MS / PDF_PENDING_RECENT_DAYS) — the
+// seed and the scrape handlers import them from here.
 //
 // Hermetic: NO prisma/browser imports. Facts are injected by the caller so the
 // unit suite stays pure (mirrors the shipped `hasIntervalData` probe pattern).
@@ -19,10 +18,9 @@ export const PDF_PENDING_CAP_MS = 6 * 60 * 60 * 1000;
 // cadence (so an ancient bill that never got a PDF can't pin it forever).
 export const PDF_PENDING_RECENT_DAYS = 35;
 
-// full-scrape cadence. Exact mirror of run.ts updateSchedule's nextCheckAt
-// logic: start from the pure computeNextCheck, then apply the AMI cap (min) if
-// the account has interval data, then the PDF-pending cap (min) if a recent
-// pending PDF exists. Smaller cap wins; caps never push the time LATER (they
+// full-scrape cadence: start from the pure computeNextCheck, then apply the AMI
+// cap (min) if the account has interval data, then the PDF-pending cap (min) if a
+// recent pending PDF exists. Smaller cap wins; caps never push the time LATER (they
 // only ever pull it sooner). Per the plan the caps stay on full-scrape
 // initially for safety even though interval-pull/pdf-fetch will own them.
 export function computeFullScrapeNextRun(

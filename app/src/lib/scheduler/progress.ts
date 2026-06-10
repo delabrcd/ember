@@ -1,31 +1,27 @@
-// Scheduler V2 audit + live-progress + in-flight-lock wrapper.
+// Scheduler audit + live-progress + in-flight-lock wrapper.
 //
-// This is a DELIBERATE DUPLICATE of the ScrapeRun audit row + throttled
-// live-progress writer + finalize logic that lives inline in
-// lib/ngrid/run.ts (the byte-for-byte-frozen legacy monolith). The runner
-// (runner.ts) wraps a whole tick in this so the UI's ScrapeRun mirror, the
-// /api/refresh/[id] live progress, and the manual/scheduled mutual exclusion
-// all behave EXACTLY as the legacy path. We copy rather than import so run.ts
-// stays untouched during the flag-gated rollout (step 7 deletes the old copy).
+// Wraps a whole tick in a ScrapeRun audit row + throttled live-progress writer +
+// finalize logic, so the UI's ScrapeRun mirror, the /api/refresh/[id] live
+// progress, and the manual/scheduled mutual exclusion all behave consistently.
+// The runner (runner.ts) is the sole caller.
 //
-// The ScrapeBusyError / ScrapeThrottledError classes are IMPORTED from run.ts
-// (not re-declared) so the refresh route's `instanceof` checks keep working
-// across both code paths — those classes are stable.
+// The ScrapeBusyError / ScrapeThrottledError sentinels are defined here (the
+// refresh route's `instanceof` checks import them from this module).
 import { prisma } from '@/lib/db';
 import { formatProgressLine } from '@/lib/ngrid/progress';
-import { ScrapeBusyError, ScrapeThrottledError } from '@/lib/ngrid/run';
 import type { ProgressFn } from '@/lib/ngrid/types';
 
-export { ScrapeBusyError, ScrapeThrottledError };
+export class ScrapeBusyError extends Error {}
+export class ScrapeThrottledError extends Error {}
 
-// Don't write a live-progress update to the DB more often than this (copied from
-// run.ts:36). Bursty steps collapse to one write per window; the trailing edge
-// always flushes the latest line.
+// Don't write a live-progress update to the DB more often than this. Bursty
+// steps collapse to one write per window; the trailing edge always flushes the
+// latest line.
 const PROGRESS_THROTTLE_MS = 1000;
 
-// Generalized in-flight guard (generalizes run.ts:37). A single module-level lock
-// governs the V2 path: a manual run and a scheduled tick can never double-run —
-// the second to arrive throws ScrapeBusyError. Cleared in the finally below.
+// In-flight guard. A single module-level lock governs the scheduler: a manual
+// run and a scheduled tick can never double-run — the second to arrive throws
+// ScrapeBusyError. Cleared in the finally below.
 let inFlight: Promise<number> | null = null;
 
 export interface RunBodyResult {
@@ -35,11 +31,11 @@ export interface RunBodyResult {
 }
 
 // Wrap a unit of work in a ScrapeRun audit row with the throttled live-progress
-// writer, exactly as run.ts does. Creates the row (RUNNING), builds the
+// writer. Creates the row (RUNNING), builds the
 // throttled `progress` ProgressFn, runs `body(progress)`, then finalizes SUCCESS
 // (with the returned summary) or ERROR. Returns the ScrapeRun id immediately; the
-// body keeps running in the background (the legacy contract — callers poll
-// /api/refresh/[id]). Throws ScrapeBusyError if a run is already in flight.
+// body keeps running in the background (callers poll /api/refresh/[id]). Throws
+// ScrapeBusyError if a run is already in flight.
 export async function runWithScrapeRun(
   trigger: 'MANUAL' | 'SCHEDULED',
   body: (progress: ProgressFn) => Promise<RunBodyResult>
@@ -53,8 +49,7 @@ export async function runWithScrapeRun(
   // PROGRESS_THROTTLE_MS with a trailing flush so the newest line always lands.
   // The final success/error message overwrites this — we never write progress
   // after the run is finalized. Each write is best-effort (a transient DB hiccup
-  // updating progress must never fail an otherwise-good run). Copied verbatim
-  // from run.ts:111-146.
+  // updating progress must never fail an otherwise-good run).
   let lastWrite = 0;
   let pending: string | null = null;
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -94,7 +89,7 @@ export async function runWithScrapeRun(
     try {
       const result = await body(progress);
       // Stop live-progress writes before stamping the final summary so a trailing
-      // flush can't overwrite it (run.ts:296-299).
+      // flush can't overwrite it.
       finalized = true;
       if (flushTimer) clearTimeout(flushTimer);
       await prisma.scrapeRun.update({
@@ -130,7 +125,7 @@ export async function runWithScrapeRun(
 }
 
 // Re-throw ScrapeThrottledError so the runner can decide to throttle a portal
-// tick the same way run.ts does. Kept exported for symmetry / potential reuse.
+// tick. Kept exported for symmetry / potential reuse.
 export function isThrottled(err: unknown): err is ScrapeThrottledError {
   return err instanceof ScrapeThrottledError;
 }

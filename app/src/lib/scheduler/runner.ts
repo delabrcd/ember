@@ -8,9 +8,8 @@
 // handlers run SEQUENTIALLY on the single page (shared mutable browser state is
 // never touched concurrently); the 5-min portal floor is enforced here.
 //
-// Flag-gated during rollout: scheduler.tickOnce() calls runTick('SCHEDULED') and
-// the refresh route calls runManual() only when SCHEDULER_V2==='true'. The legacy
-// run.ts path is untouched and remains the default.
+// This is the sole scrape path: scheduler.tickOnce() calls runTick('SCHEDULED')
+// and the refresh route calls runManual().
 import { prisma } from '@/lib/db';
 import { bootstrapEnvLogin } from '@/lib/ngrid/bootstrap';
 import { isSchedulerEnabled } from '@/lib/settings';
