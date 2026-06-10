@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest';
 import {
   projectTask,
   projectTimeline,
+  taskKindLabel,
   type ProjectionTaskInput,
 } from '../src/lib/scheduler/projection';
+import type { TaskKind } from '../src/lib/scheduler/types';
 
 const D = (s: string) => new Date(s + 'T00:00:00Z');
 const HOUR = 60 * 60 * 1000;
@@ -166,5 +168,20 @@ describe('projectTimeline', () => {
     expect(out.some((a) => a.kind === 'full-scrape')).toBe(true);
     expect(out.some((a) => a.kind === 'interval-pull')).toBe(true);
     expect(out.some((a) => a.kind === 'weather-sync')).toBe(true);
+  });
+});
+
+describe('taskKindLabel', () => {
+  it('maps every task kind to a human label', () => {
+    const labels: Record<TaskKind, string> = {
+      'full-scrape': 'Full check',
+      'pdf-fetch': 'Fetch bill PDF',
+      'interval-pull': 'Pull interval usage',
+      'weather-sync': 'Sync weather',
+      'notify-sync': 'Send notifications',
+    };
+    for (const [kind, label] of Object.entries(labels)) {
+      expect(taskKindLabel(kind as TaskKind)).toBe(label);
+    }
   });
 });

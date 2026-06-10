@@ -30,6 +30,25 @@ export interface ProjectedAction {
   reason: string;
 }
 
+// Human label for a task kind, for the "upcoming actions" UI. Pure + exhaustive
+// over TaskKind (the default keeps it total if a kind is ever added).
+export function taskKindLabel(kind: TaskKind): string {
+  switch (kind) {
+    case 'full-scrape':
+      return 'Full check';
+    case 'pdf-fetch':
+      return 'Fetch bill PDF';
+    case 'interval-pull':
+      return 'Pull interval usage';
+    case 'weather-sync':
+      return 'Sync weather';
+    case 'notify-sync':
+      return 'Send notifications';
+    default:
+      return kind;
+  }
+}
+
 export interface ProjectionTaskInput {
   kind: TaskKind;
   enabled: boolean;

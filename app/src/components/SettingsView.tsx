@@ -6,6 +6,8 @@ import { usePrefs } from '@/lib/prefs';
 import { resolveSelectedAccountId, type AccountSummary } from '@/lib/accountSwitcher';
 import { resolveRange, ymOfDate, ymdToYm } from '@/lib/range';
 import { dateLabel, relativeFromNow } from '@/lib/format';
+import { taskKindLabel } from '@/lib/scheduler/projection';
+import type { TaskKind } from '@/lib/scheduler/types';
 import { matchesSearch } from '@/lib/settingsSearch';
 import { RefreshButton } from './RefreshButton';
 import { RangeControl } from './RangeControl';
@@ -38,6 +40,13 @@ interface Run {
   finishedAt: string | null;
   billsAdded: number;
   message: string | null;
+}
+
+// One projected scheduler action from GET /api/schedule/upcoming.
+interface UpcomingAction {
+  kind: TaskKind;
+  at: string;
+  reason: string;
 }
 
 function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
@@ -83,6 +92,7 @@ export function SettingsView() {
   const { prefs, patch, setRange, reset } = usePrefs();
   const [server, setServer] = useState<ServerSettings | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
+  const [upcoming, setUpcoming] = useState<UpcomingAction[]>([]);
   const [accounts, setAccounts] = useState<AccountSummary[]>([]);
   const [savingSched, setSavingSched] = useState(false);
   // Carbon-footprint grid-factor override (issue #49). Local edit buffer for the
@@ -116,14 +126,16 @@ export function SettingsView() {
   };
 
   const loadServer = useCallback(async () => {
-    const [s, r, a] = await Promise.all([
+    const [s, r, a, u] = await Promise.all([
       fetch('/api/settings', { cache: 'no-store' }).then((x) => x.json()),
       fetch('/api/runs', { cache: 'no-store' }).then((x) => x.json()),
       fetch('/api/accounts', { cache: 'no-store' }).then((x) => x.json()),
+      fetch('/api/schedule/upcoming?days=7', { cache: 'no-store' }).then((x) => x.json()),
     ]);
     setServer(s);
     setRuns(r.runs || []);
     setAccounts(a.accounts || []);
+    setUpcoming(u.actions || []);
     setGridFactor(s.gridEmissionFactor ?? '');
     setBudgetTarget(s.budgetTarget ?? '');
   }, []);
@@ -313,6 +325,26 @@ export function SettingsView() {
               </tbody>
             </table>
           </div>
+        </div>
+      ),
+    },
+    {
+      key: 'upcoming-actions',
+      group: 'data-collection',
+      searchText: 'upcoming scheduled actions next 7 days timeline projection full check fetch pdf interval weather notifications planned',
+      node: (
+        <div key="upcoming-actions" className="border-t border-slate-800 pt-4">
+          <h3 className="mb-3 text-sm font-semibold text-slate-300">Upcoming actions (next 7 days)</h3>
+          <ul className="space-y-2 text-sm">
+            {upcoming.map((a, i) => (
+              <li key={i} className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                <span className="pill whitespace-nowrap">{relativeFromNow(a.at)}</span>
+                <span className="font-medium text-slate-200">{taskKindLabel(a.kind)}</span>
+                <span className="text-xs text-slate-500">{a.reason}</span>
+              </li>
+            ))}
+            {upcoming.length === 0 && <li className="text-slate-500">No scheduled actions</li>}
+          </ul>
         </div>
       ),
     },
