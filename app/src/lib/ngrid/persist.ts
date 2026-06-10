@@ -132,29 +132,44 @@ export async function persist(result: CollectResult): Promise<PersistSummary> {
     });
   }
 
-  // Smart-meter AMI interval reads (issue #76). Append-mostly + idempotent: each
-  // run pulls a windowed tail that overlaps what we already have, so we insert
-  // with skipDuplicates on the [accountId, fuelType, intervalStart, intervalSeconds]
-  // unique key (chunked to keep parameter counts sane). PURELY additive — this
-  // never touches the monthly Usage/Cost logic or /api/verify.
+  // Smart-meter AMI interval reads (issue #76). The windowed tail OVERLAPS what we
+  // already have on purpose: AMI meters lag ~1–2 days and first report the freshest
+  // hours as 0 / partial, then fill in the real value, so a re-scrape must CORRECT
+  // those hours. We therefore UPSERT on the [accountId, fuelType, intervalStart,
+  // intervalSeconds] unique key — updating quantity/unit/source — rather than
+  // skip-duplicates (which would freeze a stale 0 forever). Chunked in a transaction
+  // to keep round-trips bounded. PURELY additive — never touches the monthly
+  // Usage/Cost logic or /api/verify.
   let intervalsAdded = 0;
   if (result.intervals.length) {
-    const data = result.intervals.map((iv) => ({
-      accountId: account.id,
-      fuelType: iv.fuelType,
-      intervalStart: iv.intervalStart,
-      intervalSeconds: iv.intervalSeconds,
-      quantity: iv.quantity,
-      unit: iv.unit,
-      source: iv.source,
-    }));
-    const CHUNK = 1000;
-    for (let i = 0; i < data.length; i += CHUNK) {
-      const res = await prisma.intervalUsage.createMany({
-        data: data.slice(i, i + CHUNK),
-        skipDuplicates: true,
-      });
-      intervalsAdded += res.count;
+    const CHUNK = 500;
+    for (let i = 0; i < result.intervals.length; i += CHUNK) {
+      const chunk = result.intervals.slice(i, i + CHUNK);
+      const res = await prisma.$transaction(
+        chunk.map((iv) =>
+          prisma.intervalUsage.upsert({
+            where: {
+              accountId_fuelType_intervalStart_intervalSeconds: {
+                accountId: account.id,
+                fuelType: iv.fuelType,
+                intervalStart: iv.intervalStart,
+                intervalSeconds: iv.intervalSeconds,
+              },
+            },
+            create: {
+              accountId: account.id,
+              fuelType: iv.fuelType,
+              intervalStart: iv.intervalStart,
+              intervalSeconds: iv.intervalSeconds,
+              quantity: iv.quantity,
+              unit: iv.unit,
+              source: iv.source,
+            },
+            update: { quantity: iv.quantity, unit: iv.unit, source: iv.source },
+          })
+        )
+      );
+      intervalsAdded += res.length; // rows written (created or refreshed) this run
     }
   }
 
