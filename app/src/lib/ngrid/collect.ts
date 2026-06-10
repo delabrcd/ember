@@ -19,6 +19,7 @@ import { contextOptions, ensureLoggedIn, dataDir, saveState } from './auth';
 import { extractAccountLinks, buildNavUrl } from './accounts';
 import { summarizeGqlRequest, summarizeGqlResponse } from './intervalDebug';
 import { captureAuthHeaders } from './session';
+import type { PortalSession } from './session';
 import { downloadBillPdfs, fetchAmiIntervals } from './portalFetch';
 import { type IntervalReadRow } from './interval';
 import type {
@@ -40,6 +41,13 @@ export interface CollectOptions {
   // a one-time wide first-run hourly backfill. Omitted → treated as "has data"
   // (normal tail window), preserving the env-only behavior exactly.
   hasIntervalData?: (accountNumber: string) => Promise<boolean>;
+  // Scheduler V2: when provided, collect() reuses this already-logged-in session's
+  // browser context + page instead of launching/closing its own, and skips its own
+  // ensureLoggedIn (the session guarantees login). The runner owns the session
+  // lifecycle (acquire/saveState/close). When omitted, collect() behaves EXACTLY as
+  // before — launches its own browser, logs in, and closes it. (Good-guest: a shared
+  // session means ≤1 login per tick across all portal tasks.)
+  session?: PortalSession;
 }
 
 const BASE = 'https://myaccount.nationalgrid.com';
@@ -58,12 +66,17 @@ export async function collect(
   log: ProgressFn = () => {},
   opts: CollectOptions = {}
 ): Promise<CollectResult[]> {
-  const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
-  const ctx = await browser.newContext(contextOptions(opts.loginId));
-  const page = await ctx.newPage();
+  // With a session: reuse the runner's already-logged-in browser context + page
+  // (no launch, no login, no close here — the runner owns that lifecycle).
+  // Without one: the EXISTING behavior — launch our own browser, log in, close it.
+  const ownBrowser = opts.session
+    ? null
+    : await chromium.launch({ headless: true, args: ['--no-sandbox'] });
+  const ctx = opts.session ? opts.session.ctx : await ownBrowser!.newContext(contextOptions(opts.loginId));
+  const page = opts.session ? opts.session.page : await ctx.newPage();
 
   try {
-    await ensureLoggedIn(page, log, opts.loginId);
+    if (!opts.session) await ensureLoggedIn(page, log, opts.loginId);
     // The link the portal landed on after login is our default/first account and
     // the fallback if discovery turns up nothing.
     const defaultLink = new URL(page.url()).searchParams.get('accountLink') || undefined;
@@ -111,7 +124,9 @@ export async function collect(
     }
     return results;
   } finally {
-    await browser.close();
+    // Only close the browser we launched ourselves; a session-provided browser
+    // is closed by the runner (which owns its lifecycle).
+    await ownBrowser?.close();
   }
 }
 
