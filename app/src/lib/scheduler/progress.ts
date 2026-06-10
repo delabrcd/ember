@@ -9,6 +9,11 @@
 // refresh route's `instanceof` checks import them from this module).
 import { prisma } from '@/lib/db';
 import { formatProgressLine } from '@/lib/ngrid/progress';
+import {
+  decideScrapeClaim,
+  SCRAPE_CLAIM_ADVISORY_KEY,
+  SCRAPE_STALE_AFTER_MS,
+} from '@/lib/scheduler/scrapeLock';
 import type { ProgressFn } from '@/lib/ngrid/types';
 
 export class ScrapeBusyError extends Error {}
@@ -19,9 +24,12 @@ export class ScrapeThrottledError extends Error {}
 // latest line.
 const PROGRESS_THROTTLE_MS = 1000;
 
-// In-flight guard. A single module-level lock governs the scheduler: a manual
-// run and a scheduled tick can never double-run — the second to arrive throws
-// ScrapeBusyError. Cleared in the finally below.
+// In-flight guard (in-process fast path). A single module-level lock governs the
+// scheduler within ONE process: a manual run and a scheduled tick can never
+// double-run — the second to arrive throws ScrapeBusyError. Cleared in the
+// finally below. This is the cheapest guard for the common single-process case;
+// the cross-process claim below (issue #136) backs it for the horizontal-scale /
+// multi-worker case where two processes would each pass this check.
 let inFlight: Promise<number> | null = null;
 
 export interface RunBodyResult {
@@ -42,7 +50,34 @@ export async function runWithScrapeRun(
 ): Promise<number> {
   if (inFlight) throw new ScrapeBusyError('A scrape is already running');
 
-  const run = await prisma.scrapeRun.create({ data: { trigger, status: 'RUNNING' } });
+  // Cross-process claim (issue #136): the in-memory `inFlight` check only guards a
+  // single Node process; a second replica/worker would each pass it and log in
+  // concurrently, breaking the never-two-concurrent-logins invariant. Make the
+  // claim atomic + durable in Postgres: take a transaction-scoped advisory lock
+  // (serializes concurrent claimers; auto-released at COMMIT/ROLLBACK and on
+  // connection close, so it can never deadlock a crashed claimer), read the latest
+  // RUNNING ScrapeRun (the durable cross-process flag), and let the pure
+  // decideScrapeClaim() say CLAIM or BUSY. On CLAIM, create the new RUNNING row
+  // INSIDE the same transaction so read+claim is atomic under the lock. The
+  // transaction is fast (<1s) and the lock releases at COMMIT — long before the
+  // ~300s scrape body runs; the RUNNING row, finalized to SUCCESS/ERROR below, is
+  // what blocks other processes, and goes stale after SCRAPE_STALE_AFTER_MS so a
+  // crashed-mid-scrape run never blocks all future ticks forever.
+  const run = await prisma.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(${SCRAPE_CLAIM_ADVISORY_KEY})`;
+    const running = await tx.scrapeRun.findFirst({
+      where: { status: 'RUNNING' },
+      orderBy: { startedAt: 'desc' },
+      select: { startedAt: true },
+    });
+    const decision = decideScrapeClaim({
+      now: new Date(),
+      runningStartedAt: running?.startedAt ?? null,
+      staleAfterMs: SCRAPE_STALE_AFTER_MS,
+    });
+    if (decision === 'BUSY') throw new ScrapeBusyError('A scrape is already running (cross-process)');
+    return tx.scrapeRun.create({ data: { trigger, status: 'RUNNING' } });
+  });
 
   // Live progress (issue #40): persist the latest progress line into
   // ScrapeRun.message while the run is RUNNING. Throttled to one write per

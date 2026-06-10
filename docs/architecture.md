@@ -59,9 +59,17 @@ There is **no Node-level cron** — instead a background shell loop in the entry
 `/api/cron/tick`, which keeps the trigger reliable on the Node runtime and the build edge-safe. (It is
 still an in-process background loop, just in bash; if that subshell dies, scraping stops silently
 until the container restarts — monitor liveness externally.) A manual "Check for new bills" button
-hits `POST /api/refresh`, which enters the same runner with `trigger='MANUAL'`. Single-flight is
-enforced by an **in-memory** lock (`lib/scheduler/progress.ts`), so Ember is **single-replica by
-construction** — never run two instances against one account.
+hits `POST /api/refresh`, which enters the same runner with `trigger='MANUAL'`. Single-flight (never
+two concurrent National Grid logins) is enforced in two layers in `lib/scheduler/progress.ts`: an
+**in-memory** lock is the fast path for the common single-process case, backed by a **cross-process
+claim** so concurrent ticks across processes/replicas degrade safely (the second backs off with
+`ScrapeBusyError`). The claim takes a Postgres **transaction-scoped advisory lock** to serialize
+concurrent claimers, then a pure decision (`scrapeLock.ts`) treats the most-recent `ScrapeRun
+status=RUNNING` row as the durable cross-process flag: a fresh RUNNING run ⇒ BUSY, no RUNNING row ⇒
+CLAIM. A run that crashed mid-scrape (its row never finalized) goes **stale** after
+`SCRAPE_STALE_AFTER_MS` (~6 min, above the 300s route maxDuration) and stops blocking, so the guard
+can't deadlock future ticks. Single-replica is still the recommended deployment, but a stray second
+worker no longer logs in twice.
 
 ## 4. Pure core vs impure shell
 
