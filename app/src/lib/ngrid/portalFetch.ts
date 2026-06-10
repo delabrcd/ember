@@ -303,6 +303,14 @@ export async function fetchAmiIntervals(
           //    endpoint returns 15-minute reads. A non-2xx (gas 404s; electric on
           //    a bad range 400s) is expected and harmless: the gql above already
           //    covered this meter hourly, so we skip silently with a log.
+          //    NOTE (probed 2026-06-10): this is a NEAR-REAL-TIME endpoint that
+          //    HARD-REJECTS any startDateTime >48h in the past ("Invalid
+          //    startDateTime, more than 48 hours in the past", 400) regardless of
+          //    any endDateTime/range param — so 15-min history is NOT
+          //    back-scrapeable. It can only be captured going FORWARD (this rolling
+          //    ≤48h window, accumulating across daily scrapes). Do NOT add a
+          //    historical 15-min backfill loop — it cannot work. Deep history is
+          //    hourly (the gql backstop above, paged until dry).
           await page.waitForTimeout(1500).catch(() => {});
           const url = amiIntervalUrl(BASE, acct.premiseNumber, meter.servicePointNumber, restStartDateTime);
           const r = await ctx.request.get(url, { headers: authHeaders, timeout: 30000 });
