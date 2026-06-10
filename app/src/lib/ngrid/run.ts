@@ -15,6 +15,12 @@ import { formatProgressLine } from './progress';
 import type { ProgressFn } from './types';
 
 const MIN_SCHEDULED_GAP_MS = 5 * 60 * 1000; // don't auto-scrape more often than this
+// #121 part 2: an account with AMI smart-meter interval data is kept on at least a
+// ~daily cadence (capping the bill-prediction back-off, which idles up to a week)
+// so 15-minute interval data is captured CONTINUOUSLY. The amiadapter 15-min REST
+// only serves ~2 days, so the daily scrape's 2-day window overlaps and leaves no
+// gap; the hourly gql backstop covers everything regardless.
+const INTERVAL_DAILY_CAP_MS = 22 * 60 * 60 * 1000;
 // Don't write a live-progress update to the DB more often than this. Steps that
 // fire in a tight burst (e.g. per-PDF logs) collapse to at most one write per
 // window so we stay cheap; the trailing edge always flushes the latest line.
@@ -36,7 +42,16 @@ async function updateSchedule(accountId: number): Promise<void> {
   // date, then daily inside a window sized from historical gap variability.
   // We persist only predicted + nextCheckAt (no schema change); the window is
   // recomputed from statement history each run.
-  const nextCheckAt = computeNextCheck(now, statementDates);
+  let nextCheckAt = computeNextCheck(now, statementDates);
+  // #121 part 2: if this account has AMI interval data, never let the back-off idle
+  // longer than ~a day, so the 15-minute archive stays continuous (the bill-prediction
+  // tightening still applies inside that cap). Gated on actually having interval rows
+  // so non-AMI accounts keep the original gentle back-off.
+  const hasInterval = (await prisma.intervalUsage.count({ where: { accountId } })) > 0;
+  if (hasInterval) {
+    const cap = new Date(now.getTime() + INTERVAL_DAILY_CAP_MS);
+    if (cap < nextCheckAt) nextCheckAt = cap;
+  }
   await prisma.scheduleState.upsert({
     where: { accountId },
     create: { accountId, predictedNextBillDate: predicted, nextCheckAt, lastCheckedAt: now },
