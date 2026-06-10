@@ -95,18 +95,34 @@ function LoadShapeSettings({ fuel, onFuel }: { fuel: Fuel; onFuel: (f: Fuel) => 
   );
 }
 
-export function IntervalLoadShape({ accountId }: { accountId?: number | null }) {
+// `from`/`to` are the GLOBAL RangeControl's resolved ISO day bounds (issue #36),
+// supplied by the WidgetHost. The shape averages over this window instead of a
+// fixed trailing 30 days. Omitted (a non-dashboard caller) → the route falls back
+// to its trailing 30-day window.
+export function IntervalLoadShape({
+  accountId,
+  from,
+  to,
+}: {
+  accountId?: number | null;
+  from?: string;
+  to?: string;
+}) {
   const [fuel, setFuel] = useState<Fuel>('ELECTRIC');
   const [state, setState] = useState<LoadState>(undefined);
 
-  // Fetch on mount + whenever the fuel or the selected account changes. We track
-  // an `alive` flag so a stale response (the user flicked the toggle mid-flight)
-  // can't overwrite the current one.
+  // Fetch on mount + whenever the fuel, the global range, or the selected account
+  // changes. We track an `alive` flag so a stale response (the user flicked the
+  // toggle mid-flight) can't overwrite the current one.
   useEffect(() => {
     let alive = true;
     setState(undefined);
     const acctQuery = accountId != null ? `&accountId=${accountId}` : '';
-    fetch(`/api/interval?fuel=${fuel}&sinceDays=30${acctQuery}`)
+    // Average over the GLOBAL range when supplied; otherwise let the route default
+    // to its trailing window. The profile shapes to 24 buckets regardless of span,
+    // so no downsampling is needed here.
+    const rangeQuery = from && to ? `&from=${from}&to=${to}` : '';
+    fetch(`/api/interval?fuel=${fuel}${rangeQuery}${acctQuery}`)
       .then((r) => r.json())
       .then((j) => {
         if (!alive) return;
@@ -118,7 +134,7 @@ export function IntervalLoadShape({ accountId }: { accountId?: number | null }) 
     return () => {
       alive = false;
     };
-  }, [fuel, accountId]);
+  }, [fuel, from, to, accountId]);
 
   const color = fuel === 'GAS' ? GAS : ELEC;
   const unit = FUEL_UNIT[fuel];
@@ -233,7 +249,7 @@ export function IntervalLoadShape({ accountId }: { accountId?: number | null }) 
   return (
     <ChartShell
       title="Average daily load shape"
-      subtitle={`Typical day · ${unit} · last 30 days`}
+      subtitle={`Typical day · ${unit}`}
       fill
       body={renderBody}
       settings={<LoadShapeSettings fuel={fuel} onFuel={setFuel} />}

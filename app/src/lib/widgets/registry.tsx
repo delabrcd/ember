@@ -151,6 +151,14 @@ export interface WidgetHost {
   // links and other read routes use. Optional so a non-dashboard caller (the demo
   // gallery) can omit it (the widget then fetches the default account).
   accountId?: number | null;
+  // The resolved GLOBAL range as ISO date bounds (issue #36): the SAME
+  // resolveRange(prefs.range) the monthly charts/bills/export use, widened to a
+  // full-month [first-of-fromYm, last-of-toYm] day span. The interval widgets fetch
+  // /api/interval?from=…&to=… with these so they follow the global RangeControl
+  // instead of bespoke per-widget range buttons. Optional so a non-dashboard caller
+  // (the demo gallery) can omit them (the widgets then fall back to a trailing window).
+  fromYmd?: string;
+  toYmd?: string;
 }
 
 // WidgetDef (RFC §3.1). `defaultSize` is now REAL (Phase E, #73): the grid size
@@ -281,7 +289,9 @@ const INTERVAL_WIDGET: WidgetDef = {
   // Same footprint as a chart widget (half the lg grid, tall) so it tiles in the
   // 2×2 chart grid alongside the monthly charts.
   defaultSize: { w: 6, h: 7, minW: 3, minH: 3 },
-  render: (host) => <IntervalLoadShape accountId={host.accountId} />,
+  render: (host) => (
+    <IntervalLoadShape accountId={host.accountId} from={host.fromYmd} to={host.toYmd} />
+  ),
 };
 
 // The interval HISTORY widget (issue #121 part 2). A SELF-CONTAINED chart tile
@@ -300,7 +310,9 @@ const INTERVAL_HISTORY_WIDGET: WidgetDef = {
   // Same footprint as the other chart widgets (half the lg grid, tall) so it
   // tiles in the 2×2 chart grid alongside the monthly charts and the load-shape.
   defaultSize: { w: 6, h: 7, minW: 3, minH: 3 },
-  render: (host) => <IntervalHistory accountId={host.accountId} />,
+  render: (host) => (
+    <IntervalHistory accountId={host.accountId} from={host.fromYmd} to={host.toYmd} />
+  ),
 };
 
 // The SPACER widget (CHANGE 2, issue #73). Unlike every other widget type — which

@@ -19,7 +19,13 @@
 //     - 15m → rows.filter(r => r.intervalSeconds === 900) (raw 15-min reads).
 //             Disabled / falls back to 1h for Gas (no 15-min gas data).
 //   • Fuel: Electric | Gas
-//   • Range: 24h | 7d | 30d (drives sinceDays=1/7/30; defaults: 7d at 1h, 24h at 15m)
+//
+// RANGE (issue #36): the widget no longer owns its time window — it follows the
+// GLOBAL RangeControl, receiving the resolved `from`/`to` ISO day bounds as props
+// (the same range every monthly chart uses) and fetching /api/interval?from=…&to=….
+// A wide range (e.g. "All") is downsampled SERVER-SIDE (bucket-mean, ≤ MAX_POINTS)
+// so the chart stays smooth; the 15m resolution still only has the recent ~48h of
+// detail the API serves (older spans render at the hourly grain).
 //
 // GAPS: the chart uses connectNulls=false (the default) so real gaps in the
 // data (missing intervals — the API omits them) render as line breaks, NEVER
@@ -53,17 +59,10 @@ const axisStyle = { stroke: '#475569', fontSize: 11 } as const;
 // ---- Types ------------------------------------------------------------------
 type Fuel = 'ELECTRIC' | 'GAS';
 type Resolution = '1h' | '15m';
-type RangeDays = 1 | 7 | 30;
 
 const FUELS: readonly Fuel[] = ['ELECTRIC', 'GAS'];
 const FUEL_LABEL: Record<Fuel, string> = { ELECTRIC: 'Electric', GAS: 'Gas' };
 const FUEL_UNIT: Record<Fuel, string> = { ELECTRIC: 'kWh', GAS: 'therms' };
-
-const RANGE_OPTIONS: { label: string; days: RangeDays }[] = [
-  { label: '24h', days: 1 },
-  { label: '7d', days: 7 },
-  { label: '30d', days: 30 },
-];
 
 // The /api/interval payload rows (fuelType + unit from the API, plus the
 // IntervalProfileRow fields the shapers need).
@@ -111,24 +110,21 @@ function Segmented<T extends string>({
 
 // ---- Settings panel ---------------------------------------------------------
 // Rendered inside ChartShell's Customize popover / expand side. Mirrors
-// ChartConfigMenu's row layout (uppercase label + a segmented control): Fuel,
-// Resolution (1h/15m, 15m disabled for gas), and Range (24h/7d/30d).
+// ChartConfigMenu's row layout (uppercase label + a segmented control): Fuel and
+// Resolution (1h/15m, 15m disabled for gas). The time window is GLOBAL (issue
+// #36 — driven by the dashboard RangeControl), so there's no per-widget range row.
 function HistorySettings({
   fuel,
   onFuel,
   resolution,
   onResolution,
   resolutionDisabled,
-  rangeDays,
-  onRangeDays,
 }: {
   fuel: Fuel;
   onFuel: (f: Fuel) => void;
   resolution: Resolution;
   onResolution: (r: Resolution) => void;
   resolutionDisabled: boolean;
-  rangeDays: RangeDays;
-  onRangeDays: (d: RangeDays) => void;
 }) {
   return (
     <div className="space-y-3 text-sm">
@@ -152,23 +148,25 @@ function HistorySettings({
           disabledValues={resolutionDisabled ? new Set<Resolution>(['15m']) : undefined}
         />
       </div>
-      <div>
-        <div className="mb-1 text-xs font-medium uppercase tracking-wide text-slate-500">Range</div>
-        <Segmented
-          options={RANGE_OPTIONS.map((r) => ({ label: r.label, value: String(r.days) }))}
-          value={String(rangeDays)}
-          onChange={(v) => onRangeDays(Number(v) as RangeDays)}
-        />
-      </div>
     </div>
   );
 }
 
 // ---- Main component ---------------------------------------------------------
-export function IntervalHistory({ accountId }: { accountId?: number | null }) {
+// `from`/`to` are the GLOBAL RangeControl's resolved ISO day bounds (issue #36),
+// supplied by the WidgetHost. Omitted (a non-dashboard caller) → the route falls
+// back to its trailing 30-day window.
+export function IntervalHistory({
+  accountId,
+  from,
+  to,
+}: {
+  accountId?: number | null;
+  from?: string;
+  to?: string;
+}) {
   const [fuel, setFuel] = useState<Fuel>('ELECTRIC');
   const [resolution, setResolution] = useState<Resolution>('1h');
-  const [rangeDays, setRangeDays] = useState<RangeDays>(7);
   const [state, setState] = useState<LoadState>(undefined);
 
   // Gas has no 15-min data → disable the 15m option when fuel=Gas.
@@ -193,7 +191,11 @@ export function IntervalHistory({ accountId }: { accountId?: number | null }) {
     let alive = true;
     setState(undefined);
     const acctQuery = accountId != null ? `&accountId=${accountId}` : '';
-    fetch(`/api/interval?fuel=${fuel}&sinceDays=${rangeDays}${acctQuery}`)
+    // Follow the GLOBAL range when supplied; otherwise let the route default to its
+    // trailing window (non-dashboard caller). Server-side downsampling keeps the
+    // returned series bounded (≤ MAX_POINTS) no matter how wide the window is.
+    const rangeQuery = from && to ? `&from=${from}&to=${to}` : '';
+    fetch(`/api/interval?fuel=${fuel}${rangeQuery}${acctQuery}`)
       .then((r) => r.json())
       .then((j) => {
         if (!alive) return;
@@ -205,7 +207,7 @@ export function IntervalHistory({ accountId }: { accountId?: number | null }) {
     return () => {
       alive = false;
     };
-  }, [fuel, rangeDays, accountId]);
+  }, [fuel, from, to, accountId]);
 
   const color = fuel === 'GAS' ? GAS : ELEC;
   const unit = FUEL_UNIT[fuel];
@@ -230,9 +232,9 @@ export function IntervalHistory({ accountId }: { accountId?: number | null }) {
   const errored = !!state && 'error' in state;
   const empty = !loading && !errored && data.length === 0;
 
-  // Subtitle: e.g. "Electric · kWh · last 7d · 1h" or "Electric · kWh · last 24h · 15m"
-  const rangeLabel = rangeDays === 1 ? '24h' : rangeDays === 7 ? '7d' : '30d';
-  const subtitle = `${FUEL_LABEL[fuel]} · ${unit} · last ${rangeLabel} · ${effectiveResolution}`;
+  // Subtitle: e.g. "Electric · kWh · 1h" (the time window now follows the global
+  // RangeControl, shown in the dashboard header, so it isn't repeated here).
+  const subtitle = `${FUEL_LABEL[fuel]} · ${unit} · ${effectiveResolution}`;
 
   // Empty-state message: distinguish "no data at all" from "no data at this grain".
   const emptyMsg =
@@ -313,8 +315,6 @@ export function IntervalHistory({ accountId }: { accountId?: number | null }) {
           resolution={effectiveResolution}
           onResolution={setResolution}
           resolutionDisabled={resolutionDisabled}
-          rangeDays={rangeDays}
-          onRangeDays={setRangeDays}
         />
       }
     />

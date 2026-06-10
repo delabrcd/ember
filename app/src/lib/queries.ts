@@ -191,14 +191,24 @@ export type IntervalSeriesRow = {
 
 export async function getIntervalSeries(
   accountId: number,
-  opts: { fuelType?: string; sinceDays?: number } = {}
+  opts: { fuelType?: string; sinceDays?: number; from?: Date; to?: Date } = {}
 ): Promise<IntervalSeriesRow[]> {
-  const sinceDays = opts.sinceDays && opts.sinceDays > 0 ? opts.sinceDays : 30;
-  const since = new Date(Date.now() - sinceDays * 24 * 60 * 60 * 1000);
+  // A concrete [from, to] window wins over sinceDays (the global RangeControl
+  // path); sinceDays remains the trailing-window fallback for any caller that
+  // still uses it. Either way the column filter is the indexed `intervalStart`.
+  let when: { gte?: Date; lte?: Date };
+  if (opts.from || opts.to) {
+    when = {};
+    if (opts.from) when.gte = opts.from;
+    if (opts.to) when.lte = opts.to;
+  } else {
+    const sinceDays = opts.sinceDays && opts.sinceDays > 0 ? opts.sinceDays : 30;
+    when = { gte: new Date(Date.now() - sinceDays * 24 * 60 * 60 * 1000) };
+  }
   const rows = await prisma.intervalUsage.findMany({
     where: {
       accountId,
-      intervalStart: { gte: since },
+      intervalStart: when,
       ...(opts.fuelType ? { fuelType: opts.fuelType } : {}),
     },
     orderBy: { intervalStart: 'asc' },

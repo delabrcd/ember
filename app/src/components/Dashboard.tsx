@@ -194,6 +194,12 @@ export function Dashboard() {
     // selected account; thread the id through the host the same way the export links
     // scope (acctQuery above).
     accountId: selectedAccountId,
+    // The resolved GLOBAL range as ISO day bounds (#36): the interval widgets fetch
+    // /api/interval?from=…&to=… with these so they follow the global RangeControl,
+    // the same `resolved` ym bounds the monthly charts/bills/export already use
+    // (widened to a full-month day span, mirroring pdfScope above).
+    fromYmd: ymToYmd(resolved.fromYm),
+    toYmd: ymToLastYmd(resolved.toYm),
   };
 
   // ---- The placed-widget set (Phase E, #73) ----
