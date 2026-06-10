@@ -10,7 +10,9 @@ import { persist } from './persist';
   console.log('\n=== summary ===');
   console.log('accounts discovered:', results.length);
   for (const result of results) {
-    const summary = await persist(result);
+    // Full collect() result (all streams fetched) → opt into the sanity floor
+    // (issue #135), same as the full-scrape scheduler path.
+    const summary = await persist(result, { detectSanityFloor: true });
     console.log('account:', result.account.accountNumber, result.account.companyCode, result.account.region);
     console.log('  bills:', result.bills.length, '| usage:', result.usage.length, '| costs:', result.costs.length, '| weather:', result.weather.length);
     console.log('  PDFs downloaded this run:', result.pdfsDownloaded, '| interval reads:', result.intervals.length);

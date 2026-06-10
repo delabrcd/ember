@@ -1,5 +1,6 @@
 // Idempotent upsert of a CollectResult into Postgres.
 import { prisma } from '@/lib/db';
+import { detectSanityFloor, type SanityFlag, type SanityStream } from './sanityFloor';
 import type { CollectResult } from './types';
 
 const asDate = (s?: string): Date | null => (s ? new Date(s + 'T00:00:00Z') : null);
@@ -9,9 +10,28 @@ export interface PersistSummary {
   billsTotal: number;
   billsAdded: number;
   intervalsAdded: number;
+  // Streams that an ESTABLISHED account returned zero rows for this scrape — an
+  // upstream-shape break suspected (issue #135). Empty/undefined in the healthy
+  // case. The handler surfaces these (ScrapeRun summary + Notification); persist
+  // SKIPS the empty upsert loop for each so existing rows are preserved.
+  sanityFlags?: SanityFlag[];
 }
 
-export async function persist(result: CollectResult): Promise<PersistSummary> {
+export interface PersistOptions {
+  // Run the scrape sanity floor (issue #135). OFF by default. ONLY the full-scrape
+  // path opts in, because only it persists a result where all three of bills/usage/
+  // costs were genuinely fetched. The partial-persist callers (intervalPull,
+  // pdfFetch) pass empty streams to mean "I didn't fetch this — leave it untouched",
+  // NOT "upstream returned nothing"; running the floor there would flag every empty
+  // stream as a suspect zero on every tick (and waste the extra COUNT queries). So
+  // the detector is opt-in and only honest when the caller fetched all three.
+  detectSanityFloor?: boolean;
+}
+
+export async function persist(
+  result: CollectResult,
+  opts: PersistOptions = {}
+): Promise<PersistSummary> {
   const a = result.account;
 
   // Tag the account with the login it was scraped under. Env-bootstrapped
@@ -48,7 +68,31 @@ export async function persist(result: CollectResult): Promise<PersistSummary> {
   // Count existing bills first so we can report how many are new this run.
   const before = await prisma.bill.count({ where: { accountId: account.id } });
 
-  for (const b of result.bills) {
+  // Scrape sanity floor (issue #135) — OPT-IN, only the full-scrape path enables it
+  // (see PersistOptions). When OFF (a partial persist: intervalPull/pdfFetch pass
+  // empty streams meaning "not fetched", NOT "upstream broke") we skip the detector
+  // AND its extra COUNT queries entirely, leaving `suspect` empty so the upsert loops
+  // below run exactly as they did before this feature. When ON, we count the prior
+  // usage/cost rows too (bills use `before`), then ask the PURE detector which
+  // streams an ESTABLISHED account returned zero rows for — a suspected upstream-
+  // shape break. For each flagged stream we SKIP its upsert loop below so the empty
+  // scrape can't write over good history, and we return the flag so the handler
+  // surfaces it (no longer silent). A genuinely new/empty account (prior 0) never
+  // trips this.
+  let sanityFlags: SanityFlag[] = [];
+  const suspect = new Set<SanityStream>();
+  if (opts.detectSanityFloor) {
+    const usageBefore = await prisma.usage.count({ where: { accountId: account.id } });
+    const costBefore = await prisma.cost.count({ where: { accountId: account.id } });
+    sanityFlags = detectSanityFloor({
+      bills: { prior: before, incoming: result.bills.length },
+      usages: { prior: usageBefore, incoming: result.usage.length },
+      costs: { prior: costBefore, incoming: result.costs.length },
+    });
+    for (const f of sanityFlags) suspect.add(f.stream);
+  }
+
+  if (!suspect.has('bills')) for (const b of result.bills) {
     const statementDate = asDate(b.statementDate)!;
     await prisma.bill.upsert({
       where: { accountId_statementDate: { accountId: account.id, statementDate } },
@@ -73,7 +117,7 @@ export async function persist(result: CollectResult): Promise<PersistSummary> {
     });
   }
 
-  for (const u of result.usage) {
+  if (!suspect.has('usages')) for (const u of result.usage) {
     if (!u.periodYearMonth) continue;
     await prisma.usage.upsert({
       where: {
@@ -96,7 +140,7 @@ export async function persist(result: CollectResult): Promise<PersistSummary> {
     });
   }
 
-  for (const c of result.costs) {
+  if (!suspect.has('costs')) for (const c of result.costs) {
     if (!c.periodYearMonth || !c.fuelType) continue;
     await prisma.cost.upsert({
       where: {
@@ -170,5 +214,11 @@ export async function persist(result: CollectResult): Promise<PersistSummary> {
   }
 
   const after = await prisma.bill.count({ where: { accountId: account.id } });
-  return { accountId: account.id, billsTotal: after, billsAdded: after - before, intervalsAdded };
+  return {
+    accountId: account.id,
+    billsTotal: after,
+    billsAdded: after - before,
+    intervalsAdded,
+    ...(sanityFlags.length ? { sanityFlags } : {}),
+  };
 }

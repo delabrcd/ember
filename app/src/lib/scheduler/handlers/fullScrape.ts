@@ -17,12 +17,39 @@ import {
   computeFullScrapeNextRun,
   PDF_PENDING_RECENT_DAYS,
 } from '@/lib/scheduler/cadence';
+import type { SanityFlag } from '@/lib/ngrid/sanityFloor';
 import type { TaskContext, TaskHandler, TaskResult, ArmSpec } from '@/lib/scheduler/types';
 
 // Backoff when the login pass errors — mirrors run.ts's posture of not idling a
 // whole week after a hiccup. ~6h (PDF-pending cadence) is a reasonable retry.
 const ERROR_BACKOFF_MS = 6 * 60 * 60 * 1000;
 const SCRATCH_KEY = 'fullScrapeDone';
+
+// Persist a scrape-sanity-floor flag (issue #135) as a Notification so a stream
+// an established account suddenly returned zero rows for is no longer silent. The
+// `key` includes the run's UTC day so repeated ticks the SAME day dedupe (one
+// alert per stream per day) but a recurrence on a later day re-fires. Insert-only
+// (skipDuplicates) — never clobbers an existing row's readAt/createdAt, matching
+// notificationStore's idempotency contract. This is run-state, not anomaly logic
+// derived from stored numbers, so a guarded direct insert here is appropriate.
+async function recordSanityFlag(accountId: number, flag: SanityFlag, now: Date): Promise<void> {
+  const ymd = now.toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
+  await prisma.notification
+    .createMany({
+      data: [
+        {
+          accountId,
+          kind: 'scrape',
+          key: `scrape-gap:${flag.stream}:${ymd}`,
+          title: 'Possible upstream change — empty scrape stream',
+          message: `${flag.reason}. Existing rows were preserved (not overwritten). National Grid may have renamed a field; verify the account against the portal.`,
+          payload: { stream: flag.stream, prior: flag.prior, reason: flag.reason, ymd },
+        },
+      ],
+      skipDuplicates: true, // (accountId, key) conflict → no-op; one alert/stream/day
+    })
+    .catch(() => {});
+}
 
 // Gather the three cadence facts for an account impurely (statementDates from its
 // bills, hasIntervalData from the interval table, hasRecentPendingPdf from recent
@@ -130,12 +157,31 @@ async function run(ctx: TaskContext): Promise<TaskResult> {
   let billsTotal = 0;
   let billsAdded = 0;
   let pdfsDownloaded = 0;
+  // Scrape-sanity-floor warnings (issue #135), one per suspect stream, surfaced
+  // in the ScrapeRun summary message via metrics.warnings.
+  const warnings: string[] = [];
   for (const result of results) {
-    const summary = await persist(result);
+    // Opt into the scrape sanity floor (issue #135): this is the ONLY caller that
+    // persists a full collect() result where bills/usage/costs were all genuinely
+    // fetched, so an established stream going to zero here really is suspect. The
+    // partial-persist callers (intervalPull/pdfFetch) deliberately leave it off.
+    const summary = await persist(result, { detectSanityFloor: true });
     const accountId = summary.accountId;
     billsTotal += summary.billsTotal;
     billsAdded += summary.billsAdded;
     pdfsDownloaded += result.pdfsDownloaded;
+
+    // persist() preserved the existing rows for any stream that came back empty
+    // for this ESTABLISHED account; here we make it LOUD — a Notification row per
+    // suspect stream and a warning folded into the run summary. A genuinely
+    // new/empty account never trips this (the pure detector gates on prior > 0).
+    if (summary.sanityFlags?.length) {
+      for (const flag of summary.sanityFlags) {
+        await recordSanityFlag(accountId, flag, now);
+        warnings.push(`acct ${accountId}: ${flag.reason}`);
+        log(`scrape sanity floor: acct ${accountId} ${flag.reason} — preserved existing rows, flagged`);
+      }
+    }
     const { nextRunAt, hasRecentPendingPdf } = await computeAndWriteSchedule(accountId, now);
     lastNextRunAt = nextRunAt;
     if (accountId === task.accountId) thisTaskNextRunAt = nextRunAt;
@@ -169,7 +215,13 @@ async function run(ctx: TaskContext): Promise<TaskResult> {
     nextRunAt,
     status: 'SUCCESS',
     arm,
-    metrics: { billsTotal, billsAdded, pdfsDownloaded, accountCount: results.length },
+    metrics: {
+      billsTotal,
+      billsAdded,
+      pdfsDownloaded,
+      accountCount: results.length,
+      ...(warnings.length ? { warnings } : {}),
+    },
   };
 }
 
