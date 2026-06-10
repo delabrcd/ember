@@ -2,6 +2,19 @@
 # Apply DB schema, start a background scheduler loop, then run Next.js.
 set -e
 
+# Arbitrary-uid tolerance (OpenShift-style). The image defaults to the `ember`
+# user, but the operator overrides it (`user: "1003:1004"`) to match the host so
+# the backup user can read the session files. An overridden uid has no /etc/passwd
+# entry, so getpwuid() fails — and psql/pg_dump and chromium both abort with
+# "local user with ID … does not exist". If the current uid is unknown and
+# /etc/passwd is writable (made group-0-writable in the Dockerfile), self-register
+# it so the rest of the entrypoint and the scraper run cleanly.
+if ! whoami >/dev/null 2>&1; then
+  if [ -w /etc/passwd ]; then
+    echo "ember:x:$(id -u):$(id -g):ember:${HOME:-/tmp}:/sbin/nologin" >> /etc/passwd
+  fi
+fi
+
 # Drop Prisma-only query parameters from a postgres:// URL so it's a valid libpq
 # conninfo. libpq rejects ANY query parameter it doesn't recognize (psql/pg_dump exit
 # with `invalid URI query parameter: "..."`), but Prisma routinely appends its own —
