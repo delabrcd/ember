@@ -24,6 +24,7 @@ import {
   YAxis,
 } from 'recharts';
 import { averageDayProfile, reconcileToHourly, type IntervalProfileRow } from '@/lib/intervalProfile';
+import { ChartShell } from '../ChartShell';
 
 // The dashboard's dark-slate theme + the elec amber / gas blue tokens (mirrors
 // chartSpec.ts and ConfigurableChart so the widget matches the surrounding charts).
@@ -49,21 +50,47 @@ type IntervalApiRow = IntervalProfileRow & { fuelType?: string; unit?: string };
 // empty) = loaded.
 type LoadState = { rows: IntervalApiRow[] } | { error: true } | undefined;
 
-// The fuel toggle — a segmented control mirroring ConfigurableChart's Segmented.
-function FuelToggle({ value, onChange }: { value: Fuel; onChange: (f: Fuel) => void }) {
+// A labelled segmented control matching ConfigurableChart's Segmented, but with
+// distinct option value/label (the fuel enum is uppercase, the label is not).
+function LabelledSegmented<T extends string>({
+  value,
+  options,
+  onChange,
+}: {
+  value: T;
+  options: { label: string; value: T }[];
+  onChange: (v: T) => void;
+}) {
   return (
     <div className="inline-flex overflow-hidden rounded-lg border border-slate-700">
-      {FUELS.map((f) => (
+      {options.map((o) => (
         <button
-          key={f}
-          onClick={() => onChange(f)}
+          key={o.value}
+          onClick={() => onChange(o.value)}
           className={`px-2.5 py-1 text-xs transition ${
-            value === f ? 'bg-amber-500 text-slate-950' : 'bg-slate-800/50 text-slate-300 hover:bg-slate-700'
+            value === o.value ? 'bg-amber-500 text-slate-950' : 'bg-slate-800/50 text-slate-300 hover:bg-slate-700'
           }`}
         >
-          {FUEL_LABEL[f]}
+          {o.label}
         </button>
       ))}
+    </div>
+  );
+}
+
+// The settings panel rendered inside ChartShell's Customize popover / expand side.
+// Mirrors ChartConfigMenu's row layout (uppercase label + a segmented control).
+function LoadShapeSettings({ fuel, onFuel }: { fuel: Fuel; onFuel: (f: Fuel) => void }) {
+  return (
+    <div className="space-y-3 text-sm">
+      <div>
+        <div className="mb-1 text-xs font-medium uppercase tracking-wide text-slate-500">Fuel</div>
+        <LabelledSegmented
+          value={fuel}
+          options={FUELS.map((f) => ({ label: FUEL_LABEL[f], value: f }))}
+          onChange={onFuel}
+        />
+      </div>
     </div>
   );
 }
@@ -124,39 +151,31 @@ export function IntervalLoadShape({ accountId }: { accountId?: number | null }) 
   const errored = !!state && 'error' in state;
   const empty = !loading && !errored && data.length === 0;
 
-  return (
-    <div className="card relative flex h-full min-h-0 flex-col !p-2.5">
-      <div className="mb-1 flex shrink-0 items-start justify-between gap-2">
-        <div className="min-w-0">
-          <h3 className="truncate text-sm font-semibold text-slate-100">Average daily load shape</h3>
-          <p className="truncate text-xs text-slate-400">Typical day · {unit} · last 30 days</p>
+  // The chart body (render-prop for ChartShell): keeps the loading/empty/errored
+  // states and the Recharts tree, just drawn into the height ChartShell supplies
+  // (the grid cell at "100%" in the card, or "80vh" in the Expand modal).
+  const renderBody = (h: number | string) => (
+    <div style={{ height: h }} className="w-full">
+      {loading ? (
+        // Loading: a muted skeleton bar (the chart area's height is the grid
+        // cell's, via the flex-1 min-h-0 chain).
+        <div className="flex h-full w-full items-center justify-center">
+          <div className="h-full w-full animate-pulse rounded-lg bg-slate-800/40" />
         </div>
-        <div className="shrink-0">
-          <FuelToggle value={fuel} onChange={setFuel} />
+      ) : errored ? (
+        <div className="flex h-full w-full items-center justify-center px-4 text-center text-xs text-slate-400">
+          Couldn&apos;t load interval data — try again on the next check.
         </div>
-      </div>
-
-      <div className="min-h-0 flex-1">
-        {loading ? (
-          // Loading: a muted skeleton bar (the chart area's height is the grid
-          // cell's, via the flex-1 min-h-0 chain).
-          <div className="flex h-full w-full items-center justify-center">
-            <div className="h-full w-full animate-pulse rounded-lg bg-slate-800/40" />
-          </div>
-        ) : errored ? (
-          <div className="flex h-full w-full items-center justify-center px-4 text-center text-xs text-slate-400">
-            Couldn&apos;t load interval data — try again on the next check.
-          </div>
-        ) : empty ? (
-          // Empty: a friendly muted message, NOT a broken blank chart.
-          <div className="flex h-full w-full items-center justify-center px-4 text-center text-sm text-slate-400">
-            <span>
-              No interval data yet{fuel === 'GAS' ? ' for gas' : ''} — it&apos;s collected on each scheduled check.
-            </span>
-          </div>
-        ) : (
-          <ResponsiveContainer width="100%" height="100%">
-            <ComposedChart data={data} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
+      ) : empty ? (
+        // Empty: a friendly muted message, NOT a broken blank chart.
+        <div className="flex h-full w-full items-center justify-center px-4 text-center text-sm text-slate-400">
+          <span>
+            No interval data yet{fuel === 'GAS' ? ' for gas' : ''} — it&apos;s collected on each scheduled check.
+          </span>
+        </div>
+      ) : (
+        <ResponsiveContainer width="100%" height="100%">
+          <ComposedChart data={data} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
               <CartesianGrid stroke="#1e293b" vertical={false} />
               <XAxis dataKey="label" {...axisStyle} minTickGap={24} />
               <YAxis {...axisStyle} width={40} tickFormatter={(v) => Number(v).toFixed(1)} />
@@ -209,6 +228,15 @@ export function IntervalLoadShape({ accountId }: { accountId?: number | null }) 
           </ResponsiveContainer>
         )}
       </div>
-    </div>
+    );
+
+  return (
+    <ChartShell
+      title="Average daily load shape"
+      subtitle={`Typical day · ${unit} · last 30 days`}
+      fill
+      body={renderBody}
+      settings={<LoadShapeSettings fuel={fuel} onFuel={setFuel} />}
+    />
   );
 }

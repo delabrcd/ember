@@ -37,6 +37,7 @@ import {
 } from 'recharts';
 import { reconcileToHourly, type IntervalProfileRow } from '@/lib/intervalProfile';
 import { toHistoryPoints } from '@/lib/intervalHistory';
+import { ChartShell } from '../ChartShell';
 
 // ---- Theme constants (mirrors IntervalLoadShape) ----------------------------
 const ELEC = '#f59e0b';
@@ -104,6 +105,61 @@ function Segmented<T extends string>({
           </button>
         );
       })}
+    </div>
+  );
+}
+
+// ---- Settings panel ---------------------------------------------------------
+// Rendered inside ChartShell's Customize popover / expand side. Mirrors
+// ChartConfigMenu's row layout (uppercase label + a segmented control): Fuel,
+// Resolution (1h/15m, 15m disabled for gas), and Range (24h/7d/30d).
+function HistorySettings({
+  fuel,
+  onFuel,
+  resolution,
+  onResolution,
+  resolutionDisabled,
+  rangeDays,
+  onRangeDays,
+}: {
+  fuel: Fuel;
+  onFuel: (f: Fuel) => void;
+  resolution: Resolution;
+  onResolution: (r: Resolution) => void;
+  resolutionDisabled: boolean;
+  rangeDays: RangeDays;
+  onRangeDays: (d: RangeDays) => void;
+}) {
+  return (
+    <div className="space-y-3 text-sm">
+      <div>
+        <div className="mb-1 text-xs font-medium uppercase tracking-wide text-slate-500">Fuel</div>
+        <Segmented
+          options={FUELS.map((f) => ({ label: FUEL_LABEL[f], value: f }))}
+          value={fuel}
+          onChange={onFuel}
+        />
+      </div>
+      <div>
+        <div className="mb-1 text-xs font-medium uppercase tracking-wide text-slate-500">Resolution</div>
+        <Segmented
+          options={[
+            { label: '1h', value: '1h' as Resolution },
+            { label: '15m', value: '15m' as Resolution },
+          ]}
+          value={resolution}
+          onChange={onResolution}
+          disabledValues={resolutionDisabled ? new Set<Resolution>(['15m']) : undefined}
+        />
+      </div>
+      <div>
+        <div className="mb-1 text-xs font-medium uppercase tracking-wide text-slate-500">Range</div>
+        <Segmented
+          options={RANGE_OPTIONS.map((r) => ({ label: r.label, value: String(r.days) }))}
+          value={String(rangeDays)}
+          onChange={(v) => onRangeDays(Number(v) as RangeDays)}
+        />
+      </div>
     </div>
   );
 }
@@ -184,60 +240,25 @@ export function IntervalHistory({ accountId }: { accountId?: number | null }) {
       ? `No 15-minute data yet for ${FUEL_LABEL[fuel].toLowerCase()} — it's collected on each scheduled check.`
       : `No interval data yet for ${FUEL_LABEL[fuel].toLowerCase()} — it's collected on each scheduled check.`;
 
-  return (
-    <div className="card relative flex h-full min-h-0 flex-col !p-2.5">
-      {/* Header row: title + subtitle + controls */}
-      <div className="mb-1 flex shrink-0 flex-col gap-1">
-        <div className="flex items-start justify-between gap-2">
-          <div className="min-w-0">
-            <h3 className="truncate text-sm font-semibold text-slate-100">Usage history</h3>
-            <p className="truncate text-xs text-slate-400">{subtitle}</p>
-          </div>
-          {/* Fuel toggle */}
-          <div className="shrink-0">
-            <Segmented
-              options={FUELS.map((f) => ({ label: FUEL_LABEL[f], value: f }))}
-              value={fuel}
-              onChange={setFuel}
-            />
-          </div>
+  // The chart body (render-prop for ChartShell): keeps the loading/empty/errored
+  // states and the Recharts tree, drawn into the height ChartShell supplies.
+  const renderBody = (h: number | string) => (
+    <div style={{ height: h }} className="w-full">
+      {loading ? (
+        <div className="flex h-full w-full items-center justify-center">
+          <div className="h-full w-full animate-pulse rounded-lg bg-slate-800/40" />
         </div>
-        {/* Resolution + Range toggles in a second row */}
-        <div className="flex items-center gap-2">
-          <Segmented
-            options={[
-              { label: '1h', value: '1h' as Resolution },
-              { label: '15m', value: '15m' as Resolution },
-            ]}
-            value={effectiveResolution}
-            onChange={setResolution}
-            disabledValues={resolutionDisabled ? new Set<Resolution>(['15m']) : undefined}
-          />
-          <Segmented
-            options={RANGE_OPTIONS.map((r) => ({ label: r.label, value: String(r.days) as string }))}
-            value={String(rangeDays)}
-            onChange={(v) => setRangeDays(Number(v) as RangeDays)}
-          />
+      ) : errored ? (
+        <div className="flex h-full w-full items-center justify-center px-4 text-center text-xs text-slate-400">
+          Couldn&apos;t load interval data — try again on the next check.
         </div>
-      </div>
-
-      {/* Chart area */}
-      <div className="min-h-0 flex-1">
-        {loading ? (
-          <div className="flex h-full w-full items-center justify-center">
-            <div className="h-full w-full animate-pulse rounded-lg bg-slate-800/40" />
-          </div>
-        ) : errored ? (
-          <div className="flex h-full w-full items-center justify-center px-4 text-center text-xs text-slate-400">
-            Couldn&apos;t load interval data — try again on the next check.
-          </div>
-        ) : empty ? (
-          <div className="flex h-full w-full items-center justify-center px-4 text-center text-sm text-slate-400">
-            <span>{emptyMsg}</span>
-          </div>
-        ) : (
-          <ResponsiveContainer width="100%" height="100%">
-            <LineChart data={data} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
+      ) : empty ? (
+        <div className="flex h-full w-full items-center justify-center px-4 text-center text-sm text-slate-400">
+          <span>{emptyMsg}</span>
+        </div>
+      ) : (
+        <ResponsiveContainer width="100%" height="100%">
+          <LineChart data={data} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
               <CartesianGrid stroke="#1e293b" vertical={false} />
               <XAxis
                 dataKey="label"
@@ -277,6 +298,25 @@ export function IntervalHistory({ accountId }: { accountId?: number | null }) {
           </ResponsiveContainer>
         )}
       </div>
-    </div>
+    );
+
+  return (
+    <ChartShell
+      title="Usage history"
+      subtitle={subtitle}
+      fill
+      body={renderBody}
+      settings={
+        <HistorySettings
+          fuel={fuel}
+          onFuel={setFuel}
+          resolution={effectiveResolution}
+          onResolution={setResolution}
+          resolutionDisabled={resolutionDisabled}
+          rangeDays={rangeDays}
+          onRangeDays={setRangeDays}
+        />
+      }
+    />
   );
 }
