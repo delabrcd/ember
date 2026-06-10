@@ -245,22 +245,35 @@ export function intervalDateWindow(
   return { dateFrom: fmtDate(new Date(now.getTime() - windowDays * DAY_MS)), dateTo };
 }
 
-// Decide how many days of HOURLY gql interval history to pull on a given scrape.
-//   - When the operator set INTERVAL_BACKFILL_FROM (hasEnvOverride), that override
-//     wins downstream (it's passed straight to intervalDateWindow), so the
-//     window-days here is irrelevant — just return normalDays.
-//   - On a FIRST run (the account has no stored interval rows yet) with NO env
-//     override, pull a WIDE one-time deep backfill: max(normalDays, autoDays).
-//   - Otherwise (steady state) use the normal tail window (normalDays).
-// PURE.
-export function gqlBackfillWindowDays(
-  isFirstRun: boolean,
-  hasEnvOverride: boolean,
-  normalDays: number,
-  autoDays: number
-): number {
-  if (isFirstRun && !hasEnvOverride) return Math.max(normalDays, autoDays);
-  return normalDays;
+// Build the ordered (newest→oldest) sequence of [from, to] `YYYY-MM-DD` chunk
+// bounds for a FIRST-RUN deep backfill that pages BACKWARD from `now` until the
+// meter runs dry. Each chunk spans `chunkDays`: the first is [now−chunkDays, now],
+// the next [now−2·chunkDays, now−chunkDays], etc. Adjacent chunks share their
+// boundary date (chunk[i].from === chunk[i+1].to) so the upsert dedups the seam;
+// they are contiguous + non-overlapping in covered range and strictly newest-first.
+// `maxDays` is a SAFETY ceiling (not a data cap): paging stops once the cumulative
+// span reaches it, so a misbehaving endpoint can never loop forever. A partial
+// final chunk (when maxDays isn't a multiple of chunkDays) is clamped to maxDays.
+// The caller stops EARLY on 2 consecutive empty chunks (that needs live responses,
+// so it lives in fetchAmiIntervals); this just enumerates the candidate windows.
+// PURE. Mirrors fmtDate's UTC YYYY-MM-DD formatting.
+export function backwardChunks(
+  now: Date,
+  chunkDays: number,
+  maxDays: number
+): Array<{ from: string; to: string }> {
+  const chunks: Array<{ from: string; to: string }> = [];
+  if (!(chunkDays > 0) || !(maxDays > 0)) return chunks;
+  const nowMs = now.getTime();
+  let offsetDays = 0;
+  while (offsetDays < maxDays) {
+    const toMs = nowMs - offsetDays * DAY_MS;
+    const fromDays = Math.min(offsetDays + chunkDays, maxDays);
+    const fromMs = nowMs - fromDays * DAY_MS;
+    chunks.push({ from: fmtDate(new Date(fromMs)), to: fmtDate(new Date(toMs)) });
+    offsetDays = fromDays;
+  }
+  return chunks;
 }
 
 // Parse a batch of `amiEnergyUsages` nodes for ONE fuel into IntervalReadRows.

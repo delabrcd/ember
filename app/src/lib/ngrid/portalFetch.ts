@@ -15,8 +15,8 @@ import {
   amiEnergyUsagesBody,
   amiIntervalUrl,
   backfillStartFor,
+  backwardChunks,
   extractAmiMeters,
-  gqlBackfillWindowDays,
   intervalDateWindow,
   parseAmiEnergyUsages,
   parseIntervalReads,
@@ -27,11 +27,16 @@ import type { AccountInfo, BillRow, CostRow, ProgressFn } from './types';
 
 const BASE = 'https://myaccount.nationalgrid.com';
 
-// One-time first-run deep pull (~13 months) of HOURLY interval history for a
-// brand-new account that has no stored interval rows yet and no env override.
+// First-run deep pull of ALL available HOURLY interval history for a brand-new
+// account (no stored interval rows yet, no env override): we page BACKWARD from
+// now in 31-day chunks until the meter runs dry (2 consecutive empty chunks),
+// discovering the full history regardless of meter age — no arbitrary day cap.
 // After the first run the account has rows, so subsequent scrapes use the normal
 // tail window. INTERVAL_BACKFILL_FROM (when set) still overrides everything.
-const AUTO_BACKFILL_DAYS = 400;
+//
+// Safety ceiling ONLY (not a data cap): ~20 years bounds the backward paging so a
+// misbehaving endpoint can never loop forever. If we ever hit it we log it.
+const MAX_BACKFILL_DAYS = 20 * 365;
 
 // Format a Date as the energy-usage gql `YYYY-MM-DD` (UTC fields), matching
 // interval.ts's window formatting — used to page a wide gas backfill in chunks.
@@ -165,12 +170,15 @@ export async function fetchAmiIntervals(
     } else if (!acct.premiseNumber) {
       log('interval: no premise number; skipping interval fetch');
     } else {
+      // Narrowed non-null above; capture for use inside the fetchChunk closure
+      // (TS doesn't carry the narrowing into a nested function body).
+      const premiseNumber = acct.premiseNumber;
       const windowDays = Number.parseInt(process.env.INTERVAL_WINDOW_DAYS || '', 10);
       const effectiveWindowDays = Number.isFinite(windowDays) && windowDays > 0 ? windowDays : 35;
       // First-run detection: a brand-new account (no stored interval rows) gets a
-      // one-time WIDE hourly backfill (AUTO_BACKFILL_DAYS) WITHOUT the operator
-      // setting any env var. The probe is injected (collect.ts stays DB-free);
-      // omitted or failing → safe default "has data" (normal tail window).
+      // one-time DEEP hourly backfill — pages BACKWARD until the meter runs dry —
+      // WITHOUT the operator setting any env var. The probe is injected (collect.ts
+      // stays DB-free); omitted or failing → safe default "has data" (normal tail).
       let isFirstIntervalRun = false;
       if (hasIntervalData) {
         try {
@@ -179,14 +187,11 @@ export async function fetchAmiIntervals(
           isFirstIntervalRun = false; // probe failure → safe default: normal tail
         }
       }
-      // Widen ONLY the hourly gql window on a first run, and ONLY when there's no
-      // env override (INTERVAL_BACKFILL_FROM still wins via intervalDateWindow).
-      const gqlWindowDays = gqlBackfillWindowDays(
-        isFirstIntervalRun,
-        !!process.env.INTERVAL_BACKFILL_FROM,
-        effectiveWindowDays,
-        AUTO_BACKFILL_DAYS
-      );
+      // The deep first-run backfill only kicks in WITHOUT an env override
+      // (INTERVAL_BACKFILL_FROM is the operator's explicit floor and still wins
+      // via intervalDateWindow's forward-chunked window below).
+      const hasEnvOverride = !!process.env.INTERVAL_BACKFILL_FROM;
+      const deepBackfill = isFirstIntervalRun && !hasEnvOverride;
       // Short window for the 15-min REST overlay — kept small so the amiadapter
       // endpoint actually returns 15-min reads (it 400s on a long range); the
       // hourly gql above is the wide backstop. Default 2 days.
@@ -207,56 +212,91 @@ export async function fetchAmiIntervals(
         let gqlRows = 0;
         let restRows = 0;
         try {
-          // 1) HOURLY gql backstop — ALWAYS run (both fuels). Window the
-          //    [dateFrom, dateTo] range and page it in ≤31-day chunks (sequential,
-          //    with the existing settle delay) so a wide backfill stays a good
-          //    guest. The default tail is a single window.
+          // 1) HOURLY gql backstop — ALWAYS run (both fuels). Two windowing modes,
+          //    both paged in ≤31-day chunks (sequential, with the existing settle
+          //    delay) so we stay a good guest:
+          //      - DEEP first-run backfill: page BACKWARD (newest→oldest) from now
+          //        until the meter runs dry (2 consecutive empty chunks), bounded by
+          //        the MAX_BACKFILL_DAYS safety ceiling. Discovers the full history.
+          //      - Otherwise (steady-state tail, OR an INTERVAL_BACKFILL_FROM floor):
+          //        the forward-chunked [dateFrom, dateTo] window from
+          //        intervalDateWindow (default tail is a single chunk).
           log(`interval: fetching ${meter.fuelType} hourly gql (sp ${meter.servicePointNumber})`);
-          if (gqlWindowDays > effectiveWindowDays) {
-            log(`interval: first run for ${meter.fuelType} — backfilling ~${AUTO_BACKFILL_DAYS}d of hourly history`);
-          }
-          const { dateFrom, dateTo } = intervalDateWindow(
-            new Date(),
-            process.env.INTERVAL_BACKFILL_FROM,
-            gqlWindowDays
-          );
-          const fromMs = Date.parse(dateFrom);
-          const toMs = Date.parse(dateTo);
-          let chunkStart = Number.isFinite(fromMs) ? fromMs : toMs;
-          const endMs = Number.isFinite(toMs) ? toMs : chunkStart;
-          let chunks = 0;
-          while (chunkStart <= endMs) {
-            const chunkEnd = Math.min(chunkStart + MAX_GQL_SPAN_DAYS * DAY_MS, endMs);
-            const chunkFrom = fmtGqlDate(new Date(chunkStart));
-            const chunkTo = fmtGqlDate(new Date(chunkEnd));
+
+          // POST one [from, to] chunk, parse + collect rows, return how many rows
+          // it yielded (so the backward pager can detect empty windows).
+          const fetchChunk = async (chunkFrom: string, chunkTo: string): Promise<number> => {
             const gqlResp = await ctx.request.post(`${BASE}/api/energyusage-cu-uwp-gql`, {
               headers: { ...authHeaders, 'content-type': 'application/json' },
-              data: amiEnergyUsagesBody(meter, acct.premiseNumber, chunkFrom, chunkTo),
+              data: amiEnergyUsagesBody(meter, premiseNumber, chunkFrom, chunkTo),
               timeout: 30000,
             });
-            if (gqlResp.ok()) {
-              const gjson = (await gqlResp.json().catch(() => null)) as {
-                data?: { amiEnergyUsages?: { nodes?: unknown } };
-              } | null;
-              const nodes = gjson?.data?.amiEnergyUsages?.nodes;
-              if (Array.isArray(nodes)) {
-                const rows = parseAmiEnergyUsages(
-                  nodes as Array<{ date: string; fuelType?: string; quantity: number }>,
-                  meter.fuelType
-                );
-                intervals.push(...rows);
-                gqlRows += rows.length;
-              } else {
-                log(`interval: ${meter.fuelType} gql ${chunkFrom}..${chunkTo} had no nodes`);
-              }
-            } else {
+            if (!gqlResp.ok()) {
               log(`interval: ${meter.fuelType} gql ${chunkFrom}..${chunkTo} HTTP ${gqlResp.status()}`);
+              return 0;
             }
-            chunks++;
-            if (chunkEnd >= endMs) break;
-            chunkStart = chunkEnd + DAY_MS;
-            // Settle between chunks (good guest).
-            await page.waitForTimeout(1500).catch(() => {});
+            const gjson = (await gqlResp.json().catch(() => null)) as {
+              data?: { amiEnergyUsages?: { nodes?: unknown } };
+            } | null;
+            const nodes = gjson?.data?.amiEnergyUsages?.nodes;
+            if (!Array.isArray(nodes)) {
+              log(`interval: ${meter.fuelType} gql ${chunkFrom}..${chunkTo} had no nodes`);
+              return 0;
+            }
+            const rows = parseAmiEnergyUsages(
+              nodes as Array<{ date: string; fuelType?: string; quantity: number }>,
+              meter.fuelType
+            );
+            intervals.push(...rows);
+            gqlRows += rows.length;
+            return rows.length;
+          };
+
+          let chunks = 0;
+          if (deepBackfill) {
+            // DEEP first-run discovery: page backward until 2 CONSECUTIVE chunks
+            // return zero rows (a single empty 31-day window can be a legit gap,
+            // e.g. a move-out, so require two in a row before concluding we're
+            // before the meter install). The window math is the pure
+            // backwardChunks(); the stop condition needs the live responses.
+            log(`interval: first run for ${meter.fuelType} — discovering full hourly history (paging backward until dry)`);
+            const windows = backwardChunks(new Date(), MAX_GQL_SPAN_DAYS, MAX_BACKFILL_DAYS);
+            let consecutiveEmpty = 0;
+            for (const w of windows) {
+              const got = await fetchChunk(w.from, w.to);
+              chunks++;
+              consecutiveEmpty = got === 0 ? consecutiveEmpty + 1 : 0;
+              if (consecutiveEmpty >= 2) break;
+              if (chunks >= windows.length) {
+                log(`interval: ${meter.fuelType} hit MAX_BACKFILL_DAYS safety ceiling (${MAX_BACKFILL_DAYS}d) before running dry`);
+                break;
+              }
+              // Settle between chunks (good guest).
+              await page.waitForTimeout(1500).catch(() => {});
+            }
+          } else {
+            // Steady-state tail (or an INTERVAL_BACKFILL_FROM floor): forward-chunk
+            // the [dateFrom, dateTo] window. The default tail is a single chunk.
+            const { dateFrom, dateTo } = intervalDateWindow(
+              new Date(),
+              process.env.INTERVAL_BACKFILL_FROM,
+              effectiveWindowDays
+            );
+            const fromMs = Date.parse(dateFrom);
+            const toMs = Date.parse(dateTo);
+            let chunkStart = Number.isFinite(fromMs) ? fromMs : toMs;
+            const endMs = Number.isFinite(toMs) ? toMs : chunkStart;
+            while (chunkStart <= endMs) {
+              const chunkEnd = Math.min(chunkStart + MAX_GQL_SPAN_DAYS * DAY_MS, endMs);
+              const chunkFrom = fmtGqlDate(new Date(chunkStart));
+              const chunkTo = fmtGqlDate(new Date(chunkEnd));
+              await fetchChunk(chunkFrom, chunkTo);
+              chunks++;
+              if (chunkEnd >= endMs) break;
+              chunkStart = chunkEnd + DAY_MS;
+              // Settle between chunks (good guest).
+              await page.waitForTimeout(1500).catch(() => {});
+            }
           }
 
           // 2) 15-min REST overlay — best-effort. SHORT window so the amiadapter
