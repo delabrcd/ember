@@ -7,8 +7,8 @@ Guidance for AI agents (Claude Code, Codex, etc.) working in this repo. Humans s
 
 A self-hosted **Next.js + Postgres + Playwright** app that scrapes a **National Grid** account
 and charts usage, cost (supply vs delivery), effective rates, and weather-normalized usage.
-Single-account, self-hostable, region-portable. **No app-level auth by design** — it's meant to be
-LAN-only or behind a reverse proxy / SSO.
+Single-operator (multi-account / multi-premise per login), self-hostable, region-portable.
+**No app-level auth by design** — it's meant to be LAN-only or behind a reverse proxy / SSO.
 
 ## Non-negotiable rules
 
@@ -21,8 +21,10 @@ LAN-only or behind a reverse proxy / SSO.
    aggregation/rates → `app/src/lib/series.ts`; prediction → `app/src/lib/prediction.ts`. Don't
    bury arithmetic in a component or an API route.
 3. **Never commit secrets or personal data.** Credentials may be **stored AES-256-GCM-encrypted in
-   the DB** (`NgLogin` rows — see `app/src/lib/crypto.ts`); the key comes from the `NGRID_SECRET_KEY`
-   env var and is **never stored in the DB**. Env creds (`NGRID_USER`/`NGRID_PASS`) remain the
+   the DB** (`NgLogin` rows — see `app/src/lib/crypto.ts`); the key is **never in the DB** — it's
+   resolved by `app/src/lib/ngrid/secretKey.ts` as `NGRID_SECRET_KEY`, else a persisted
+   `/data/session/secret.key` file (auto-generated on first run, so persist `/data` — losing it
+   orphans every stored credential). Env creds (`NGRID_USER`/`NGRID_PASS`) remain the
    bootstrap/fallback source. Either way nothing secret hits git: `.env`, `data/`, the saved session,
    bill PDFs, and any account number/address are gitignored — keep it that way, and never log or
    return a decrypted password to the client.
@@ -57,9 +59,13 @@ docker compose exec ngrid_postgres psql -U ngrid -d ngrid
 
 ## Layout (details in the wiki)
 
-- **Scraper:** `app/src/lib/ngrid/{auth,collect,persist,parsePdf,verify,run}.ts` — B2C login +
-  session reuse, **intercept-and-widen** GraphQL, PDF parsing, upsert, cross-validation.
-- **Scheduler:** `app/src/lib/scheduler.ts` (driven by the entrypoint's cron loop → `/api/cron/tick`).
+- **Scraper:** `app/src/lib/ngrid/{auth,session,collect,portalFetch,persist,parsePdf,verify}.ts` —
+  B2C login + shared `PortalSession`, **intercept-and-widen** GraphQL, PDF parsing, upsert,
+  cross-validation.
+- **Scheduler (V2):** generic task-runner in `app/src/lib/scheduler/` — a pure per-task registry
+  (`tasks.ts` `TASK_DEFS`), `cadence.ts`/`projection.ts` (pure), `runner.ts` + `handlers/*` (impure).
+  `app/src/lib/scheduler.ts` is just a shim; the entrypoint's bash loop drives it via
+  `/api/cron/tick`. See [docs/architecture.md](docs/architecture.md) + [docs/scheduler-v2-plan.md](docs/scheduler-v2-plan.md).
 - **API:** `app/src/app/api/*` · **UI:** `app/src/components/*` · **charts** declared in
   `app/src/lib/chartSpec.ts` and rendered by the generic `ConfigurableChart`.
 - **Data model:** `app/prisma/schema.prisma`.
@@ -80,6 +86,10 @@ docker compose exec ngrid_postgres psql -U ngrid -d ngrid
 
 ## More
 
+- **[docs/standards.md](docs/standards.md)** — the binding engineering rules (data-accuracy,
+  secrets, good-guest, additive-schema, pure-core, CI). Read this before writing code.
+- **[docs/architecture.md](docs/architecture.md)** — the system map (module layout, the pure/impure
+  split, scheduler, data model, CI/CD, deploy topology).
 - [CONTRIBUTING.md](CONTRIBUTING.md) — workflow + PR checklist.
 - [Wiki](https://github.com/delabrcd/ember/wiki) — Architecture, How the Scraper Works,
   **Data Accuracy**, Testing, Releases & CI.

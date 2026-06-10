@@ -15,6 +15,12 @@ usage. For *running* the app, see the [README](README.md); this guide is for **c
 3. **Be a good guest.** The scraper hits a third party with a real account. Reuse the session,
    rate-limit, and never add aggressive polling. Personal use only.
 
+## In-repo docs
+
+- **[docs/standards.md](docs/standards.md)** — the binding engineering rules every change must
+  satisfy (the full, enforceable version of the three golden rules above).
+- **[docs/architecture.md](docs/architecture.md)** — how the system is shaped and where things live.
+
 ## Documentation — the [project wiki](https://github.com/delabrcd/ember/wiki)
 
 | Page | What |
