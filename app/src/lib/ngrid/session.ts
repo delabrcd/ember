@@ -3,12 +3,11 @@
 // shared "class" the Scheduler V2 task handlers (step 5) run against: acquire
 // once per login per tick, run each portal task sequentially on the one page,
 // then saveState() + close(). Mirrors the launch / login / header-capture
-// sequence that collect() does inline today, so behavior is identical when the
-// handlers eventually use it.
+// sequence that collect() does inline.
 //
-// Step 2 NOTE: this file is additive and NOT yet wired into collect() — collect
-// keeps managing its own browser/ctx/page. This is dead-but-compiled code that
-// the step-5 runner will call.
+// Wired in: the Scheduler V2 runner acquires this per login (runner.ts ->
+// acquirePortalSession) and passes it to the portal handlers; collect() accepts
+// the shared session so a single login covers full-scrape + interval + pdf-fetch.
 import { chromium } from 'playwright';
 import type { BrowserContext, Page, Route } from 'playwright';
 import { contextOptions, ensureLoggedIn, saveState as authSaveState } from './auth';

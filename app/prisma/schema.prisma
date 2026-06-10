@@ -9,8 +9,11 @@ datasource db {
 
 // A stored National Grid login (the email/password used at the B2C portal).
 // One login fans out to several Account rows (multi-premise / linked accounts).
-// The password is encrypted at rest with AES-256-GCM (see lib/crypto.ts); the
-// key lives only in the NGRID_SECRET_KEY env var, never in the DB. Env creds
+// The password is encrypted at rest with AES-256-GCM (see lib/crypto.ts). The key
+// material is NEVER in the DB: it's resolved by lib/ngrid/secretKey.ts as the
+// NGRID_SECRET_KEY env var, else a persisted /data/session/secret.key file (auto-
+// generated on first run). secret.key is recovery-critical — losing it (e.g. not
+// persisting /data) orphans every encrypted credential. Env creds
 // (NGRID_USER/NGRID_PASS) remain the bootstrap fallback when no row exists.
 model NgLogin {
   id             Int       @id @default(autoincrement())

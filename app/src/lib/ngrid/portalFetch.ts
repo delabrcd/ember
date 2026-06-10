@@ -3,9 +3,8 @@
 // fetches against a shared PortalSession instead of only inside the monolithic
 // collect(). These are STRICTLY behavior-preserving relocations of the code that
 // used to live inline in collectOneAccount() — same headers, timeouts, retries,
-// settle delays, and control flow.
-//
-// Step 2 NOTE: collect() now calls these; nothing else does yet.
+// settle delays, and control flow. collect() and the Scheduler V2 portal handlers
+// both run these against a shared PortalSession.
 import fs from 'fs';
 import path from 'path';
 import type { BrowserContext, Page } from 'playwright';
