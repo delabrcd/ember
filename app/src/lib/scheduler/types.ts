@@ -31,6 +31,10 @@ export interface TaskContext {
   now: Date;
   log: ProgressFn;
   session: PortalSession | null;     // non-null for portal handlers
+  // What kicked this tick off. full-scrape arms notify-sync only on SCHEDULED so
+  // a MANUAL refresh stays silent (mirrors run.ts:253's trigger==='SCHEDULED'
+  // guard); weather-sync is armed on both.
+  trigger: 'SCHEDULED' | 'MANUAL';
 }
 
 export interface TaskHandler {

@@ -5,6 +5,7 @@
 import { prisma } from '@/lib/db';
 import { bootstrapEnvLogin } from '@/lib/ngrid/bootstrap';
 import { ScrapeBusyError, ScrapeThrottledError, runScrape } from '@/lib/ngrid/run';
+import { runTick } from '@/lib/scheduler/runner';
 import { isSchedulerEnabled } from '@/lib/settings';
 
 // Process-level guard so the env→NgLogin cutover bootstrap only does its DB query
@@ -15,6 +16,11 @@ import { isSchedulerEnabled } from '@/lib/settings';
 let bootstrapRan = false;
 
 export async function tickOnce(): Promise<{ ran: boolean; reason: string }> {
+  // Scheduler V2 (flag-gated, default OFF): hand the whole tick to the generic
+  // task-runner. When the flag is off, the EXISTING body below runs unchanged.
+  // Read at call time so it's a deploy-time switch with no live-toggle race.
+  if (process.env.SCHEDULER_V2 === 'true') return runTick('SCHEDULED');
+
   // Run the one-time env→NgLogin cutover bootstrap before any due/disabled checks
   // so a fresh prod deploy is migrated to the encrypted store even when the
   // scheduler is disabled. `bootstrapEnvLogin()` is idempotent (username-exists

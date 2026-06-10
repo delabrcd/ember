@@ -40,6 +40,11 @@ export interface PortalSession {
   page: Page;
   ctx: BrowserContext;
   authHeaders: Record<string, string> | null;
+  // Per-session scratchpad the handlers use for tick-local coordination — e.g.
+  // full-scrape marks `fullScrapeDone` here so a multi-account login's several
+  // due full-scrape tasks dedup to ONE collect() per session (the runner stays
+  // task-agnostic; the handler self-dedups). Reset per acquire (starts {}).
+  scratch: Record<string, unknown>;
   // Recapture the auth headers if we don't have them yet. Does at most ONE light
   // /dashboard navigation (good-guest) to make the SPA fire a gql request, reads
   // the captured headers off it, caches them, and returns. Throws if none could
@@ -73,6 +78,7 @@ export async function acquirePortalSession(
     page,
     ctx,
     authHeaders: null,
+    scratch: {},
     async ensureAuthHeaders(): Promise<Record<string, string>> {
       if (this.authHeaders) return this.authHeaders;
       let captured: Record<string, string> | null = null;
