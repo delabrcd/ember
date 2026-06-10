@@ -6,8 +6,6 @@ import { usePrefs } from '@/lib/prefs';
 import { resolveSelectedAccountId, type AccountSummary } from '@/lib/accountSwitcher';
 import { resolveRange, ymOfDate, ymdToYm } from '@/lib/range';
 import { dateLabel, relativeFromNow } from '@/lib/format';
-import { taskKindLabel } from '@/lib/scheduler/tasks';
-import type { TaskKind } from '@/lib/scheduler/types';
 import { matchesSearch } from '@/lib/settingsSearch';
 import { RefreshButton } from './RefreshButton';
 import { RangeControl } from './RangeControl';
@@ -42,11 +40,12 @@ interface Run {
   message: string | null;
 }
 
-// One projected scheduler action from GET /api/schedule/upcoming.
+// One projected scheduler action from GET /api/schedule/upcoming. Display-ready:
+// the server resolves the label, so the UI needs no task knowledge.
 interface UpcomingAction {
-  kind: TaskKind;
   at: string | null;
-  reason: string;
+  label: string;
+  detail: string;
 }
 
 function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
@@ -352,8 +351,8 @@ export function SettingsView() {
                 {upcoming.map((a, i) => (
                   <tr key={i} className="border-t border-slate-800/70">
                     <td className="px-2 py-2 text-slate-300">{a.at ? relativeFromNow(a.at) : '—'}</td>
-                    <td className="px-2 py-2 text-slate-400">{taskKindLabel(a.kind)}</td>
-                    <td className="px-2 py-2 text-slate-400">{a.reason}</td>
+                    <td className="px-2 py-2 text-slate-400">{a.label}</td>
+                    <td className="px-2 py-2 text-slate-400">{a.detail}</td>
                   </tr>
                 ))}
                 {upcoming.length === 0 && (

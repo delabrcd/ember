@@ -3,6 +3,7 @@ import { prisma } from '@/lib/db';
 import { withAccount } from '@/lib/route';
 import { PDF_PENDING_RECENT_DAYS } from '@/lib/scheduler/cadence';
 import { projectTimeline, type ProjectionTaskInput } from '@/lib/scheduler/projection';
+import { taskKindLabel } from '@/lib/scheduler/tasks';
 import type { TaskKind } from '@/lib/scheduler/types';
 
 export const dynamic = 'force-dynamic';
@@ -73,10 +74,13 @@ export async function GET(req: Request) {
         facts: { statementDates, hasIntervalData, hasRecentPendingPdf, hasAmiMeter },
       }));
 
+      // Return DISPLAY-READY rows so the client needs ZERO task knowledge: the
+      // server resolves the human label; the UI just renders when/label/detail
+      // and never imports the task registry or the TaskKind union.
       const actions = projectTimeline(inputs, now, days).map((a) => ({
-        kind: a.kind,
         at: a.at ? a.at.toISOString() : null,
-        reason: a.reason,
+        label: taskKindLabel(a.kind),
+        detail: a.reason,
       }));
 
       return NextResponse.json({ actions, now: now.toISOString(), days });
