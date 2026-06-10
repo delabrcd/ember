@@ -75,7 +75,7 @@ export async function GET(req: Request) {
 
       const actions = projectTimeline(inputs, now, days).map((a) => ({
         kind: a.kind,
-        at: a.at.toISOString(),
+        at: a.at ? a.at.toISOString() : null,
         reason: a.reason,
       }));
 

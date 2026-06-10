@@ -45,7 +45,7 @@ interface Run {
 // One projected scheduler action from GET /api/schedule/upcoming.
 interface UpcomingAction {
   kind: TaskKind;
-  at: string;
+  at: string | null;
   reason: string;
 }
 
@@ -335,16 +335,29 @@ export function SettingsView() {
       node: (
         <div key="upcoming-actions" className="border-t border-slate-800 pt-4">
           <h3 className="mb-3 text-sm font-semibold text-slate-300">Upcoming actions (next 7 days)</h3>
-          <ul className="space-y-2 text-sm">
-            {upcoming.map((a, i) => (
-              <li key={i} className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-                <span className="pill whitespace-nowrap">{relativeFromNow(a.at)}</span>
-                <span className="font-medium text-slate-200">{taskKindLabel(a.kind)}</span>
-                <span className="text-xs text-slate-500">{a.reason}</span>
-              </li>
-            ))}
-            {upcoming.length === 0 && <li className="text-slate-500">No scheduled actions</li>}
-          </ul>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-xs uppercase tracking-wide text-slate-500">
+                  <th className="px-2 py-2">When</th>
+                  <th className="px-2 py-2">Action</th>
+                  <th className="px-2 py-2">Details</th>
+                </tr>
+              </thead>
+              <tbody>
+                {upcoming.map((a, i) => (
+                  <tr key={i} className="border-t border-slate-800/70">
+                    <td className="px-2 py-2 text-slate-300">{a.at ? relativeFromNow(a.at) : '—'}</td>
+                    <td className="px-2 py-2 text-slate-400">{taskKindLabel(a.kind)}</td>
+                    <td className="px-2 py-2 text-slate-400">{a.reason}</td>
+                  </tr>
+                ))}
+                {upcoming.length === 0 && (
+                  <tr><td className="px-2 py-3 text-slate-500" colSpan={3}>No scheduled actions</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
         </div>
       ),
     },

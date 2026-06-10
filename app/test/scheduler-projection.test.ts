@@ -25,14 +25,14 @@ describe('projectTask — periodic full-scrape', () => {
 
   it('produces an increasing 7-day-spaced series within the horizon', () => {
     const out = projectTask(task, now, 14);
-    expect(out.map((a) => a.at.getTime())).toEqual([
+    expect(out.map((a) => a.at!.getTime())).toEqual([
       now.getTime(),
       now.getTime() + 7 * DAY,
       now.getTime() + 14 * DAY,
     ]);
     // strictly increasing
     for (let i = 1; i < out.length; i++) {
-      expect(out[i].at.getTime()).toBeGreaterThan(out[i - 1].at.getTime());
+      expect(out[i].at!.getTime()).toBeGreaterThan(out[i - 1].at!.getTime());
     }
     expect(out.every((a) => a.kind === 'full-scrape')).toBe(true);
   });
@@ -41,7 +41,7 @@ describe('projectTask — periodic full-scrape', () => {
     const future = new Date(now.getTime() + 2 * DAY);
     const out = projectTask({ ...task, nextRunAt: future }, now, 14);
     // fires at +2d, +9d, +16d>horizon(+14d) stops -> [+2d, +9d]
-    expect(out.map((a) => a.at.getTime())).toEqual([future.getTime(), future.getTime() + 7 * DAY]);
+    expect(out.map((a) => a.at!.getTime())).toEqual([future.getTime(), future.getTime() + 7 * DAY]);
   });
 });
 
@@ -58,7 +58,7 @@ describe('projectTask — collapse a tight constant cadence', () => {
     const out = projectTask(task, now, 7);
     expect(out).toHaveLength(1);
     expect(out[0].kind).toBe('pdf-fetch');
-    expect(out[0].at.getTime()).toBe(now.getTime()); // keeps the first fire
+    expect(out[0].at!.getTime()).toBe(now.getTime()); // keeps the first fire
     expect(out[0].reason).toMatch(/every ~6h/);
   });
 
@@ -71,22 +71,52 @@ describe('projectTask — collapse a tight constant cadence', () => {
     };
     const out = projectTask(task, now, 7);
     expect(out).toHaveLength(1);
-    expect(out[0].at.getTime()).toBe(now.getTime());
+    expect(out[0].at!.getTime()).toBe(now.getTime());
     expect(out[0].reason).toMatch(/daily/);
+  });
+
+  it('collapses a full-scrape capped at 22h with an honest "about daily" reason', () => {
+    // hasIntervalData caps computeFullScrapeNextRun to now+22h every fire -> a
+    // constant 22h cadence. Over 7d that is ~7-8 fires (>4) so it collapses, and
+    // 22h >= 20h so the reason reads "about daily", NOT "tight cadence".
+    const task: ProjectionTaskInput = {
+      kind: 'full-scrape',
+      enabled: true,
+      nextRunAt: now,
+      facts: { statementDates: [], hasIntervalData: true, hasRecentPendingPdf: false },
+    };
+    const out = projectTask(task, now, 7);
+    expect(out).toHaveLength(1);
+    expect(out[0].at!.getTime()).toBe(now.getTime());
+    expect(out[0].reason).toBe('recurring about daily');
+  });
+
+  it('collapses a full-scrape capped at 6h with an honest "about every 6h" reason', () => {
+    // hasRecentPendingPdf caps computeFullScrapeNextRun to now+6h every fire ->
+    // constant 6h cadence, >4 fires over 7d, 6h < 20h -> "about every 6h".
+    const task: ProjectionTaskInput = {
+      kind: 'full-scrape',
+      enabled: true,
+      nextRunAt: now,
+      facts: { statementDates: [], hasIntervalData: false, hasRecentPendingPdf: true },
+    };
+    const out = projectTask(task, now, 7);
+    expect(out).toHaveLength(1);
+    expect(out[0].reason).toBe('recurring about every 6h');
   });
 });
 
 describe('projectTask — reactive / inactive', () => {
   const now = D('2026-06-10');
 
-  it('weather-sync (nextRunAt=null) yields one reactive annotation, not a series', () => {
+  it('weather-sync (nextRunAt=null) yields one reactive annotation with NO time', () => {
     const out = projectTask(
       { kind: 'weather-sync', enabled: true, nextRunAt: null, facts: {} },
       now,
       7
     );
     expect(out).toHaveLength(1);
-    expect(out[0].at.getTime()).toBe(now.getTime());
+    expect(out[0].at).toBeNull(); // reactive: no bogus "just now" timestamp
     expect(out[0].reason).toMatch(/reactive/);
   });
 
@@ -100,7 +130,7 @@ describe('projectTask — reactive / inactive', () => {
     expect(out[0].reason).toMatch(/reactive/);
   });
 
-  it('a disabled task yields one annotation at its nextRunAt', () => {
+  it('a disabled task yields one inactive annotation with NO time', () => {
     const at = new Date(now.getTime() + 3 * HOUR);
     const out = projectTask(
       { kind: 'interval-pull', enabled: false, nextRunAt: at, facts: { hasAmiMeter: true } },
@@ -108,7 +138,7 @@ describe('projectTask — reactive / inactive', () => {
       7
     );
     expect(out).toHaveLength(1);
-    expect(out[0].at.getTime()).toBe(at.getTime());
+    expect(out[0].at).toBeNull(); // disabled -> reactive branch, no timestamp
   });
 
   it('a null interval-pull annotates "no AMI meter"', () => {
@@ -145,7 +175,7 @@ describe('projectTask — infinite-loop guard', () => {
 describe('projectTimeline', () => {
   const now = D('2026-06-10');
 
-  it('concatenates tasks and returns them sorted by time', () => {
+  it('sorts scheduled (timed) entries first ascending, reactive (null) entries last', () => {
     const tasks: ProjectionTaskInput[] = [
       // interval-pull every 22h -> collapses to one entry at now
       { kind: 'interval-pull', enabled: true, nextRunAt: now, facts: { hasAmiMeter: true } },
@@ -156,18 +186,30 @@ describe('projectTimeline', () => {
         nextRunAt: new Date(now.getTime() + 1 * DAY),
         facts: { statementDates: [] },
       },
-      // reactive weather at now
+      // reactive weather (no time)
       { kind: 'weather-sync', enabled: true, nextRunAt: null, facts: {} },
     ];
     const out = projectTimeline(tasks, now, 14);
-    // sorted ascending by `at`
-    for (let i = 1; i < out.length; i++) {
-      expect(out[i].at.getTime()).toBeGreaterThanOrEqual(out[i - 1].at.getTime());
+
+    // Scheduled entries (at != null) come first, ascending; then reactive (null).
+    const firstNullIdx = out.findIndex((a) => a.at == null);
+    expect(firstNullIdx).toBeGreaterThanOrEqual(0); // weather is present and null
+    // everything before the first null is timed, ascending
+    for (let i = 1; i < firstNullIdx; i++) {
+      expect(out[i].at!.getTime()).toBeGreaterThanOrEqual(out[i - 1].at!.getTime());
     }
-    // interval + weather both annotate at `now`; full-scrape fires at +1d and +8d
+    // everything from the first null onward is null (reactive bucket is last)
+    for (let i = firstNullIdx; i < out.length; i++) {
+      expect(out[i].at).toBeNull();
+    }
+    // the leading timed entry is the interval-pull at now (before full-scrape +1d)
+    expect(out[0].kind).toBe('interval-pull');
+    expect(out[0].at!.getTime()).toBe(now.getTime());
+    // weather-sync is the reactive (null) entry, sorted last
+    expect(out[out.length - 1].kind).toBe('weather-sync');
+    expect(out[out.length - 1].at).toBeNull();
+
     expect(out.some((a) => a.kind === 'full-scrape')).toBe(true);
-    expect(out.some((a) => a.kind === 'interval-pull')).toBe(true);
-    expect(out.some((a) => a.kind === 'weather-sync')).toBe(true);
   });
 });
 

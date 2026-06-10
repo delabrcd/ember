@@ -26,7 +26,9 @@ const COLLAPSE_DELTA_TOLERANCE = 0.1;
 
 export interface ProjectedAction {
   kind: TaskKind;
-  at: Date;
+  // Scheduled entries carry their real fire instant; reactive/inactive tasks
+  // (no scheduled time) carry null — the UI renders these with no timestamp.
+  at: Date | null;
   reason: string;
 }
 
@@ -102,15 +104,20 @@ function inactiveReason(kind: TaskKind): string {
   }
 }
 
-// Reason for a collapsed tight-cadence series.
-function collapsedReason(kind: TaskKind): string {
+// Reason for a collapsed tight-cadence series. `deltaMs` is the (near-constant)
+// gap between consecutive fires, used to phrase the default cadence honestly.
+function collapsedReason(kind: TaskKind, deltaMs: number): string {
   switch (kind) {
     case 'pdf-fetch':
       return 'every ~6h until the PDF publishes, then relaxes';
     case 'interval-pull':
       return '~daily while AMI interval data is captured';
-    default:
-      return 'recurring on a tight cadence';
+    default: {
+      const hours = deltaMs / (60 * 60 * 1000);
+      // ≥~20h reads as "about daily"; otherwise quote the rounded hour cadence.
+      if (hours >= 20) return 'recurring about daily';
+      return `recurring about every ${Math.round(hours)}h`;
+    }
   }
 }
 
@@ -119,10 +126,10 @@ export function projectTask(
   now: Date,
   horizonDays: number
 ): ProjectedAction[] {
-  // Reactive / inactive: a single annotated entry, never a periodic series.
+  // Reactive / inactive: a single annotated entry with NO time, never a periodic
+  // series. (Defaulting `at` to `now` here would render a bogus "just now".)
   if (!task.enabled || task.nextRunAt == null) {
-    const at = task.nextRunAt ?? now;
-    return [{ kind: task.kind, at, reason: inactiveReason(task.kind) }];
+    return [{ kind: task.kind, at: null, reason: inactiveReason(task.kind) }];
   }
 
   const horizonEnd = now.getTime() + horizonDays * DAY_MS;
@@ -157,7 +164,7 @@ export function projectTask(
         return Math.abs(delta - firstDelta) <= firstDelta * COLLAPSE_DELTA_TOLERANCE;
       });
     if (roughlyConstant) {
-      return [{ kind: task.kind, at: fires[0], reason: collapsedReason(task.kind) }];
+      return [{ kind: task.kind, at: fires[0], reason: collapsedReason(task.kind, firstDelta) }];
     }
   }
 
@@ -173,6 +180,13 @@ export function projectTimeline(
   for (const task of tasks) {
     actions.push(...projectTask(task, now, days));
   }
-  actions.sort((a, b) => a.at.getTime() - b.at.getTime());
+  // Scheduled entries (at != null) first, ascending by time; reactive entries
+  // (at == null) sort last, stable among themselves.
+  actions.sort((a, b) => {
+    if (a.at == null && b.at == null) return 0;
+    if (a.at == null) return 1;
+    if (b.at == null) return -1;
+    return a.at.getTime() - b.at.getTime();
+  });
   return actions;
 }
