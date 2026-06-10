@@ -24,6 +24,7 @@ import {
   amiIntervalUrl,
   backfillStartFor,
   extractAmiMeters,
+  gqlBackfillWindowDays,
   intervalDateWindow,
   parseAmiEnergyUsages,
   parseIntervalReads,
@@ -44,9 +45,20 @@ export interface CollectOptions {
   // The stored NgLogin these accounts are scraped under; tagged onto each
   // CollectResult so persist() can set Account.loginId. Omit for env scrapes.
   loginId?: number;
+  // Injected probe so collect.ts stays DB-free (it must NOT import prisma):
+  // returns whether the account already has stored interval rows. Used to decide
+  // a one-time wide first-run hourly backfill. Omitted → treated as "has data"
+  // (normal tail window), preserving the env-only behavior exactly.
+  hasIntervalData?: (accountNumber: string) => Promise<boolean>;
 }
 
 const BASE = 'https://myaccount.nationalgrid.com';
+
+// One-time first-run deep pull (~13 months) of HOURLY interval history for a
+// brand-new account that has no stored interval rows yet and no env override.
+// After the first run the account has rows, so subsequent scrapes use the normal
+// tail window. INTERVAL_BACKFILL_FROM (when set) still overrides everything.
+const AUTO_BACKFILL_DAYS = 400;
 
 // Format a Date as the energy-usage gql `YYYY-MM-DD` (UTC fields), matching
 // interval.ts's window formatting — used to page a wide gas backfill in chunks.
@@ -116,7 +128,7 @@ export async function collect(
     for (let i = 0; i < links.length; i++) {
       const link = links[i];
       log(`scraping account ${i + 1}/${links.length}${link ? ` (${link})` : ''}`);
-      const result = await collectOneAccount(page, ctx, link, log, opts.loginId);
+      const result = await collectOneAccount(page, ctx, link, log, opts.loginId, opts.hasIntervalData);
       result.loginId = opts.loginId;
       results.push(result);
     }
@@ -136,7 +148,8 @@ async function collectOneAccount(
   ctx: import('playwright').BrowserContext,
   accountLink: string | undefined,
   log: ProgressFn,
-  loginId: number | undefined
+  loginId: number | undefined,
+  hasIntervalData?: (accountNumber: string) => Promise<boolean>
 ): Promise<CollectResult> {
   // Capture buckets (per-account).
   const cap: Record<string, any> = {};
@@ -495,6 +508,26 @@ async function collectOneAccount(
     } else {
       const windowDays = Number.parseInt(process.env.INTERVAL_WINDOW_DAYS || '', 10);
       const effectiveWindowDays = Number.isFinite(windowDays) && windowDays > 0 ? windowDays : 35;
+      // First-run detection: a brand-new account (no stored interval rows) gets a
+      // one-time WIDE hourly backfill (AUTO_BACKFILL_DAYS) WITHOUT the operator
+      // setting any env var. The probe is injected (collect.ts stays DB-free);
+      // omitted or failing → safe default "has data" (normal tail window).
+      let isFirstIntervalRun = false;
+      if (hasIntervalData) {
+        try {
+          isFirstIntervalRun = !(await hasIntervalData(accountNumber));
+        } catch {
+          isFirstIntervalRun = false; // probe failure → safe default: normal tail
+        }
+      }
+      // Widen ONLY the hourly gql window on a first run, and ONLY when there's no
+      // env override (INTERVAL_BACKFILL_FROM still wins via intervalDateWindow).
+      const gqlWindowDays = gqlBackfillWindowDays(
+        isFirstIntervalRun,
+        !!process.env.INTERVAL_BACKFILL_FROM,
+        effectiveWindowDays,
+        AUTO_BACKFILL_DAYS
+      );
       // Short window for the 15-min REST overlay — kept small so the amiadapter
       // endpoint actually returns 15-min reads (it 400s on a long range); the
       // hourly gql above is the wide backstop. Default 2 days.
@@ -520,10 +553,13 @@ async function collectOneAccount(
           //    with the existing settle delay) so a wide backfill stays a good
           //    guest. The default tail is a single window.
           log(`interval: fetching ${meter.fuelType} hourly gql (sp ${meter.servicePointNumber})`);
+          if (gqlWindowDays > effectiveWindowDays) {
+            log(`interval: first run for ${meter.fuelType} — backfilling ~${AUTO_BACKFILL_DAYS}d of hourly history`);
+          }
           const { dateFrom, dateTo } = intervalDateWindow(
             new Date(),
             process.env.INTERVAL_BACKFILL_FROM,
-            effectiveWindowDays
+            gqlWindowDays
           );
           const fromMs = Date.parse(dateFrom);
           const toMs = Date.parse(dateTo);

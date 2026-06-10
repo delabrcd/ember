@@ -6,6 +6,7 @@ import {
   amiIntervalUrl,
   amiEnergyUsagesBody,
   intervalDateWindow,
+  gqlBackfillWindowDays,
   backfillStartFor,
   normalizeFuel,
   unitForFuel,
@@ -353,6 +354,27 @@ describe('intervalDateWindow', () => {
       dateFrom: '2026-06-02',
       dateTo: '2026-06-09',
     });
+  });
+});
+
+describe('gqlBackfillWindowDays', () => {
+  it('widens to the auto-backfill on a first run with no env override', () => {
+    expect(gqlBackfillWindowDays(true, false, 10, 400)).toBe(400);
+    expect(gqlBackfillWindowDays(true, false, 35, 400)).toBe(400);
+  });
+
+  it('keeps the larger of normal/auto on a first run (never shrinks the tail)', () => {
+    expect(gqlBackfillWindowDays(true, false, 500, 400)).toBe(500);
+  });
+
+  it('uses the normal tail once the account has interval rows', () => {
+    expect(gqlBackfillWindowDays(false, false, 10, 400)).toBe(10);
+    expect(gqlBackfillWindowDays(false, false, 35, 400)).toBe(35);
+  });
+
+  it('does not widen when an env override is present (override wins downstream)', () => {
+    expect(gqlBackfillWindowDays(true, true, 10, 400)).toBe(10);
+    expect(gqlBackfillWindowDays(false, true, 35, 400)).toBe(35);
   });
 });
 

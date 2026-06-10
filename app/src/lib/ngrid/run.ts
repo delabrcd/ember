@@ -21,6 +21,15 @@ const MIN_SCHEDULED_GAP_MS = 5 * 60 * 1000; // don't auto-scrape more often than
 // only serves ~2 days, so the daily scrape's 2-day window overlaps and leaves no
 // gap; the hourly gql backstop covers everything regardless.
 const INTERVAL_DAILY_CAP_MS = 22 * 60 * 60 * 1000;
+// NG publishes a bill's statement ROW before the downloadable PDF (the PDF lags
+// the row by ~1-3 days), so a fresh bill can land with pdfPath=null and fill in
+// a day or two later. collect.ts re-downloads any bill whose PDF is missing on
+// the next scrape — but the bill-prediction back-off can idle ~a week, so the
+// retry wouldn't be prompt. While any RECENT bill is still missing its PDF, cap
+// the back-off to this tighter cadence (~6h) so the PDF is fetched soon after NG
+// publishes it.
+const PDF_PENDING_CAP_MS = 6 * 60 * 60 * 1000;
+const PDF_PENDING_RECENT_DAYS = 35; // only RECENT bills pin the tighter cadence
 // Don't write a live-progress update to the DB more often than this. Steps that
 // fire in a tight burst (e.g. per-PDF logs) collapse to at most one write per
 // window so we stay cheap; the trailing edge always flushes the latest line.
@@ -50,6 +59,20 @@ async function updateSchedule(accountId: number): Promise<void> {
   const hasInterval = (await prisma.intervalUsage.count({ where: { accountId } })) > 0;
   if (hasInterval) {
     const cap = new Date(now.getTime() + INTERVAL_DAILY_CAP_MS);
+    if (cap < nextCheckAt) nextCheckAt = cap;
+  }
+  // PDF-pending cadence: NG publishes a bill's statement row before its PDF, so a
+  // new bill can sit with pdfPath=null for a day or two. While any RECENT bill is
+  // still missing its PDF, tighten the back-off so collect.ts re-tries the
+  // download promptly. Scoped to recent bills (statementDate within the last
+  // PDF_PENDING_RECENT_DAYS) so an old bill that never got a PDF can't pin the
+  // account to the tight cadence forever.
+  const pdfCutoff = new Date(now.getTime() - PDF_PENDING_RECENT_DAYS * 24 * 60 * 60 * 1000);
+  const pendingPdfs = await prisma.bill.count({
+    where: { accountId, pdfPath: null, statementDate: { gte: pdfCutoff } },
+  });
+  if (pendingPdfs > 0) {
+    const cap = new Date(now.getTime() + PDF_PENDING_CAP_MS);
     if (cap < nextCheckAt) nextCheckAt = cap;
   }
   await prisma.scheduleState.upsert({
@@ -159,7 +182,20 @@ export async function runScrape(
         // and returns one result per account.
         let results;
         try {
-          results = await collect((m) => progress(m), { loginId: pass.loginId });
+          results = await collect((m) => progress(m), {
+            loginId: pass.loginId,
+            // Probe injected so collect.ts stays DB-free: tells the interval
+            // section whether this account already has stored interval rows, so
+            // a brand-new account gets a one-time wide hourly backfill.
+            hasIntervalData: async (accountNumber) => {
+              const acct = await prisma.account.findUnique({
+                where: { accountNumber },
+                select: { id: true },
+              });
+              if (!acct) return false;
+              return (await prisma.intervalUsage.count({ where: { accountId: acct.id } })) > 0;
+            },
+          });
         } catch (loginErr: any) {
           const msg = String(loginErr?.message || loginErr);
           const cls = classifyLoginError(msg);
