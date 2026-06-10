@@ -137,6 +137,7 @@ class RunAccumulator {
   pdfsDownloaded = 0;
   accountCount = 0;
   sawMetrics = false;
+  warnings: string[] = [];
   // Record a task outcome and fold in any scrape metrics it reported.
   note(kind: TaskKind, status: TaskResult['status'], metrics?: TaskResult['metrics']): void {
     this.ran += 1;
@@ -148,17 +149,21 @@ class RunAccumulator {
       this.billsAdded += metrics.billsAdded ?? 0;
       this.pdfsDownloaded += metrics.pdfsDownloaded ?? 0;
       this.accountCount += metrics.accountCount ?? 0;
+      if (metrics.warnings?.length) this.warnings.push(...metrics.warnings);
     }
   }
   summary(): string {
     const parts = Object.entries(this.byKind).map(([k, n]) => `${k}×${n}`);
     const taskCounts = `${this.ran} task(s)${parts.length ? ': ' + parts.join(', ') : ''}${this.errors ? `; ${this.errors} error(s)` : ''}`;
+    // Suspected zero-row stream(s) (issue #135) get surfaced FIRST so the warning
+    // is impossible to miss in the run summary the UI's recent-checks shows.
+    const warn = this.warnings.length ? `⚠ ${this.warnings.join('; ')}. ` : '';
     // When a scrape ran, lead with the legacy-spirit metrics line (the UI's
     // recent-checks shows this), then keep the per-task counts (still useful).
     if (this.sawMetrics) {
-      return `${this.accountCount} account(s): ${this.billsTotal} bills (${this.billsAdded} new), ${this.pdfsDownloaded} PDFs; ${taskCounts}`;
+      return `${warn}${this.accountCount} account(s): ${this.billsTotal} bills (${this.billsAdded} new), ${this.pdfsDownloaded} PDFs; ${taskCounts}`;
     }
-    return taskCounts;
+    return `${warn}${taskCounts}`;
   }
 }
 

@@ -1,5 +1,6 @@
 // Idempotent upsert of a CollectResult into Postgres.
 import { prisma } from '@/lib/db';
+import { detectSanityFloor, type SanityFlag, type SanityStream } from './sanityFloor';
 import type { CollectResult } from './types';
 
 const asDate = (s?: string): Date | null => (s ? new Date(s + 'T00:00:00Z') : null);
@@ -9,6 +10,11 @@ export interface PersistSummary {
   billsTotal: number;
   billsAdded: number;
   intervalsAdded: number;
+  // Streams that an ESTABLISHED account returned zero rows for this scrape — an
+  // upstream-shape break suspected (issue #135). Empty/undefined in the healthy
+  // case. The handler surfaces these (ScrapeRun summary + Notification); persist
+  // SKIPS the empty upsert loop for each so existing rows are preserved.
+  sanityFlags?: SanityFlag[];
 }
 
 export async function persist(result: CollectResult): Promise<PersistSummary> {
@@ -48,7 +54,22 @@ export async function persist(result: CollectResult): Promise<PersistSummary> {
   // Count existing bills first so we can report how many are new this run.
   const before = await prisma.bill.count({ where: { accountId: account.id } });
 
-  for (const b of result.bills) {
+  // Scrape sanity floor (issue #135). Count the prior usage/cost rows too (bills
+  // use `before`), then ask the PURE detector which streams an ESTABLISHED account
+  // returned zero rows for — a suspected upstream-shape break. For each flagged
+  // stream we SKIP its upsert loop below so the empty scrape can't write over
+  // good history, and we return the flag so the handler surfaces it (no longer
+  // silent). A genuinely new/empty account (prior 0) never trips this.
+  const usageBefore = await prisma.usage.count({ where: { accountId: account.id } });
+  const costBefore = await prisma.cost.count({ where: { accountId: account.id } });
+  const sanityFlags = detectSanityFloor({
+    bills: { prior: before, incoming: result.bills.length },
+    usages: { prior: usageBefore, incoming: result.usage.length },
+    costs: { prior: costBefore, incoming: result.costs.length },
+  });
+  const suspect = new Set<SanityStream>(sanityFlags.map((f) => f.stream));
+
+  if (!suspect.has('bills')) for (const b of result.bills) {
     const statementDate = asDate(b.statementDate)!;
     await prisma.bill.upsert({
       where: { accountId_statementDate: { accountId: account.id, statementDate } },
@@ -73,7 +94,7 @@ export async function persist(result: CollectResult): Promise<PersistSummary> {
     });
   }
 
-  for (const u of result.usage) {
+  if (!suspect.has('usages')) for (const u of result.usage) {
     if (!u.periodYearMonth) continue;
     await prisma.usage.upsert({
       where: {
@@ -96,7 +117,7 @@ export async function persist(result: CollectResult): Promise<PersistSummary> {
     });
   }
 
-  for (const c of result.costs) {
+  if (!suspect.has('costs')) for (const c of result.costs) {
     if (!c.periodYearMonth || !c.fuelType) continue;
     await prisma.cost.upsert({
       where: {
@@ -170,5 +191,11 @@ export async function persist(result: CollectResult): Promise<PersistSummary> {
   }
 
   const after = await prisma.bill.count({ where: { accountId: account.id } });
-  return { accountId: account.id, billsTotal: after, billsAdded: after - before, intervalsAdded };
+  return {
+    accountId: account.id,
+    billsTotal: after,
+    billsAdded: after - before,
+    intervalsAdded,
+    ...(sanityFlags.length ? { sanityFlags } : {}),
+  };
 }

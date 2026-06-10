@@ -28,6 +28,12 @@ export interface TaskMetrics {
   billsAdded?: number;
   pdfsDownloaded?: number;
   accountCount?: number;
+  // Human-readable warnings folded into the ScrapeRun summary message so a
+  // silent zero-row stream (issue #135 scrape sanity floor) is VISIBLE in the run
+  // summary, not just buried in a Notification. Each entry is one suspect stream,
+  // e.g. "acct 12: had 27 bills, scrape returned 0". Empty/absent in the healthy
+  // case.
+  warnings?: string[];
 }
 
 export interface TaskResult {
