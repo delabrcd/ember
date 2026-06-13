@@ -103,6 +103,45 @@ function localMinuteOfDay(instant: Date, tz: string): number | null {
   return hour * 60 + minute;
 }
 
+// The LOCAL hour-of-day (0..23) AND day-of-week (0=Sun..6=Sat) of a UTC instant
+// in `tz`. Like localMinuteOfDay it reads the wall-clock via Intl.DateTimeFormat
+// — the only DOM-free, deterministic way to resolve an arbitrary IANA zone — but
+// also asks for the weekday so the day×hour heatmap and the weekday/weekend split
+// decide the LOCAL day correctly across a UTC-day boundary or a DST shift (e.g.
+// 03:30 UTC on a -04:00 day is 23:30 the PREVIOUS local day, so its weekday is
+// that previous day's). Returns null if the instant is unparseable. PURE (given tz).
+const WEEKDAY_INDEX: Record<string, number> = {
+  Sun: 0,
+  Mon: 1,
+  Tue: 2,
+  Wed: 3,
+  Thu: 4,
+  Fri: 5,
+  Sat: 6,
+};
+function localHourAndDow(instant: Date, tz: string): { hour: number; dow: number } | null {
+  const t = instant.getTime();
+  if (!Number.isFinite(t)) return null;
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz,
+    hour12: false,
+    hour: '2-digit',
+    weekday: 'short',
+  });
+  const parts = fmt.formatToParts(instant);
+  let hour: number | null = null;
+  let dow: number | null = null;
+  for (const p of parts) {
+    if (p.type === 'hour') hour = Number(p.value);
+    else if (p.type === 'weekday') dow = WEEKDAY_INDEX[p.value] ?? null;
+  }
+  if (hour == null || !Number.isFinite(hour) || dow == null) return null;
+  // Intl emits "24" for midnight in the hour12:false 2-digit form in some engines;
+  // normalize it to 0 so the hour stays in [0, 24).
+  if (hour === 24) hour = 0;
+  return { hour, dow };
+}
+
 // The clock label for a bucket whose start minute-of-day is `minutes`, at the
 // given bucket width. Whole-hour buckets read "HH:00"; sub-hour buckets read the
 // exact "HH:MM" start. PURE.
@@ -254,5 +293,135 @@ export function reconcileToHourly(rows: ReconcileRow[]): IntervalProfileRow[] {
   // Sort ascending by intervalStart so the profiler receives chronological input.
   out.sort((a, b) => (a.intervalStart as Date).getTime() - (b.intervalStart as Date).getTime());
 
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// weekdayWeekendProfiles — average-day profiles split by weekday vs weekend (#77)
+// ---------------------------------------------------------------------------
+// Partitions the input reads by their LOCAL day-of-week (in `opts.tz`, default
+// America/New_York) into a WEEKDAY group (Mon–Fri) and a WEEKEND group (Sat/Sun),
+// then runs the SAME pure averageDayProfile over each group independently. The
+// result is two profiles you can overlay to compare a working day's shape against
+// a weekend's. Each read lands in exactly one group based on its LOCAL day (the
+// local-day decision reuses localHourAndDow's tz-aware weekday, so a UTC instant
+// near midnight is attributed to the right local day across a DST shift). The
+// `before` cutoff and `bucketMinutes` flow through to averageDayProfile unchanged
+// (so the 15-min granularity toggle and the unsettled-tail exclusion apply to both
+// groups identically). PURE — no React/DOM/DB.
+export type WeekdayWeekendProfiles = {
+  weekday: ProfileBucket[];
+  weekend: ProfileBucket[];
+};
+
+export function weekdayWeekendProfiles(
+  rows: IntervalProfileRow[],
+  opts: AverageDayProfileOpts = {}
+): WeekdayWeekendProfiles {
+  const tz = opts.tz ?? DEFAULT_TZ;
+  const weekday: IntervalProfileRow[] = [];
+  const weekend: IntervalProfileRow[] = [];
+  for (const row of rows) {
+    const instant = row.intervalStart instanceof Date ? row.intervalStart : new Date(row.intervalStart);
+    const ld = localHourAndDow(instant, tz);
+    if (ld == null) continue; // unparseable instant → dropped (consistent with the profiler)
+    // dow 0=Sun, 6=Sat → weekend; 1..5 → weekday.
+    if (ld.dow === 0 || ld.dow === 6) weekend.push(row);
+    else weekday.push(row);
+  }
+  // averageDayProfile applies the same tz/bucketMinutes/before to each group; an
+  // empty group yields [] (the widget renders that curve as absent, not zero).
+  return {
+    weekday: averageDayProfile(weekday, opts),
+    weekend: averageDayProfile(weekend, opts),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// peakDemand — the highest average POWER over any interval, and when (#77)
+// ---------------------------------------------------------------------------
+// "Peak demand" is the maximum average power drawn over a single metered
+// interval: quantity ÷ (intervalSeconds / 3600), i.e. the energy in the interval
+// divided by its length in HOURS → kW (electric) or therms-per-hour (gas). A
+// 15-min slot of 0.5 kWh therefore reads 0.5 / 0.25 = 2 kW; an hourly slot of
+// 0.5 kWh reads 0.5 / 1 = 0.5 kW. Returns the peak value, the interval length it
+// occurred over, and the (UTC) instant it started — or null if no row carries a
+// finite quantity + positive interval length. The finest grain available wins
+// naturally (a 15-min spike shows a higher kW than its hour's average), which is
+// the point of a demand readout. Ties keep the EARLIEST occurrence (deterministic).
+// PURE — no React/DOM/DB; the caller supplies the rows and formats the unit.
+export type PeakDemand = {
+  value: number; // average power over the interval (kW for electric, therms/h for gas)
+  intervalStart: Date; // UTC start of the peak interval
+  intervalSeconds: number; // the interval's length (900 / 3600 / …)
+  quantity: number; // the raw energy reading that produced the peak
+};
+
+export function peakDemand(rows: IntervalProfileRow[]): PeakDemand | null {
+  let best: PeakDemand | null = null;
+  for (const row of rows) {
+    const q = Number(row.quantity);
+    const secs = Number(row.intervalSeconds);
+    if (!Number.isFinite(q) || !Number.isFinite(secs) || secs <= 0) continue;
+    const instant = row.intervalStart instanceof Date ? row.intervalStart : new Date(row.intervalStart);
+    const t = instant.getTime();
+    if (!Number.isFinite(t)) continue;
+    const power = q / (secs / 3600); // energy ÷ hours = average power over the interval
+    // Strictly-greater keeps the earliest on a tie (we iterate in input order, but
+    // also compare timestamps so the result is order-independent on equal power).
+    if (
+      best === null ||
+      power > best.value ||
+      (power === best.value && t < best.intervalStart.getTime())
+    ) {
+      best = { value: power, intervalStart: new Date(t), intervalSeconds: secs, quantity: q };
+    }
+  }
+  return best;
+}
+
+// ---------------------------------------------------------------------------
+// dayHourHeatmapRows — reshape reconciled hourly reads for the day×hour heatmap (#77)
+// ---------------------------------------------------------------------------
+// The existing pure aggregator dayHourHeatmap (lib/viz/aggregate.ts) + its
+// renderer HeatmapViz (VizCharts.tsx) bin rows by integer (x, y) and AVERAGE the
+// `value` field within each cell. To draw a DAY-OF-WEEK × HOUR-OF-DAY intensity
+// grid we just need one row per reconciled hourly read carrying that read's local
+// hour-of-day (x), local day-of-week (y), a display label for the day, and its
+// usage as the value. The aggregator then averages every same-(dow, hour) read
+// into the cell — exactly the "typical Monday 6pm vs typical Sunday 6pm" picture.
+//
+// FEED reconcileToHourly OUTPUT here (one row per hour, dual-grain collapsed) so a
+// 15-min electric read doesn't count four times against its hour. Reads whose
+// quantity isn't finite or whose instant is unparseable are dropped (never
+// zero-filled — a missing hour leaves its cell empty in the renderer). PURE.
+export type HeatmapRow = {
+  hour: number; // local hour-of-day 0..23 (x bin)
+  dow: number; // local day-of-week 0=Sun..6=Sat (y bin)
+  dowLabel: string; // 'Sun'..'Sat' display label for the y axis
+  value: number; // the hour's usage (kWh / therms)
+};
+
+const DOW_LABELS: readonly string[] = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+export function dayHourHeatmapRows(
+  rows: IntervalProfileRow[],
+  opts: { tz?: string; before?: Date } = {}
+): HeatmapRow[] {
+  const tz = opts.tz ?? DEFAULT_TZ;
+  const beforeMs =
+    opts.before instanceof Date && Number.isFinite(opts.before.getTime()) ? opts.before.getTime() : null;
+  const out: HeatmapRow[] = [];
+  for (const row of rows) {
+    const q = Number(row.quantity);
+    if (!Number.isFinite(q)) continue;
+    const instant = row.intervalStart instanceof Date ? row.intervalStart : new Date(row.intervalStart);
+    const t = instant.getTime();
+    if (!Number.isFinite(t)) continue;
+    if (beforeMs != null && t >= beforeMs) continue; // drop the unsettled tail
+    const ld = localHourAndDow(instant, tz);
+    if (ld == null) continue;
+    out.push({ hour: ld.hour, dow: ld.dow, dowLabel: DOW_LABELS[ld.dow], value: q });
+  }
   return out;
 }

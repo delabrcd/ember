@@ -30,6 +30,7 @@ import { dateLabel, relativeFromNow } from '@/lib/format';
 import { STAT_SPECS, type StatData } from '@/lib/widgets/statSpec';
 import {
   BILLS_PANEL_TYPE,
+  INTERVAL_HEATMAP_WIDGET_TYPE,
   INTERVAL_HISTORY_WIDGET_TYPE,
   INTERVAL_WIDGET_TYPE,
   SPACER_PREFIX,
@@ -229,7 +230,12 @@ export function Dashboard() {
   // AFTER the 7 monthly charts, in order: load-shape then history. `isPlaced`
   // (below) gates them so a brand-new user (no saved layout) gets both visible and
   // a removal sticks.
-  const availableChartsAll = [...availableCharts, INTERVAL_WIDGET_TYPE, INTERVAL_HISTORY_WIDGET_TYPE];
+  const availableChartsAll = [
+    ...availableCharts,
+    INTERVAL_WIDGET_TYPE,
+    INTERVAL_HISTORY_WIDGET_TYPE,
+    INTERVAL_HEATMAP_WIDGET_TYPE,
+  ];
 
   // SPACER instances (CHANGE 2) currently placed: read straight off the saved blob
   // (the lg page grid + the pinned strip), since spacers aren't a Phase-D-tracked
@@ -288,7 +294,11 @@ export function Dashboard() {
   //   • re-add from the Customize palette via the clean findFreeSlot path.
   // (Earlier this list was unconditional `availableChartsAll`, which force-appended
   // the tiles every render — breaking removal AND overflowing the fit. #121 fix.)
-  const intervalWidgetTypes = [INTERVAL_WIDGET_TYPE, INTERVAL_HISTORY_WIDGET_TYPE];
+  const intervalWidgetTypes = [
+    INTERVAL_WIDGET_TYPE,
+    INTERVAL_HISTORY_WIDGET_TYPE,
+    INTERVAL_HEATMAP_WIDGET_TYPE,
+  ];
   const chartIds = [...availableCharts, ...intervalWidgetTypes.filter(isPlaced)];
   const panelIds = availablePanels.filter(isPlaced);
 
@@ -508,9 +518,10 @@ export function Dashboard() {
   // the Charts palette group when they've been removed (not currently placed).
   const removedIntervalWidget = !isPlaced(INTERVAL_WIDGET_TYPE) ? [INTERVAL_WIDGET_TYPE] : [];
   const removedIntervalHistory = !isPlaced(INTERVAL_HISTORY_WIDGET_TYPE) ? [INTERVAL_HISTORY_WIDGET_TYPE] : [];
+  const removedIntervalHeatmap = !isPlaced(INTERVAL_HEATMAP_WIDGET_TYPE) ? [INTERVAL_HEATMAP_WIDGET_TYPE] : [];
   const paletteGroups: PaletteGroup[] = [
     { label: 'Stat cards', types: availableStats.filter((t) => !isPlaced(t)) },
-    { label: 'Charts', types: [...removedCharts, ...removedIntervalWidget, ...removedIntervalHistory] },
+    { label: 'Charts', types: [...removedCharts, ...removedIntervalWidget, ...removedIntervalHistory, ...removedIntervalHeatmap] },
     { label: 'Panels', types: availablePanels.filter((t) => !isPlaced(t)) },
   ];
 

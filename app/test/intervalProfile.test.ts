@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import { averageDayProfile, reconcileToHourly, type IntervalProfileRow } from '../src/lib/intervalProfile';
+import {
+  averageDayProfile,
+  dayHourHeatmapRows,
+  peakDemand,
+  reconcileToHourly,
+  weekdayWeekendProfiles,
+  type IntervalProfileRow,
+} from '../src/lib/intervalProfile';
 
 // Hand-calculated tests for the PURE average-day profile shaper (issue #76).
 // All instants are written as ISO strings WITH an explicit offset so the UTC
@@ -258,5 +265,166 @@ describe('reconcileToHourly (hand-calculated)', () => {
     const profileRaw = averageDayProfile(mixed, { tz: TZ });
     expect(profileRaw[0].count).toBe(6);
     expect(profileRaw[0].mean).not.toBeCloseTo(0.55, 5); // double-count is real
+  });
+});
+
+// ---------------------------------------------------------------------------
+// weekdayWeekendProfiles — hand-calculated (issue #77)
+// ---------------------------------------------------------------------------
+// Calendar facts (America/New_York, June 2026 = EDT, -04:00):
+//   2026-06-06 = Saturday (weekend)   2026-06-08 = Monday  (weekday)
+//   2026-06-07 = Sunday   (weekend)   2026-06-09 = Tuesday (weekday)
+describe('weekdayWeekendProfiles (hand-calculated)', () => {
+  it('partitions reads by local day-of-week and averages each group independently', () => {
+    const rows: IntervalProfileRow[] = [
+      // WEEKDAYS at the local 18:00 hour: Mon=2, Tue=4 → weekday 18:00 mean (2+4)/2 = 3
+      { intervalStart: '2026-06-08T18:00:00-04:00', intervalSeconds: 3600, quantity: 2 },
+      { intervalStart: '2026-06-09T18:00:00-04:00', intervalSeconds: 3600, quantity: 4 },
+      // WEEKENDS at the local 18:00 hour: Sat=10, Sun=20 → weekend 18:00 mean (10+20)/2 = 15
+      { intervalStart: '2026-06-06T18:00:00-04:00', intervalSeconds: 3600, quantity: 10 },
+      { intervalStart: '2026-06-07T18:00:00-04:00', intervalSeconds: 3600, quantity: 20 },
+    ];
+    const { weekday, weekend } = weekdayWeekendProfiles(rows, { tz: TZ });
+
+    expect(weekday).toHaveLength(1);
+    expect(weekday[0]).toMatchObject({ label: '18:00', minutes: 18 * 60, mean: 3, min: 2, max: 4, count: 2 });
+
+    expect(weekend).toHaveLength(1);
+    expect(weekend[0]).toMatchObject({ label: '18:00', minutes: 18 * 60, mean: 15, min: 10, max: 20, count: 2 });
+  });
+
+  it('attributes a near-midnight UTC instant to the correct LOCAL day (and thus group)', () => {
+    // 03:30 UTC on 2026-06-08 (a Monday in UTC) is 23:30 LOCAL on 2026-06-07
+    // (Sunday, EDT -04:00) → it belongs to the WEEKEND group at local hour 23.
+    const rows: IntervalProfileRow[] = [
+      { intervalStart: new Date('2026-06-08T03:30:00.000Z'), intervalSeconds: 3600, quantity: 7 },
+    ];
+    const { weekday, weekend } = weekdayWeekendProfiles(rows, { tz: TZ });
+    expect(weekday).toHaveLength(0);
+    expect(weekend).toHaveLength(1);
+    expect(weekend[0]).toMatchObject({ label: '23:00', mean: 7, count: 1 });
+  });
+
+  it('an empty group yields [] (e.g. weekday-only input → empty weekend)', () => {
+    const rows: IntervalProfileRow[] = [
+      { intervalStart: '2026-06-08T07:00:00-04:00', intervalSeconds: 3600, quantity: 1 },
+    ];
+    const { weekday, weekend } = weekdayWeekendProfiles(rows, { tz: TZ });
+    expect(weekday).toHaveLength(1);
+    expect(weekend).toEqual([]);
+  });
+
+  it('passes bucketMinutes through so 15-min granularity splits each group finer', () => {
+    const rows: IntervalProfileRow[] = [
+      // Two weekday 15-min slots in DIFFERENT 15-min buckets of the 13:00 hour.
+      { intervalStart: '2026-06-08T13:00:00-04:00', intervalSeconds: 900, quantity: 1 },
+      { intervalStart: '2026-06-08T13:15:00-04:00', intervalSeconds: 900, quantity: 2 },
+    ];
+    const { weekday } = weekdayWeekendProfiles(rows, { tz: TZ, bucketMinutes: 15 });
+    expect(weekday.map((b) => b.label)).toEqual(['13:00', '13:15']);
+    expect(weekday[0]).toMatchObject({ minutes: 780, mean: 1, count: 1 });
+    expect(weekday[1]).toMatchObject({ minutes: 795, mean: 2, count: 1 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// peakDemand — hand-calculated (issue #77)
+// ---------------------------------------------------------------------------
+// Peak demand = max of quantity ÷ (intervalSeconds / 3600) = average power (kW for
+// electric, therms/h for gas) over the interval, plus when it occurred.
+describe('peakDemand (hand-calculated)', () => {
+  it('finds the highest average power, with the finest grain winning over equal energy', () => {
+    const rows: IntervalProfileRow[] = [
+      // 0.5 kWh over a full hour → 0.5 / (3600/3600) = 0.5 kW
+      { intervalStart: '2026-06-08T01:00:00-04:00', intervalSeconds: 3600, quantity: 0.5 },
+      // 0.5 kWh over a 15-min slot → 0.5 / (900/3600) = 0.5 / 0.25 = 2.0 kW  ← PEAK
+      { intervalStart: '2026-06-08T18:30:00-04:00', intervalSeconds: 900, quantity: 0.5 },
+      // 1.2 kWh over an hour → 1.2 kW (more energy, but lower power than the 15-min spike)
+      { intervalStart: '2026-06-08T19:00:00-04:00', intervalSeconds: 3600, quantity: 1.2 },
+    ];
+    const peak = peakDemand(rows);
+    expect(peak).not.toBeNull();
+    expect(peak!.value).toBeCloseTo(2.0, 10);
+    expect(peak!.intervalSeconds).toBe(900);
+    expect(peak!.quantity).toBeCloseTo(0.5, 10);
+    // The peak instant is the 18:30 EDT slot = 22:30 UTC.
+    expect(peak!.intervalStart.toISOString()).toBe('2026-06-08T22:30:00.000Z');
+  });
+
+  it('hourly-only reads: peak is just the largest quantity (power = quantity)', () => {
+    const rows: IntervalProfileRow[] = [
+      { intervalStart: '2026-06-08T06:00:00-04:00', intervalSeconds: 3600, quantity: 1.1 },
+      { intervalStart: '2026-06-08T20:00:00-04:00', intervalSeconds: 3600, quantity: 3.3 }, // peak
+      { intervalStart: '2026-06-08T22:00:00-04:00', intervalSeconds: 3600, quantity: 2.2 },
+    ];
+    const peak = peakDemand(rows);
+    expect(peak!.value).toBeCloseTo(3.3, 10);
+    expect(peak!.intervalStart.toISOString()).toBe('2026-06-09T00:00:00.000Z'); // 20:00 EDT = 00:00 UTC next day
+  });
+
+  it('breaks a power tie by the EARLIEST occurrence (deterministic, order-independent)', () => {
+    const rows: IntervalProfileRow[] = [
+      // Same power (2.0 kW): later one listed FIRST to prove order independence.
+      { intervalStart: '2026-06-08T19:00:00-04:00', intervalSeconds: 3600, quantity: 2.0 },
+      { intervalStart: '2026-06-08T07:00:00-04:00', intervalSeconds: 3600, quantity: 2.0 }, // earlier → wins
+    ];
+    const peak = peakDemand(rows);
+    expect(peak!.value).toBeCloseTo(2.0, 10);
+    expect(peak!.intervalStart.toISOString()).toBe('2026-06-08T11:00:00.000Z'); // 07:00 EDT
+  });
+
+  it('drops non-finite quantity / non-positive interval length; null when nothing valid', () => {
+    expect(peakDemand([])).toBeNull();
+    const rows: IntervalProfileRow[] = [
+      { intervalStart: '2026-06-08T07:00:00-04:00', intervalSeconds: 3600, quantity: Number.NaN },
+      { intervalStart: '2026-06-08T08:00:00-04:00', intervalSeconds: 0, quantity: 5 }, // bad length
+    ];
+    expect(peakDemand(rows)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// dayHourHeatmapRows — hand-calculated (issue #77)
+// ---------------------------------------------------------------------------
+// Reshapes reconciled hourly reads into {hour, dow, dowLabel, value} rows for the
+// existing dayHourHeatmap aggregator. dow 0=Sun..6=Sat in LOCAL time.
+describe('dayHourHeatmapRows (hand-calculated)', () => {
+  it('maps each read to its local hour, day-of-week index, and label', () => {
+    const rows: IntervalProfileRow[] = [
+      // Monday 18:00 EDT → hour 18, dow 1 (Mon)
+      { intervalStart: '2026-06-08T18:00:00-04:00', intervalSeconds: 3600, quantity: 2 },
+      // Saturday 09:00 EDT → hour 9, dow 6 (Sat)
+      { intervalStart: '2026-06-06T09:00:00-04:00', intervalSeconds: 3600, quantity: 5 },
+    ];
+    const out = dayHourHeatmapRows(rows, { tz: TZ });
+    expect(out).toHaveLength(2);
+    expect(out[0]).toEqual({ hour: 18, dow: 1, dowLabel: 'Mon', value: 2 });
+    expect(out[1]).toEqual({ hour: 9, dow: 6, dowLabel: 'Sat', value: 5 });
+  });
+
+  it('uses the LOCAL day for an instant that crosses the UTC-day boundary', () => {
+    // 03:30 UTC 2026-06-08 = 23:30 LOCAL 2026-06-07 (Sunday) → hour 23, dow 0 (Sun)
+    const rows: IntervalProfileRow[] = [
+      { intervalStart: new Date('2026-06-08T03:30:00.000Z'), intervalSeconds: 3600, quantity: 1.5 },
+    ];
+    const out = dayHourHeatmapRows(rows, { tz: TZ });
+    expect(out).toHaveLength(1);
+    expect(out[0]).toEqual({ hour: 23, dow: 0, dowLabel: 'Sun', value: 1.5 });
+  });
+
+  it('drops the unsettled tail and non-finite quantities; never fabricates rows', () => {
+    const rows: IntervalProfileRow[] = [
+      { intervalStart: '2026-06-05T14:00:00-04:00', intervalSeconds: 3600, quantity: 3 }, // settled
+      { intervalStart: '2026-06-09T14:00:00-04:00', intervalSeconds: 3600, quantity: 0 }, // unsettled (after cutoff)
+      { intervalStart: '2026-06-05T15:00:00-04:00', intervalSeconds: 3600, quantity: Number.NaN }, // dropped
+    ];
+    const before = new Date('2026-06-08T00:00:00Z');
+    const out = dayHourHeatmapRows(rows, { tz: TZ, before });
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({ hour: 14, value: 3 });
+  });
+
+  it('returns [] for empty input', () => {
+    expect(dayHourHeatmapRows([], { tz: TZ })).toEqual([]);
   });
 });

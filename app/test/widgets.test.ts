@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { CHART_SPECS } from '../src/lib/chartSpec';
 import type { Overview } from '../src/components/useDashboardData';
-import { WIDGETS, BILLS_PANEL_TYPE, INTERVAL_HISTORY_WIDGET_TYPE, INTERVAL_WIDGET_TYPE, SPACER_PREFIX, chartWidgetType, statWidgetType, getWidget, isSpacerId, widgetMins } from '../src/lib/widgets/registry';
+import { WIDGETS, BILLS_PANEL_TYPE, INTERVAL_HEATMAP_WIDGET_TYPE, INTERVAL_HISTORY_WIDGET_TYPE, INTERVAL_WIDGET_TYPE, SPACER_PREFIX, chartWidgetType, statWidgetType, getWidget, isSpacerId, widgetMins } from '../src/lib/widgets/registry';
 import type { MonthRow } from '../src/lib/chartSpec';
 import {
   STAT_IDS,
@@ -75,14 +75,14 @@ describe('widget registry completeness', () => {
   it('has exactly chart+stat+panel+interval+spacer entries and no namespace collision', () => {
     // 7 charts + 8 stats + 1 panel (the bills rail, Phase E #73) + 1 interval
     // load-shape widget (#76) + 1 interval history widget (#121 part 2) +
-    // 1 spacer prototype (CHANGE 2) = 19 registry entries;
-    // the chart:/stat:/panel:/interval/spacer keys keep them distinct. (The spacer is
-    // stored under its bare prefix; concrete `spacer:<n>` instances resolve to it in
-    // getWidget — they're not extra entries.)
+    // 1 interval heatmap widget (#77) + 1 spacer prototype (CHANGE 2) = 20 registry
+    // entries; the chart:/stat:/panel:/interval/spacer keys keep them distinct. (The
+    // spacer is stored under its bare prefix; concrete `spacer:<n>` instances resolve
+    // to it in getWidget — they're not extra entries.)
     expect(CHART_SPECS.length).toBe(7);
     expect(STAT_IDS.length).toBe(8);
-    expect(Object.keys(WIDGETS).length).toBe(CHART_SPECS.length + STAT_IDS.length + 4);
-    expect(new Set(Object.keys(WIDGETS)).size).toBe(19);
+    expect(Object.keys(WIDGETS).length).toBe(CHART_SPECS.length + STAT_IDS.length + 5);
+    expect(new Set(Object.keys(WIDGETS)).size).toBe(20);
   });
 
   it('registers the bills panel (Phase E #73) as a placeable panel widget', () => {
@@ -110,6 +110,20 @@ describe('widget registry completeness', () => {
     expect(w).toBeTruthy();
     expect(w.category).toBe('chart');
     expect(getWidget(INTERVAL_HISTORY_WIDGET_TYPE)).toBe(w);
+    // Self-fetches /api/interval — no dataset deps (never goes through resolveDataset).
+    expect(w.dataDeps).toEqual([]);
+    // Sized like a chart tile (half the lg grid, tall) for the 2×2 chart grid.
+    expect(w.defaultSize.w).toBe(6);
+    expect(w.defaultSize.h).toBe(7);
+    expect(w.defaultSize.minW).toBeGreaterThanOrEqual(3);
+    expect(w.defaultSize.minH).toBeGreaterThanOrEqual(3);
+  });
+
+  it('registers the interval heatmap widget (#77) as a self-contained chart tile', () => {
+    const w = WIDGETS[INTERVAL_HEATMAP_WIDGET_TYPE];
+    expect(w).toBeTruthy();
+    expect(w.category).toBe('chart');
+    expect(getWidget(INTERVAL_HEATMAP_WIDGET_TYPE)).toBe(w);
     // Self-fetches /api/interval — no dataset deps (never goes through resolveDataset).
     expect(w.dataDeps).toEqual([]);
     // Sized like a chart tile (half the lg grid, tall) for the 2×2 chart grid.
