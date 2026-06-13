@@ -5,12 +5,15 @@
 // typical day look like?". Electric (15-min kWh) by default, with a gas (hourly
 // therms) toggle.
 //
-// SELF-FETCHING (deliberately contained): unlike the monthly charts — which the
-// host resolves through the dataset plumbing — this widget owns its own data. On
-// mount (and whenever the fuel toggle or the selected account changes) it fetches
-// /api/interval, shapes the rows with the PURE averageDayProfile, and draws the
-// result with Recharts. It does NOT touch the ChartSpec/ConfigurableChart seam
-// (the `profile` vizType's renderer is the separate #95 refactor).
+// SERVER-SIDE AGGREGATION (issue #77 data-correctness fix): the average-day
+// profiles + peak are computed SERVER-SIDE over the RAW, un-downsampled interval
+// rows by /api/interval/profile (pure buildProfilePayload). Previously this widget
+// fetched /api/interval — which DOWNSAMPLES to ≤600 points by absolute time for
+// the history line — and shaped client-side; over a wide range each returned point
+// could be ~32h averaged, destroying the hour-of-day structure. The route now
+// returns ALL toggle variants (split × granularity) in one payload, so the
+// weekday/weekend/combined + 1h/15m toggles stay INSTANT (no per-toggle refetch);
+// only the fuel / range / account changing triggers a refetch.
 
 import { useEffect, useMemo, useState } from 'react';
 import {
@@ -23,24 +26,17 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import {
-  averageDayProfile,
-  peakDemand,
-  reconcileToHourly,
-  weekdayWeekendProfiles,
-  type IntervalProfileRow,
-  type ProfileBucket,
-} from '@/lib/intervalProfile';
+import type { ProfileBucket } from '@/lib/intervalProfile';
+import type { ProfilePayload } from '@/lib/intervalAggregate';
 import { ChartShell } from '../ChartShell';
 
 // The dashboard's dark-slate theme + the elec amber / gas blue tokens (mirrors
 // chartSpec.ts and ConfigurableChart so the widget matches the surrounding charts).
 const ELEC = '#f59e0b';
 const GAS = '#38bdf8';
-// AMI meters lag ~1–2 days (the freshest hours read 0, then fill in). Exclude the
-// last SETTLE_HOURS from the average-day profile so those provisional zeros don't
-// bias the curve down. 48h covers the typical lag with margin.
-const SETTLE_HOURS = 48;
+// (The unsettled-tail exclusion — AMI meters lag ~1–2 days, reporting the freshest
+// hours as provisional 0s — now happens SERVER-SIDE in /api/interval/profile, so
+// the widget no longer needs its own SETTLE_HOURS cutoff.)
 const tooltipStyle = { backgroundColor: '#0f172a', border: '1px solid #1e293b', borderRadius: 12, fontSize: 12 } as const;
 const axisStyle = { stroke: '#475569', fontSize: 11 } as const;
 
@@ -74,13 +70,9 @@ type Gran = '60' | '15';
 const GRANS: readonly Gran[] = ['60', '15'];
 const GRAN_LABEL: Record<Gran, string> = { '60': '1h', '15': '15m' };
 
-// The /api/interval payload (raw IntervalUsage-like rows). intervalStart arrives
-// as a JSON string; the PURE shaper tolerates both string + Date.
-type IntervalApiRow = IntervalProfileRow & { fuelType?: string; unit?: string };
-
-// A loaded fetch state per fuel: undefined = still loading, an array (possibly
-// empty) = loaded.
-type LoadState = { rows: IntervalApiRow[] } | { error: true } | undefined;
+// A loaded fetch state: undefined = still loading; an error sentinel; else the
+// server-computed payload carrying every split × granularity variant + the peak.
+type LoadState = ProfilePayload | { error: true } | undefined;
 
 // A labelled segmented control matching ConfigurableChart's Segmented, but with
 // distinct option value/label (the fuel enum is uppercase, the label is not).
@@ -201,22 +193,34 @@ export function IntervalLoadShape({
     if (fuel === 'GAS' && gran === '15') setGran('60');
   }, [fuel, gran]);
 
-  // Fetch on mount + whenever the fuel, the global range, or the selected account
-  // changes. We track an `alive` flag so a stale response (the user flicked the
-  // toggle mid-flight) can't overwrite the current one.
+  // Fetch on mount + whenever the FUEL, the global RANGE, or the selected ACCOUNT
+  // changes — NOT on the split/granularity toggles (the payload carries every
+  // variant, so those switch instantly client-side). We track an `alive` flag so a
+  // stale response (the user flicked the fuel mid-flight) can't overwrite the
+  // current one. The server returns the display-ready profiles (aggregated over
+  // the RAW rows); there is no client-side shaping to redo.
   useEffect(() => {
     let alive = true;
     setState(undefined);
     const acctQuery = accountId != null ? `&accountId=${accountId}` : '';
-    // Average over the GLOBAL range when supplied; otherwise let the route default
-    // to its trailing window. The profile shapes to 24 buckets regardless of span,
-    // so no downsampling is needed here.
     const rangeQuery = from && to ? `&from=${from}&to=${to}` : '';
-    fetch(`/api/interval?fuel=${fuel}${rangeQuery}${acctQuery}`)
+    fetch(`/api/interval/profile?fuel=${fuel}${rangeQuery}${acctQuery}`)
       .then((r) => r.json())
       .then((j) => {
         if (!alive) return;
-        setState({ rows: Array.isArray(j?.rows) ? (j.rows as IntervalApiRow[]) : [] });
+        // Defensive: a well-formed payload always carries the variants map; treat
+        // anything else as empty so the widget shows its empty state, not a crash.
+        if (j && j.variants && j.variants['60'] && j.variants['15']) {
+          setState(j as ProfilePayload);
+        } else {
+          setState({
+            variants: {
+              '60': { combined: [], weekday: [], weekend: [] },
+              '15': { combined: [], weekday: [], weekend: [] },
+            },
+            peak: null,
+          });
+        }
       })
       .catch(() => {
         if (alive) setState({ error: true });
@@ -230,37 +234,21 @@ export function IntervalLoadShape({
   const unit = FUEL_UNIT[fuel];
   const powerUnit = POWER_UNIT[fuel];
 
-  // Shape the raw reads into the average-day profile (PURE), then derive the
-  // stacked-area band fields: `base` = min (a transparent floor) and `band` =
-  // max − min (the filled spread drawn ON TOP of the floor via a shared stackId).
-  // Stacking two areas is the dependency-free way to draw a min–max band in
-  // Recharts (it has no native band series) and is robust regardless of the card
-  // background. Memoized on the loaded rows so a resize doesn't re-bucket.
+  // Pick the right pre-computed profile from the server payload for the selected
+  // split × granularity, then derive the stacked-area band fields: `base` = min (a
+  // transparent floor) and `band` = max − min (the filled spread drawn ON TOP of
+  // the floor via a shared stackId). Stacking two areas is the dependency-free way
+  // to draw a min–max band in Recharts (it has no native band series). The
+  // SHAPING (reconcile/grain/split/unsettled-tail cut) all happened SERVER-SIDE
+  // over the RAW rows; here we just SELECT the matching variant — so a toggle is
+  // an instant re-render with no refetch and no re-bucketing.
   const data = useMemo(() => {
     if (!state || 'error' in state) return [];
-    // Exclude the unsettled tail (last ~48h): AMI meters report the freshest hours
-    // as 0 and fill in later, which would bias the "typical day" curve down. A
-    // typical-day profile doesn't need the last couple of days anyway.
-    const before = new Date(Date.now() - SETTLE_HOURS * 3600_000);
-    const bucketMinutes = Number(effectiveGran);
-    // GRAIN: at 1h we reconcile dual-grain input (15-min + hourly may coexist for
-    // ELECTRIC) so a complete four-slot 15-min hour wins over its hourly counterpart
-    // (no double-count, no partial-hour underreport). At 15m we must KEEP the raw
-    // 15-min reads (reconcileToHourly would collapse them, defeating the finer
-    // buckets) — so we feed the raw 900-s rows straight through. The `before` cutoff
-    // is applied by averageDayProfile/weekday-weekend (order: reconcile → then cut).
-    const shaped: IntervalProfileRow[] =
-      effectiveGran === '15' ? state.rows.filter((r) => r.intervalSeconds === 900) : reconcileToHourly(state.rows);
-
-    // Build the profile(s) for the selected day split. Combined = one profile over
-    // all days; weekday/weekend = the matching partition (PURE splitter).
+    const variant = state.variants[effectiveGran];
     let buckets: ProfileBucket[];
-    if (split === 'COMBINED') {
-      buckets = averageDayProfile(shaped, { before, bucketMinutes });
-    } else {
-      const { weekday, weekend } = weekdayWeekendProfiles(shaped, { before, bucketMinutes });
-      buckets = split === 'WEEKDAY' ? weekday : weekend;
-    }
+    if (split === 'COMBINED') buckets = variant.combined;
+    else if (split === 'WEEKDAY') buckets = variant.weekday;
+    else buckets = variant.weekend;
 
     return buckets.map((b) => ({
       ...b,
@@ -270,19 +258,9 @@ export function IntervalLoadShape({
   }, [state, split, effectiveGran]);
 
   // Peak demand (#77): the highest average power over any single SETTLED interval
-  // for this fuel, from the RAW reads (finest grain wins — a 15-min spike reads a
-  // higher kW than its hour's mean). Independent of the day-split toggle (it's a
-  // single extreme, not an average). Excludes the unsettled tail so a lagged/partial
-  // fresh interval can't read as a false peak.
-  const peak = useMemo(() => {
-    if (!state || 'error' in state) return null;
-    const beforeMs = Date.now() - SETTLE_HOURS * 3600_000;
-    const settled = state.rows.filter((r) => {
-      const t = (r.intervalStart instanceof Date ? r.intervalStart : new Date(r.intervalStart)).getTime();
-      return Number.isFinite(t) && t < beforeMs;
-    });
-    return peakDemand(settled);
-  }, [state]);
+  // for this fuel — computed server-side over the RAW reads (finest grain wins; the
+  // unsettled tail excluded). Independent of the day-split/granularity toggles.
+  const peak = !state || 'error' in state ? null : state.peak;
 
   const loading = state === undefined;
   const errored = !!state && 'error' in state;
@@ -290,7 +268,7 @@ export function IntervalLoadShape({
 
   // Peak-demand caption (#77): value + when, e.g. "Peak 4.21 kW · Sat, Jun 7 7 PM".
   const peakReadout = peak
-    ? `Peak ${peak.value.toFixed(peak.value < 10 ? 2 : 1)} ${powerUnit} · ${peakFmt.format(peak.intervalStart)}`
+    ? `Peak ${peak.value.toFixed(peak.value < 10 ? 2 : 1)} ${powerUnit} · ${peakFmt.format(new Date(peak.intervalStart))}`
     : null;
 
   // The chart body (render-prop for ChartShell): keeps the loading/empty/errored
