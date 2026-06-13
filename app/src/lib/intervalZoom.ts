@@ -63,3 +63,25 @@ export function shouldRefetchZoom(
   if (zoomSpan > fetchedSpan * opts.shrinkRatio) return false;
   return true;
 }
+
+// Clamp a brushed [start, end] index pair to a valid, ordered range inside a
+// series of `len` points. Used to reconcile the CONTROLLED brush after the data
+// underneath it changes (a finer-detail refetch swaps the rows in place, so the
+// old indices may now be out of bounds). Guarantees 0 ≤ start ≤ end ≤ len-1 for
+// any non-empty series; returns [0, 0] for an empty series (a degenerate brush
+// the chart won't render anyway). PURE — index math only, no React/DOM.
+export function clampBrushIndices(
+  start: number,
+  end: number,
+  len: number,
+): { startIndex: number; endIndex: number } {
+  if (len <= 0) return { startIndex: 0, endIndex: 0 };
+  const last = len - 1;
+  // Normalize NaN/undefined-ish inputs to the endpoints, then clamp + order.
+  let s = Number.isFinite(start) ? Math.round(start) : 0;
+  let e = Number.isFinite(end) ? Math.round(end) : last;
+  s = Math.min(Math.max(s, 0), last);
+  e = Math.min(Math.max(e, 0), last);
+  if (s > e) [s, e] = [e, s];
+  return { startIndex: s, endIndex: e };
+}

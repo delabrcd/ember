@@ -29,19 +29,29 @@
 //
 // ZOOM (issue #141): on TOP of the global range, the user can narrow into a
 // sub-span LOCALLY (a Recharts Brush at the chart foot) without mutating the
-// global RangeControl. When the brushed span is narrow enough — and meaningfully
-// smaller than what's currently fetched (shouldRefetchZoom) — the widget REFETCHES
-// /api/interval for just that span so the zoom shows finer (less server-
-// downsampled) detail rather than stretched decimated points. A "Reset zoom"
-// affordance returns to the global window. The zoom is per-widget ephemeral state
-// (lib/intervalZoom.ts holds the pure span/refetch math).
+// global RangeControl. The brush is a CONTROLLED component — its [startIndex,
+// endIndex] live in React state and are passed back to <Brush>; every onChange
+// just updates those indices, so Recharts zooms the main chart to the selection
+// SMOOTHLY with NO data change (this is what fixes the #141 snap-back: an
+// uncontrolled brush + a mid-drag refetch reset the brush to the full range).
+//
+// The finer-detail refetch is DECOUPLED from the visual zoom and DEBOUNCED: only
+// ~ZOOM_DEBOUNCE_MS after the drag settles do we (if the span is narrow enough —
+// shouldRefetchZoom) REFETCH /api/interval for just that span to show finer (less
+// server-downsampled) detail. The refetch swaps the rows IN PLACE — it never
+// blanks the chart to the loading skeleton (only the fuel/account/global-range
+// load does that) — and on arrival the controlled brush is reconciled to span
+// the new (zoomed) data, so the view stays put: no flash, no jump, no snap.
+//
+// A "Reset zoom" affordance returns to the global window. The zoom is per-widget
+// ephemeral state (lib/intervalZoom.ts holds the pure span/refetch/index math).
 //
 // GAPS: the chart uses connectNulls=false (the default) so real gaps in the
 // data (missing intervals — the API omits them) render as line breaks, NEVER
 // as fabricated zeros. This holds through zoom + refetch (the refetch path runs
 // the same toHistoryPoints shaper, which drops gaps).
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Brush,
   CartesianGrid,
@@ -54,7 +64,7 @@ import {
 } from 'recharts';
 import { reconcileToHourly, type IntervalProfileRow } from '@/lib/intervalProfile';
 import { toHistoryPoints, type HistoryPoint } from '@/lib/intervalHistory';
-import { shouldRefetchZoom, zoomSpanToRange } from '@/lib/intervalZoom';
+import { clampBrushIndices, shouldRefetchZoom, zoomSpanToRange } from '@/lib/intervalZoom';
 import { ChartShell } from '../ChartShell';
 
 // ---- Theme constants (mirrors IntervalLoadShape) ----------------------------
@@ -76,6 +86,12 @@ const axisStyle = { stroke: '#475569', fontSize: 11 } as const;
 // must at least halve the window to be worth a refetch.
 const ZOOM_MAX_SPAN_DAYS = 14;
 const ZOOM_SHRINK_RATIO = 0.5;
+// How long after the LAST brush onChange we wait before firing the finer-detail
+// refetch. The refetch is deferred to after the drag settles so it never yanks
+// the data out from under an active drag (the #141 snap-back). 350ms is long
+// enough to coalesce a continuous drag into one fetch, short enough to feel
+// responsive once the user lets go.
+const ZOOM_DEBOUNCE_MS = 350;
 
 // ---- Types ------------------------------------------------------------------
 type Fuel = 'ELECTRIC' | 'GAS';
@@ -197,6 +213,21 @@ export function IntervalHistory({
   // The locally-zoomed window (issue #141). When set, the widget has refetched
   // /api/interval for [zoom.from, zoom.to] (finer detail) and renders that span.
   const [zoom, setZoom] = useState<Zoom | null>(null);
+  // The CONTROLLED brush selection (issue #141): indices into the rendered
+  // `data`. `null` means "no explicit selection" → the brush spans the full
+  // series. Driving these from state (vs an uncontrolled brush) is what keeps a
+  // drag from snapping back: onChange updates them, Recharts zooms smoothly, and
+  // the data underneath never changes mid-drag.
+  const [brush, setBrush] = useState<{ startIndex: number; endIndex: number } | null>(null);
+  // After a finer-detail refetch lands, the new `data` IS the zoomed span — so the
+  // controlled brush should span the WHOLE new series, keeping the view on that
+  // span (no jump/snap). This ref flags "the next data arrival was caused by a
+  // zoom refetch; reconcile the brush to full range when it lands."
+  const reconcileBrushRef = useRef(false);
+  // A debounce timer for the finer-detail refetch (issue #141): the visual zoom
+  // updates instantly via the controlled brush; the refetch is deferred until the
+  // drag settles so it never disturbs an active drag.
+  const refetchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Gas has no 15-min data → disable the 15m option when fuel=Gas.
   // If the user switches to Gas while on 15m, fall back to 1h.
@@ -217,20 +248,38 @@ export function IntervalHistory({
   const fetchFrom = zoom ? zoom.from : from;
   const fetchTo = zoom ? zoom.to : to;
 
-  // Drop any active zoom whenever the fuel, the account, or the GLOBAL range
-  // changes — a zoom into the old context would be stale (the reset is then a
-  // no-op the next fetch already reflects). Resolution does NOT clear the zoom
-  // (the user may be zooming specifically to inspect 15m detail).
+  // Drop any active zoom (and the brush selection) whenever the fuel, the
+  // account, or the GLOBAL range changes — a zoom into the old context would be
+  // stale (the reset is then a no-op the next fetch already reflects). Resolution
+  // does NOT clear the zoom (the user may be zooming specifically to inspect 15m
+  // detail), but it DOES drop the brush selection: switching 1h↔15m changes the
+  // point count, so the old indices no longer map to the same span.
   useEffect(() => {
     setZoom(null);
+    setBrush(null);
   }, [fuel, from, to, accountId]);
+  useEffect(() => {
+    setBrush(null);
+  }, [effectiveResolution]);
+
+  // To decide whether a given fetch should show the loading skeleton, we track
+  // the "base" reload key (fuel/global-range/account). When ONLY the zoom-derived
+  // window changed (a finer-detail refetch), the base key is unchanged → we keep
+  // the current chart visible and swap data in place; we only blank to the
+  // skeleton for a true base reload (mount, fuel/account/global-range change).
+  const baseKeyRef = useRef<string | null>(null);
 
   // Fetch on mount + whenever controls, account, or the (possibly zoomed) window
   // change. Track an `alive` flag so a stale response (the user changed a control
   // mid-flight) can't overwrite the current one.
   useEffect(() => {
     let alive = true;
-    setState(undefined);
+    const baseKey = `${fuel}|${from ?? ''}|${to ?? ''}|${accountId ?? ''}`;
+    const isBaseReload = baseKeyRef.current !== baseKey;
+    baseKeyRef.current = baseKey;
+    // Skeleton only for a base reload; a zoom refetch keeps the prior chart up
+    // (issue #141: no blank/loading flash while zooming).
+    if (isBaseReload) setState(undefined);
     const acctQuery = accountId != null ? `&accountId=${accountId}` : '';
     // Follow the zoomed span when zoomed, else the GLOBAL range; otherwise let the
     // route default to its trailing window (non-dashboard caller). Server-side
@@ -250,7 +299,7 @@ export function IntervalHistory({
     return () => {
       alive = false;
     };
-  }, [fuel, fetchFrom, fetchTo, accountId]);
+  }, [fuel, fetchFrom, fetchTo, accountId, from, to]);
 
   const color = fuel === 'GAS' ? GAS : ELEC;
   const unit = FUEL_UNIT[fuel];
@@ -275,6 +324,40 @@ export function IntervalHistory({
   const errored = !!state && 'error' in state;
   const empty = !loading && !errored && data.length === 0;
 
+  // Reconcile the CONTROLLED brush whenever `data` changes (issue #141):
+  //   • If a zoom refetch just landed (reconcileBrushRef), the new `data` IS the
+  //     zoomed span → span the WHOLE new series so the view stays on that span.
+  //   • Otherwise, if an existing selection now falls out of bounds (e.g. a
+  //     resolution change shrank the series), clamp it back into range; a brush
+  //     spanning the full series collapses to "no selection" (null) so the
+  //     overview shows the whole window.
+  // Depends on `data` ONLY (the reconciliation is a response to the series
+  // changing). The current `brush` is read inside the functional `setBrush`
+  // updater rather than via a closure capture, so we don't need it in the deps and
+  // the reconciliation can't re-trigger itself when it updates the brush.
+  const len = data.length;
+  useEffect(() => {
+    const reconcile = reconcileBrushRef.current;
+    reconcileBrushRef.current = false;
+    setBrush((prev) => {
+      if (len === 0) return null;
+      const last = len - 1;
+      // A zoom refetch just landed: the new data IS the zoomed span → span it all.
+      if (reconcile) {
+        return prev && prev.startIndex === 0 && prev.endIndex === last
+          ? prev
+          : { startIndex: 0, endIndex: last };
+      }
+      if (!prev) return prev;
+      // Full-range selection → drop to null (overview, no zoom box).
+      if (prev.startIndex <= 0 && prev.endIndex >= last) return null;
+      const clamped = clampBrushIndices(prev.startIndex, prev.endIndex, len);
+      return clamped.startIndex === prev.startIndex && clamped.endIndex === prev.endIndex
+        ? prev
+        : clamped;
+    });
+  }, [len]);
+
   // The ms span currently FETCHED, derived from the rendered points (the first and
   // last point). Used as the baseline shouldRefetchZoom compares a brush against.
   const fetchedSpan = useMemo(() => {
@@ -282,38 +365,70 @@ export function IntervalHistory({
     return { fromMs: data[0].ts, toMs: data[data.length - 1].ts };
   }, [data]);
 
-  // Brush-end handler: the user moved the foot navigator. Recharts gives us the
-  // selected start/end indices into `data`; we translate those to the brushed ms
-  // span and, if it warrants finer detail (pure shouldRefetchZoom), set a zoom so
-  // the fetch effect refetches /api/interval for just that span. A brush that
-  // isn't narrow enough leaves `zoom` alone (the visual brush still narrows the
-  // view; we just don't pay for a refetch).
+  // Brush handler: the user is dragging the foot navigator. Recharts gives us the
+  // selected start/end indices into `data`. We (1) update the CONTROLLED brush
+  // immediately so the chart zooms smoothly with no data change (the snap-back
+  // fix), and (2) DEBOUNCE a finer-detail decision: only after the drag settles,
+  // if the brushed span warrants it (pure shouldRefetchZoom), set a zoom so the
+  // fetch effect refetches /api/interval for just that span. A brush that isn't
+  // narrow enough leaves `zoom` alone (the visual brush still narrows the view; we
+  // just don't pay for a refetch).
   const onBrushChange = useCallback(
     (range: { startIndex?: number; endIndex?: number }) => {
-      if (!fetchedSpan) return;
       const s = range.startIndex;
       const e = range.endIndex;
-      if (s == null || e == null || s >= e) return;
-      const startMs = data[s]?.ts;
-      const endMs = data[e]?.ts;
-      if (startMs == null || endMs == null) return;
-      if (
-        shouldRefetchZoom(startMs, endMs, fetchedSpan.fromMs, fetchedSpan.toMs, {
-          maxSpanDays: ZOOM_MAX_SPAN_DAYS,
-          shrinkRatio: ZOOM_SHRINK_RATIO,
-        })
-      ) {
-        const { from: zf, to: zt } = zoomSpanToRange(startMs, endMs);
-        // Avoid a redundant refetch if we're already zoomed to that exact span.
-        setZoom((prev) =>
-          prev && prev.from === zf && prev.to === zt ? prev : { from: zf, to: zt, startMs, endMs },
-        );
-      }
+      if (s == null || e == null) return;
+      // 1) Visual zoom — update the controlled brush right away (clamped/ordered).
+      const next = clampBrushIndices(s, e, data.length);
+      setBrush((prev) =>
+        prev && prev.startIndex === next.startIndex && prev.endIndex === next.endIndex
+          ? prev
+          : next,
+      );
+      // 2) Debounced finer-detail refetch — evaluated against the SETTLED span.
+      if (refetchTimerRef.current) clearTimeout(refetchTimerRef.current);
+      refetchTimerRef.current = setTimeout(() => {
+        refetchTimerRef.current = null;
+        if (!fetchedSpan) return;
+        if (next.startIndex >= next.endIndex) return;
+        const startMs = data[next.startIndex]?.ts;
+        const endMs = data[next.endIndex]?.ts;
+        if (startMs == null || endMs == null) return;
+        if (
+          shouldRefetchZoom(startMs, endMs, fetchedSpan.fromMs, fetchedSpan.toMs, {
+            maxSpanDays: ZOOM_MAX_SPAN_DAYS,
+            shrinkRatio: ZOOM_SHRINK_RATIO,
+          })
+        ) {
+          const { from: zf, to: zt } = zoomSpanToRange(startMs, endMs);
+          // Avoid a redundant refetch if we're already zoomed to that exact span.
+          setZoom((prev) => {
+            if (prev && prev.from === zf && prev.to === zt) return prev;
+            reconcileBrushRef.current = true;
+            return { from: zf, to: zt, startMs, endMs };
+          });
+        }
+      }, ZOOM_DEBOUNCE_MS);
     },
     [data, fetchedSpan],
   );
 
-  const resetZoom = useCallback(() => setZoom(null), []);
+  // Clean up a pending debounce timer on unmount (avoid a stray setState).
+  useEffect(() => {
+    return () => {
+      if (refetchTimerRef.current) clearTimeout(refetchTimerRef.current);
+    };
+  }, []);
+
+  const resetZoom = useCallback(() => {
+    if (refetchTimerRef.current) {
+      clearTimeout(refetchTimerRef.current);
+      refetchTimerRef.current = null;
+    }
+    reconcileBrushRef.current = false;
+    setZoom(null);
+    setBrush(null);
+  }, []);
 
   // Subtitle: e.g. "Electric · kWh · 1h" (the global time window is shown in the
   // dashboard header). When zoomed, append the local span so it's clear the chart
@@ -393,16 +508,24 @@ export function IntervalHistory({
                 isAnimationActive={false}
                 connectNulls={false}
               />
-              {/* Brush (issue #141): the drag-to-zoom navigator. Dragging the
-                  handles narrows the view; when the selected span is narrow enough
-                  (onBrushChange → shouldRefetchZoom) the widget refetches that span
-                  for finer detail. `dataKey="label"` matches the XAxis. */}
+              {/* Brush (issue #141): the drag-to-zoom navigator. It is CONTROLLED
+                  — startIndex/endIndex come from `brush` state and are updated in
+                  onBrushChange — so dragging zooms the main chart smoothly with NO
+                  data change (this is the snap-back fix). A narrow settled span
+                  triggers a DEBOUNCED finer-detail refetch (shouldRefetchZoom)
+                  that swaps data in place without blanking the chart.
+                  `dataKey="label"` matches the XAxis.
+                  The `key` ties the brush's internal state to the current series
+                  length so a data swap re-seeds it cleanly with our indices. */}
               <Brush
+                key={data.length}
                 dataKey="label"
                 height={18}
                 travellerWidth={8}
                 stroke="#475569"
                 fill="#0f172a"
+                startIndex={brush?.startIndex}
+                endIndex={brush?.endIndex}
                 onChange={onBrushChange}
               />
             </LineChart>
