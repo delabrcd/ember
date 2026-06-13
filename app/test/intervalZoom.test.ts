@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { msToYmd, zoomSpanToRange, shouldRefetchZoom } from '../src/lib/intervalZoom';
+import {
+  msToYmd,
+  zoomSpanToRange,
+  shouldRefetchZoom,
+  clampBrushIndices,
+} from '../src/lib/intervalZoom';
 
 // Hand-calculated tests for the PURE interval-zoom helpers (issue #141). The
 // helpers map a brushed span to /api/interval day bounds and decide whether a
@@ -91,5 +96,48 @@ describe('shouldRefetchZoom (hand-calculated)', () => {
     const start = fFrom;
     const end = fFrom + 2 * DAY;
     expect(shouldRefetchZoom(start, end, fFrom, fFrom, opts)).toBe(false);
+  });
+});
+
+describe('clampBrushIndices (hand-calculated)', () => {
+  it('passes through an in-bounds, ordered pair unchanged', () => {
+    // 100-point series, selecting indices 10..40 → unchanged.
+    expect(clampBrushIndices(10, 40, 100)).toEqual({ startIndex: 10, endIndex: 40 });
+  });
+
+  it('clamps an end index past the last point to the last index', () => {
+    // 50 points → last index 49; an end of 80 clamps to 49.
+    expect(clampBrushIndices(10, 80, 50)).toEqual({ startIndex: 10, endIndex: 49 });
+  });
+
+  it('clamps a negative start to 0', () => {
+    expect(clampBrushIndices(-5, 20, 50)).toEqual({ startIndex: 0, endIndex: 20 });
+  });
+
+  it('orders a reversed pair so start ≤ end', () => {
+    expect(clampBrushIndices(40, 10, 100)).toEqual({ startIndex: 10, endIndex: 40 });
+  });
+
+  it('spans the whole series for the full-range request', () => {
+    // 30 points → [0, 29].
+    expect(clampBrushIndices(0, 29, 30)).toEqual({ startIndex: 0, endIndex: 29 });
+  });
+
+  it('returns [0,0] for an empty series', () => {
+    expect(clampBrushIndices(0, 5, 0)).toEqual({ startIndex: 0, endIndex: 0 });
+  });
+
+  it('collapses to the single valid index for a one-point series', () => {
+    // len 1 → last index 0; any inputs clamp to [0, 0].
+    expect(clampBrushIndices(0, 9, 1)).toEqual({ startIndex: 0, endIndex: 0 });
+  });
+
+  it('normalizes non-finite inputs to the endpoints (start→0, end→last)', () => {
+    // NaN start → 0; NaN end → last (len-1 = 19).
+    expect(clampBrushIndices(NaN, NaN, 20)).toEqual({ startIndex: 0, endIndex: 19 });
+  });
+
+  it('rounds fractional indices to the nearest integer', () => {
+    expect(clampBrushIndices(2.4, 7.6, 100)).toEqual({ startIndex: 2, endIndex: 8 });
   });
 });
