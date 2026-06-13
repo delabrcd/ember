@@ -36,6 +36,7 @@ import {
   heatmapRowLabels,
   hourOfDayProfile,
   scatterPoints,
+  type HeatmapGrid,
 } from '@/lib/viz/aggregate';
 
 const tooltipStyle = {
@@ -188,21 +189,30 @@ function rampColor(t: number): string {
   return `rgb(${r}, ${g}, ${b})`;
 }
 
+// The heatmap takes EITHER raw `rows` (the #95 demo path — it aggregates them via
+// dayHourHeatmap here) OR a pre-computed `grid` + `rowLabels` (the #77 widget path:
+// the grid was already aggregated SERVER-SIDE over the RAW interval rows, so we
+// must NOT re-aggregate the time-decimated client copy). Exactly one is supplied.
 export function HeatmapViz<Row>({
   spec,
   rows,
+  grid: gridProp,
+  rowLabels: rowLabelsProp,
   height = 288,
 }: {
   spec: HeatmapVizSpec<Row>;
-  rows: readonly Row[];
+  rows?: readonly Row[];
+  grid?: HeatmapGrid;
+  rowLabels?: Record<number, string>;
   height?: number;
 }) {
-  const grid = dayHourHeatmap(rows, spec.encoding);
+  // Prefer a server-computed grid; else aggregate the rows here (demo path).
+  const grid = gridProp ?? dayHourHeatmap(rows ?? [], spec.encoding);
   const { xs, ys, cells, min, max } = grid;
   const valueName = spec.encoding.valueLabel ?? String(spec.encoding.value);
-  // Optional per-row display labels (e.g. day index → 'Mon'), built purely from
-  // the encoding's `yLabelField`. Empty when none encoded → we fall back to `y`.
-  const yLabels = heatmapRowLabels(rows, spec.encoding);
+  // Per-row display labels (e.g. day index → 'Mon'). Use the server-supplied map
+  // when present; else build it purely from the rows + encoding's `yLabelField`.
+  const yLabels = rowLabelsProp ?? heatmapRowLabels(rows ?? [], spec.encoding);
   const rowLabel = (y: number): string => yLabels[y] ?? String(y);
 
   // SVG geometry. We reserve a left gutter for y labels and a bottom gutter for

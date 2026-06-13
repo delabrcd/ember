@@ -6,34 +6,26 @@
 // default, with a gas (therms) toggle. It also surfaces the PEAK-DEMAND readout
 // (the highest average power over any single interval, and when it occurred).
 //
-// REUSE, not rebuild: the grid is drawn by the EXISTING HeatmapViz renderer
-// (VizCharts.tsx) over the EXISTING pure aggregator dayHourHeatmap (lib/viz/
-// aggregate.ts) — the same path the #95 demo gallery uses. This widget's only job
-// is the impure shell: fetch /api/interval, reconcile dual-grain rows to hourly,
-// reshape them into the {hour, dow, value} rows the heatmap encoding expects via
-// the PURE dayHourHeatmapRows, and feed them to HeatmapViz. All arithmetic
-// (binning, color scale, peak) lives in the pure libs, hand-calc tested.
+// SERVER-SIDE AGGREGATION (issue #77 data-correctness fix): the grid + peak are
+// computed SERVER-SIDE over the RAW, un-downsampled interval rows by
+// /api/interval/heatmap (pure buildHeatmapPayload). Previously this widget fetched
+// /api/interval — which DOWNSAMPLES to ≤600 points by absolute time for the
+// history line — and binned client-side, which merged adjacent hours and showed
+// spurious "no data" cells on wide ranges. We now render the display-ready grid
+// the server returns directly via HeatmapViz's `grid`/`rowLabels` props (no
+// client re-aggregation), so every (dow, hour) cell that truly has data is
+// populated and a genuinely-absent cell stays null (never a fabricated zero).
 //
 // SELF-FETCHING (mirrors IntervalLoadShape / IntervalHistory): owns its own data,
 // scoped to host.accountId, following the GLOBAL RangeControl via from/to props,
 // with an alive-flag against stale responses and ChartShell chrome.
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { HeatmapVizSpec } from '@/lib/chartSpec';
-import {
-  dayHourHeatmapRows,
-  peakDemand,
-  reconcileToHourly,
-  type HeatmapRow,
-  type IntervalProfileRow,
-} from '@/lib/intervalProfile';
+import type { HeatmapRow } from '@/lib/intervalProfile';
+import type { HeatmapPayload } from '@/lib/intervalAggregate';
 import { HeatmapViz } from './VizCharts';
 import { ChartShell } from '../ChartShell';
-
-// AMI meters lag ~1–2 days (the freshest hours read 0, then fill in). Exclude the
-// last SETTLE_HOURS from the heatmap so those provisional zeros don't drag a cell's
-// average down. 48h covers the typical lag with margin (mirrors IntervalLoadShape).
-const SETTLE_HOURS = 48;
 
 type Fuel = 'ELECTRIC' | 'GAS';
 const FUELS: readonly Fuel[] = ['ELECTRIC', 'GAS'];
@@ -42,11 +34,8 @@ const FUEL_UNIT: Record<Fuel, string> = { ELECTRIC: 'kWh', GAS: 'therms' };
 // Peak demand is average POWER over the interval: kW for electric, therms/h for gas.
 const POWER_UNIT: Record<Fuel, string> = { ELECTRIC: 'kW', GAS: 'therms/h' };
 
-// The /api/interval payload rows (raw IntervalUsage-like). intervalStart arrives
-// as a JSON string; the PURE shapers tolerate both string + Date.
-type IntervalApiRow = IntervalProfileRow & { fuelType?: string; unit?: string };
-
-type LoadState = { rows: IntervalApiRow[] } | { error: true } | undefined;
+// undefined = still loading; an error sentinel; else the server-computed payload.
+type LoadState = HeatmapPayload | { error: true } | undefined;
 
 // A labelled segmented control (mirrors IntervalLoadShape's LabelledSegmented).
 function LabelledSegmented<T extends string>({
@@ -118,17 +107,25 @@ export function IntervalHeatmap({
   const [state, setState] = useState<LoadState>(undefined);
 
   // Fetch on mount + whenever the fuel, the global range, or the account changes.
-  // Track an `alive` flag so a stale response can't overwrite the current one.
+  // Track an `alive` flag so a stale response can't overwrite the current one. The
+  // server returns the display-ready grid + rowLabels + peak (aggregated over the
+  // RAW rows) — there is NO client-side aggregation to redo.
   useEffect(() => {
     let alive = true;
     setState(undefined);
     const acctQuery = accountId != null ? `&accountId=${accountId}` : '';
     const rangeQuery = from && to ? `&from=${from}&to=${to}` : '';
-    fetch(`/api/interval?fuel=${fuel}${rangeQuery}${acctQuery}`)
+    fetch(`/api/interval/heatmap?fuel=${fuel}${rangeQuery}${acctQuery}`)
       .then((r) => r.json())
       .then((j) => {
         if (!alive) return;
-        setState({ rows: Array.isArray(j?.rows) ? (j.rows as IntervalApiRow[]) : [] });
+        // Defensive: a well-formed payload always carries a grid; treat anything
+        // else as an empty grid so the widget shows its empty state, not a crash.
+        if (j && j.grid && Array.isArray(j.grid.cells)) {
+          setState(j as HeatmapPayload);
+        } else {
+          setState({ grid: { xs: [], ys: [], cells: [], min: 0, max: 0 }, rowLabels: {}, peak: null });
+        }
       })
       .catch(() => {
         if (alive) setState({ error: true });
@@ -141,55 +138,31 @@ export function IntervalHeatmap({
   const unit = FUEL_UNIT[fuel];
   const powerUnit = POWER_UNIT[fuel];
 
-  // Reconcile dual-grain rows to hourly, then reshape into the day×hour heatmap
-  // rows (PURE). Exclude the unsettled tail (last ~48h) so lagged zeros don't bias
-  // a cell's average. Memoized on the loaded rows so a resize doesn't re-bucket.
-  const heatRows: HeatmapRow[] = useMemo(() => {
-    if (!state || 'error' in state) return [];
-    const before = new Date(Date.now() - SETTLE_HOURS * 3600_000);
-    return dayHourHeatmapRows(reconcileToHourly(state.rows), { before });
-  }, [state]);
-
-  // Peak demand from the RAW reads (NOT reconciled): the finest grain available
-  // gives the truest peak (a 15-min spike reads higher kW than its hour's mean).
-  // We exclude the unsettled tail here too so a lagged 0 hour can't masquerade and,
-  // more importantly, a partially-filled fresh interval can't read as a false peak.
-  const peak = useMemo(() => {
-    if (!state || 'error' in state) return null;
-    const beforeMs = Date.now() - SETTLE_HOURS * 3600_000;
-    const settled = state.rows.filter((r) => {
-      const t = (r.intervalStart instanceof Date ? r.intervalStart : new Date(r.intervalStart)).getTime();
-      return Number.isFinite(t) && t < beforeMs;
-    });
-    return peakDemand(settled);
-  }, [state]);
-
-  // The heatmap spec: day-of-week (y) × hour-of-day (x), colored by usage. The
-  // encoding keys onto the HeatmapRow fields dayHourHeatmapRows emits, so it's
-  // type-checked against the real row shape (not the #95 sample row).
-  const spec: HeatmapVizSpec<HeatmapRow> = useMemo(
-    () => ({
-      id: 'interval-heatmap',
-      vizType: 'heatmap',
-      dataset: 'interval',
-      title: 'Usage by day & hour',
-      encoding: {
-        x: 'hour',
-        y: 'dow',
-        value: 'value',
-        yLabelField: 'dowLabel',
-        valueLabel: unit,
-      },
-    }),
-    [unit]
-  );
-
   const loading = state === undefined;
   const errored = !!state && 'error' in state;
-  const empty = !loading && !errored && heatRows.length === 0;
+  const payload = !loading && !errored ? (state as HeatmapPayload) : null;
+  const empty = !!payload && payload.grid.cells.length === 0;
+  const peak = payload?.peak ?? null;
+
+  // The heatmap spec: day-of-week (y) × hour-of-day (x), colored by usage. The
+  // grid is pre-aggregated server-side; the spec only supplies field names (for
+  // the value label) — HeatmapViz reads the grid/rowLabels props, not the rows.
+  const spec: HeatmapVizSpec<HeatmapRow> = {
+    id: 'interval-heatmap',
+    vizType: 'heatmap',
+    dataset: 'interval',
+    title: 'Usage by day & hour',
+    encoding: {
+      x: 'hour',
+      y: 'dow',
+      value: 'value',
+      yLabelField: 'dowLabel',
+      valueLabel: unit,
+    },
+  };
 
   const peakReadout = peak
-    ? `Peak ${peak.value.toFixed(peak.value < 10 ? 2 : 1)} ${powerUnit} · ${peakFmt.format(peak.intervalStart)}`
+    ? `Peak ${peak.value.toFixed(peak.value < 10 ? 2 : 1)} ${powerUnit} · ${peakFmt.format(new Date(peak.intervalStart))}`
     : null;
 
   // The chart body (render-prop for ChartShell). `h` is a px number in the grid
@@ -223,9 +196,15 @@ export function IntervalHeatmap({
             )}
             {/* The grid fills the remaining height. HeatmapViz draws a scalable SVG
                 inside a box of the height we pass; in the fill cell we let it take
-                the flex remainder via a min-h-0 flex-1 wrapper. */}
+                the flex remainder via a min-h-0 flex-1 wrapper. We pass the
+                SERVER-computed grid + rowLabels (no client re-aggregation). */}
             <div className="min-h-0 flex-1">
-              <HeatmapViz spec={spec} rows={heatRows} height={pxHeight ?? 260} />
+              <HeatmapViz
+                spec={spec}
+                grid={payload!.grid}
+                rowLabels={payload!.rowLabels}
+                height={pxHeight ?? 260}
+              />
             </div>
           </>
         )}
