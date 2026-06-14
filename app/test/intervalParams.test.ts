@@ -35,12 +35,14 @@ describe('parseSinceDays', () => {
 });
 
 describe('parseGrain', () => {
-  it('only an exact 15m selects the raw-15-min path; everything else is the all default', () => {
+  it('reads exact 15m / 1h grains; everything else is the all default', () => {
     expect(parseGrain('15m')).toBe('15m');
+    expect(parseGrain('1h')).toBe('1h'); // reconcile-then-downsample hourly path
     expect(parseGrain(null)).toBe('all'); // absent
-    expect(parseGrain('1h')).toBe('all'); // hourly is the default downsampled path
     expect(parseGrain('15M')).toBe('all'); // case-sensitive
+    expect(parseGrain('1H')).toBe('all'); // case-sensitive
     expect(parseGrain('900')).toBe('all'); // not the seconds value, the grain token
+    expect(parseGrain('3600')).toBe('all'); // ditto for hourly
     expect(parseGrain('garbage')).toBe('all');
   });
 
@@ -86,9 +88,11 @@ describe('parseIntervalQuery', () => {
     expect((window as { sinceDays: number }).sinceDays).toBe(14);
   });
 
-  it('defaults grain to "all" and reads an exact grain=15m (raw-15-min path)', () => {
-    // Absent → 'all' (downsampled, all grains — the 1h path + every other caller).
+  it('defaults grain to "all" and reads exact grain=15m / grain=1h', () => {
+    // Absent → 'all' (downsampled, all grains — back-compat / non-dashboard callers).
     expect(parseIntervalQuery(new URLSearchParams('fuel=ELECTRIC')).grain).toBe('all');
+    // grain=1h flips to the reconcile-then-downsample hourly path.
+    expect(parseIntervalQuery(new URLSearchParams('fuel=ELECTRIC&grain=1h')).grain).toBe('1h');
     // grain=15m flips to the raw path while the rest of the query is parsed as usual.
     const q = parseIntervalQuery(new URLSearchParams('fuel=ELECTRIC&from=2026-06-01&to=2026-06-07&grain=15m'));
     expect(q.grain).toBe('15m');
