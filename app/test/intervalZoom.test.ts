@@ -3,6 +3,8 @@ import {
   msToYmd,
   zoomSpanToRange,
   isZoomSelectionSignificant,
+  classifyZoomSelection,
+  wasDownsampled,
 } from '../src/lib/intervalZoom';
 
 // Hand-calculated tests for the PURE interval-zoom helpers (issue #141). The
@@ -85,5 +87,68 @@ describe('isZoomSelectionSignificant (hand-calculated)', () => {
   it('rejects non-finite endpoints', () => {
     expect(isZoomSelectionSignificant(NaN, 10, base, base + HOUR, MIN)).toBe(false);
     expect(isZoomSelectionSignificant(0, 10, NaN, base + HOUR, MIN)).toBe(false);
+  });
+});
+
+describe('classifyZoomSelection (hand-calculated)', () => {
+  // Floor of 1 hour (the component's MIN_ZOOM_SPAN_MS): a deliberate drag tighter
+  // than this is refused; a click stays silent; a wider drag zooms.
+  const MIN = HOUR;
+  const base = Date.UTC(2026, 5, 8, 6, 0, 0);
+
+  it('classifies a click (same index) as "click" regardless of ms', () => {
+    // Both endpoints on index 25 → a click, even if the reported ms differ.
+    expect(classifyZoomSelection(25, 25, base, base + 6 * HOUR, MIN)).toBe('click');
+  });
+
+  it('classifies a deliberate drag below the floor as "too-small"', () => {
+    // Distinct points (12 vs 13) but only 15 min apart < 1h floor → refused.
+    expect(classifyZoomSelection(12, 13, base, base + 15 * MINUTE, MIN)).toBe('too-small');
+  });
+
+  it('classifies a productive drag (span ≥ floor) as "zoom"', () => {
+    // Distinct indices, 6h span ≥ 1h → zoom.
+    expect(classifyZoomSelection(10, 40, base, base + 6 * HOUR, MIN)).toBe('zoom');
+  });
+
+  it('treats exactly the floor span as "zoom" (inclusive boundary)', () => {
+    // Distinct indices, span == 1h == MIN → zoom (boundary is productive).
+    expect(classifyZoomSelection(12, 14, base, base + HOUR, MIN)).toBe('zoom');
+  });
+
+  it('is order-independent (a backwards drag classifies by absolute span)', () => {
+    // end before start, 6h apart → still a zoom.
+    expect(classifyZoomSelection(40, 10, base + 6 * HOUR, base, MIN)).toBe('zoom');
+    // backwards but 15 min apart → too-small.
+    expect(classifyZoomSelection(13, 12, base + 15 * MINUTE, base, MIN)).toBe('too-small');
+  });
+
+  it('treats non-finite endpoints as a silent click', () => {
+    expect(classifyZoomSelection(NaN, 10, base, base + HOUR, MIN)).toBe('click');
+    expect(classifyZoomSelection(0, 10, NaN, base + HOUR, MIN)).toBe('click');
+  });
+});
+
+describe('wasDownsampled (hand-calculated)', () => {
+  // Mirrors downsampleByTime's gate: reduced exactly when raw rows > cap.
+  it('is true when there are more raw rows than the cap', () => {
+    expect(wasDownsampled(601, 600)).toBe(true);
+    expect(wasDownsampled(17_520, 600)).toBe(true);
+  });
+
+  it('is false at or below the cap (returned as-is, finest detail)', () => {
+    expect(wasDownsampled(600, 600)).toBe(false); // exactly at the cap
+    expect(wasDownsampled(42, 600)).toBe(false);
+    expect(wasDownsampled(0, 600)).toBe(false);
+  });
+
+  it('is false when the cap disables downsampling (≤ 0)', () => {
+    expect(wasDownsampled(1000, 0)).toBe(false);
+    expect(wasDownsampled(1000, -5)).toBe(false);
+  });
+
+  it('is false for non-finite inputs', () => {
+    expect(wasDownsampled(NaN, 600)).toBe(false);
+    expect(wasDownsampled(1000, NaN)).toBe(false);
   });
 });

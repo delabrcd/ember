@@ -3,6 +3,7 @@ import { getIntervalSeries } from '@/lib/queries';
 import { withAccount } from '@/lib/route';
 import { parseIntervalQuery } from '@/lib/intervalParams';
 import { downsampleByTime, MAX_POINTS } from '@/lib/viz/downsampleInterval';
+import { wasDownsampled } from '@/lib/intervalZoom';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -42,7 +43,14 @@ export async function GET(req: Request) {
     () => NextResponse.json({ rows: [] }),
     async (acct) => {
       const rows = await getIntervalSeries(acct.id, { fuelType, ...window });
-      return NextResponse.json({ rows: downsampleByTime(rows, MAX_POINTS) });
+      // `downsampled` (issue #141) reports whether decimation actually reduced the
+      // set — i.e. whether FINER detail exists than what's returned, so the history
+      // widget can show its "Max zoom · finest detail" badge when it's false. It
+      // mirrors downsampleByTime's own gate (raw rows > cap). ADDITIVE: `rows` is
+      // returned exactly as before, so every other reader (the load-shape/heatmap
+      // endpoints are separate) is unaffected.
+      const downsampled = wasDownsampled(rows.length, MAX_POINTS);
+      return NextResponse.json({ rows: downsampleByTime(rows, MAX_POINTS), downsampled });
     }
   );
 }

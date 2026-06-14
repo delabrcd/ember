@@ -49,9 +49,19 @@
 // zoom" affordance returns to the global window. The zoom is per-widget ephemeral
 // state (lib/intervalZoom.ts holds the pure span/selection math).
 //
-// CLICK vs DRAG: a single click (mouse-down + mouse-up on essentially the same
-// spot) must NOT zoom. We require a deliberate selection — distinct data indices
-// AND a minimum ms span (isZoomSelectionSignificant) — before committing.
+// CLICK vs DRAG vs TOO-SMALL (issue #141): classifyZoomSelection sorts a gesture
+// into three outcomes. A pure click (mouse-down + up on one data point — same
+// index) stays SILENT (no zoom, no hint). A deliberate drag (distinct points) whose
+// span is below the hard floor MIN_ZOOM_SPAN_MS is REFUSED and flashes a transient
+// "Max zoom reached" hint (~2s) so it isn't a silent no-op. A productive drag (span
+// ≥ floor) zooms as before.
+//
+// INDICATORS (issue #141): on top of the zoom interaction, two at-a-glance cues —
+//   • a PERSISTENT "Max zoom · finest detail" badge whenever /api/interval reports
+//     it did NOT downsample (the response's `downsampled:false`), meaning the chart
+//     is already at its native resolution. Correct zoomed or not.
+//   • the TRANSIENT "Max zoom reached" hint above for a refused too-tight drag.
+// Both can be true together (you're at finest detail AND you tried to zoom tighter).
 //
 // GAPS: the chart uses connectNulls={false} so real gaps in the data (missing
 // intervals — the API omits them) render as line breaks, NEVER as fabricated
@@ -71,7 +81,7 @@ import {
 } from 'recharts';
 import { reconcileToHourly, type IntervalProfileRow } from '@/lib/intervalProfile';
 import { toHistoryPoints, type HistoryPoint } from '@/lib/intervalHistory';
-import { isZoomSelectionSignificant, zoomSpanToRange } from '@/lib/intervalZoom';
+import { classifyZoomSelection, zoomSpanToRange } from '@/lib/intervalZoom';
 import { ChartShell } from '../ChartShell';
 
 // ---- Theme constants (mirrors IntervalLoadShape) ----------------------------
@@ -86,12 +96,18 @@ const tooltipStyle = {
 const axisStyle = { stroke: '#475569', fontSize: 11 } as const;
 
 // ---- Zoom tuning ------------------------------------------------------------
-// Minimum deliberate drag span (issue #141). A drag-select must cover at least
-// this much wall-clock time before it commits a zoom; anything narrower (a click,
-// or a jitter across two adjacent points) is ignored. 30 minutes is below the 1h
-// grain so any genuine drag of more than ~one point zooms, but a stray click on a
-// single point does not. See lib/intervalZoom.isZoomSelectionSignificant.
-const ZOOM_MIN_SPAN_MS = 30 * 60_000;
+// Hard minimum zoom window (issue #141). A deliberate drag whose span is below
+// this floor is REFUSED (no zoom) and surfaces the "Max zoom reached" hint instead
+// of silently doing nothing. 1 hour is the floor because the finest grain the data
+// ever reaches is 15-min electric (older spans are hourly): an hour-wide window
+// already shows the densest data the chart can hold (~4 points at 15m, 1 at 1h), so
+// drawing a tighter band can't reveal anything new — it's the natural "you've hit
+// max zoom" boundary. (A pure click — both endpoints on one point — is handled
+// separately by classifyZoomSelection and stays silent.)
+const MIN_ZOOM_SPAN_MS = 60 * 60_000;
+
+// How long the transient "Max zoom reached" hint stays up before auto-clearing.
+const ZOOM_HINT_MS = 2_000;
 
 // ---- Types ------------------------------------------------------------------
 type Fuel = 'ELECTRIC' | 'GAS';
@@ -105,7 +121,10 @@ const FUEL_UNIT: Record<Fuel, string> = { ELECTRIC: 'kWh', GAS: 'therms' };
 // IntervalProfileRow fields the shapers need).
 type IntervalApiRow = IntervalProfileRow & { fuelType?: string; unit?: string };
 
-type LoadState = { rows: IntervalApiRow[] } | { error: true } | undefined;
+// `downsampled` (issue #141): whether /api/interval reduced the set, i.e. whether
+// FINER detail than what's shown exists. false → the chart is at native resolution
+// → show the "Max zoom · finest detail" badge.
+type LoadState = { rows: IntervalApiRow[]; downsampled: boolean } | { error: true } | undefined;
 
 // A locally-zoomed window: the day bounds we refetched for finer detail, plus the
 // raw ms span the user selected (so the reset/label can describe it). Ephemeral
@@ -223,6 +242,10 @@ export function IntervalHistory({
   // onMouseUp; drives the <ReferenceArea> band. Committed (or discarded) on mouse
   // up, then cleared.
   const [drag, setDrag] = useState<DragSel | null>(null);
+  // A brief, auto-dismissing "Max zoom reached" hint (issue #141), shown when a
+  // deliberate drag is refused for being tighter than MIN_ZOOM_SPAN_MS. Cleared on
+  // a timer (and on any base reload via the effect below).
+  const [zoomHint, setZoomHint] = useState(false);
 
   // Gas has no 15-min data → disable the 15m option when fuel=Gas.
   // If the user switches to Gas while on 15m, fall back to 1h.
@@ -252,10 +275,19 @@ export function IntervalHistory({
   useEffect(() => {
     setZoom(null);
     setDrag(null);
+    setZoomHint(false);
   }, [fuel, from, to, accountId]);
   useEffect(() => {
     setDrag(null);
   }, [effectiveResolution]);
+
+  // Auto-dismiss the "Max zoom reached" hint ~2s after it's shown (issue #141), so
+  // the refused-drag feedback is transient and never lingers.
+  useEffect(() => {
+    if (!zoomHint) return;
+    const id = setTimeout(() => setZoomHint(false), ZOOM_HINT_MS);
+    return () => clearTimeout(id);
+  }, [zoomHint]);
 
   // To decide whether a given fetch should show the loading skeleton, we track
   // the "base" reload key (fuel/global-range/account). When ONLY the zoom-derived
@@ -286,7 +318,13 @@ export function IntervalHistory({
       .then((r) => r.json())
       .then((j) => {
         if (!alive) return;
-        setState({ rows: Array.isArray(j?.rows) ? (j.rows as IntervalApiRow[]) : [] });
+        setState({
+          rows: Array.isArray(j?.rows) ? (j.rows as IntervalApiRow[]) : [],
+          // `downsampled` drives the "finest detail" badge (issue #141). Default to
+          // false (badge shown) when the flag is absent — a missing flag means no
+          // reduction was reported, i.e. treat the data as native-resolution.
+          downsampled: j?.downsampled === true,
+        });
       })
       .catch(() => {
         if (alive) setState({ error: true });
@@ -318,6 +356,14 @@ export function IntervalHistory({
   const loading = state === undefined;
   const errored = !!state && 'error' in state;
   const empty = !loading && !errored && data.length === 0;
+
+  // "Max zoom · finest detail" badge (issue #141): true when the route did NOT
+  // downsample — the chart is at its native resolution and zooming further reveals
+  // nothing new. Correct whether or not the user has zoomed (a naturally-small
+  // global range that wasn't reduced shows it too). Suppressed while loading/errored
+  // or with no data to qualify.
+  const atFinestDetail =
+    !!state && !('error' in state) && !state.downsampled && data.length > 0;
 
   // Look up a rendered point's ts (epoch-ms) + index by its XAxis label. The drag
   // handlers receive `e.activeLabel` (the category value, i.e. our `label`); we map
@@ -357,15 +403,22 @@ export function IntervalHistory({
 
   const commitDrag = useCallback(() => {
     setDrag((sel) => {
-      // Always clear the band on mouse-up/leave; only commit a zoom for a real
-      // selection (distinct, deliberate span — a click is ignored).
-      if (!sel || sel.refX2 == null || sel.refX2 === sel.refX1) return null;
+      // Always clear the band on mouse-up/leave. Beyond that we have three cases
+      // (issue #141), decided by the PURE classifyZoomSelection:
+      //   • 'click'     — silent no-op (no zoom, no hint).
+      //   • 'too-small' — a deliberate drag below the floor → refuse + show hint.
+      //   • 'zoom'      — productive drag → commit the zoom + refetch.
+      if (!sel || sel.refX2 == null) return null;
       const a = pointByLabel.get(sel.refX1);
       const b = pointByLabel.get(sel.refX2);
-      if (!a || !b) return null;
-      if (
-        !isZoomSelectionSignificant(a.index, b.index, a.ts, b.ts, ZOOM_MIN_SPAN_MS)
-      ) {
+      // A missing endpoint or both endpoints on the same label is a click.
+      if (!a || !b || sel.refX2 === sel.refX1) return null;
+      const kind = classifyZoomSelection(a.index, b.index, a.ts, b.ts, MIN_ZOOM_SPAN_MS);
+      if (kind === 'click') return null;
+      if (kind === 'too-small') {
+        // Deliberate drag tighter than the floor: surface the transient hint so the
+        // drag isn't a silent no-op, but do NOT zoom.
+        setZoomHint(true);
         return null;
       }
       const { from: zf, to: zt } = zoomSpanToRange(a.ts, b.ts);
@@ -410,6 +463,26 @@ export function IntervalHistory({
         >
           Reset zoom
         </button>
+      )}
+      {/* Persistent "finest detail" badge (issue #141): shown whenever the route
+          did NOT downsample, so the chart is at its native resolution and zooming
+          further reveals nothing new. Sits top-right, opposite the Reset-zoom
+          affordance, so the two never collide. */}
+      {atFinestDetail && (
+        <div
+          title="The chart is at its finest available resolution — zooming further won't reveal more detail."
+          className="pointer-events-none absolute right-1 top-1 z-10 rounded-md border border-slate-700 bg-slate-900/80 px-2 py-0.5 text-[11px] text-slate-400 backdrop-blur"
+        >
+          Max zoom · finest detail
+        </div>
+      )}
+      {/* Transient refused-drag hint (issue #141): shown ~2s when a deliberate drag
+          is tighter than the zoom floor. Centered at the top so it reads as a
+          momentary toast, then auto-clears. */}
+      {zoomHint && !loading && !errored && (
+        <div className="pointer-events-none absolute left-1/2 top-1 z-20 -translate-x-1/2 rounded-md border border-amber-500/60 bg-slate-900/90 px-2 py-0.5 text-[11px] text-amber-300 backdrop-blur">
+          Max zoom reached
+        </div>
       )}
       {loading ? (
         <div className="flex h-full w-full items-center justify-center">
