@@ -314,7 +314,13 @@ export function IntervalHistory({
     // wide the window is — but a narrow zoom span fits under the cap, so it comes
     // back at (or near) the finest available grain.
     const rangeQuery = fetchFrom && fetchTo ? `&from=${fetchFrom}&to=${fetchTo}` : '';
-    fetch(`/api/interval?fuel=${fuel}${rangeQuery}${acctQuery}`)
+    // At 15m, ask the route for the RAW 900s rows (un-decimated). 15-min data is
+    // recent/bounded so this is cheap, and it stops the server time-bucket
+    // downsampler from collapsing the recent 15-min sliver to a handful of points
+    // over a wide range (the bug: the chart looked empty until you zoomed in). The
+    // 1h path stays on the default (all-grain, downsampled) feed.
+    const grainQuery = effectiveResolution === '15m' ? '&grain=15m' : '';
+    fetch(`/api/interval?fuel=${fuel}${rangeQuery}${grainQuery}${acctQuery}`)
       .then((r) => r.json())
       .then((j) => {
         if (!alive) return;
@@ -332,7 +338,7 @@ export function IntervalHistory({
     return () => {
       alive = false;
     };
-  }, [fuel, fetchFrom, fetchTo, accountId, from, to]);
+  }, [fuel, fetchFrom, fetchTo, accountId, from, to, effectiveResolution]);
 
   const color = fuel === 'GAS' ? GAS : ELEC;
   const unit = FUEL_UNIT[fuel];

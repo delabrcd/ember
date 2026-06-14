@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getIntervalSeries } from '@/lib/queries';
 import { withAccount } from '@/lib/route';
-import { parseIntervalQuery } from '@/lib/intervalParams';
+import { parseIntervalQuery, FIFTEEN_MIN_SECONDS } from '@/lib/intervalParams';
 import { downsampleByTime, MAX_POINTS } from '@/lib/viz/downsampleInterval';
 import { wasDownsampled } from '@/lib/intervalZoom';
 
@@ -21,6 +21,17 @@ export const runtime = 'nodejs';
 //                          for callers that don't pass from/to.
 //   ?accountId=<id>      — scopes to that account (the shared resolveRequestAccount
 //                          dance); omitted = the default account, bad id = 400.
+//   ?grain=15m           — RAW 15-minute path: returns ONLY the 900s rows for the
+//                          window, UN-decimated, ordered by intervalStart, with
+//                          downsampled:false. 15-min data is inherently recent/
+//                          bounded (NRT, ~days), so serving it raw is cheap. Without
+//                          this param the default returns ALL grains DOWNSAMPLED to
+//                          ≤ MAX_POINTS (the smooth multi-year line — the 1h path and
+//                          every other caller). It exists because the 15m view used
+//                          to consume the downsampled feed: over a wide range the
+//                          recent 15-min sliver collapsed into a handful of
+//                          representative rows, so the chart looked empty until the
+//                          user zoomed in. Raw 900s rows render at their true extent.
 //
 // DOWNSAMPLING (issue #36): a wide range (e.g. "All" = 2+ years of hourly ≈ 17k
 // rows) is decimated SERVER-SIDE to ≤ MAX_POINTS (~600) representative rows via
@@ -36,12 +47,26 @@ export const runtime = 'nodejs';
 // state, not a broken blank chart).
 export async function GET(req: Request) {
   const params = new URL(req.url).searchParams;
-  const { fuelType, window } = parseIntervalQuery(params);
+  const { fuelType, window, grain } = parseIntervalQuery(params);
 
   return withAccount(
     req.url,
     () => NextResponse.json({ rows: [] }),
     async (acct) => {
+      // RAW 15-minute path (?grain=15m): push the 900s grain filter into the DB and
+      // return those rows UN-decimated. 15-min data is inherently recent/bounded
+      // (NRT, ~days), so this is cheap — and it avoids the time-bucket downsampler
+      // collapsing the recent 15-min sliver to a handful of points over a wide
+      // range. `downsampled` is correct-by-construction false here (we never
+      // decimate), which keeps the widget's "Max zoom · finest detail" badge right.
+      if (grain === '15m') {
+        const rows = await getIntervalSeries(acct.id, {
+          fuelType,
+          ...window,
+          intervalSeconds: FIFTEEN_MIN_SECONDS,
+        });
+        return NextResponse.json({ rows, downsampled: false });
+      }
       const rows = await getIntervalSeries(acct.id, { fuelType, ...window });
       // `downsampled` (issue #141) reports whether decimation actually reduced the
       // set — i.e. whether FINER detail exists than what's returned, so the history

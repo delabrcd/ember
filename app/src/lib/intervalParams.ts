@@ -12,6 +12,27 @@ export function parseFuel(raw: string | null): 'ELECTRIC' | 'GAS' {
   return raw === 'GAS' ? 'GAS' : 'ELECTRIC';
 }
 
+// The number of seconds in the 15-minute grain — the only non-hourly grain the
+// AMI feed produces (15-min electric NRT). Used both to query the DB filtered to
+// 15-min rows and as the `?grain=15m` request value.
+export const FIFTEEN_MIN_SECONDS = 900;
+
+// The interval HISTORY widget's resolution grain. `'all'` (the default) returns
+// every grain, downsampled to ≤ MAX_POINTS for the smooth multi-year line — the
+// long-standing behaviour. `'15m'` (issue: the 15m view was eating the downsampled
+// feed and collapsing the recent 15-min sliver to a handful of points) returns
+// ONLY the raw 900s rows for the window, UN-decimated — 15-min data is inherently
+// recent/bounded (NRT, ~days), so serving it raw is cheap and avoids the spurious
+// sparsity the time-bucket downsampler caused over a wide range.
+export type IntervalGrain = 'all' | '15m';
+
+// Parse the `?grain=` param. Only an exact `'15m'` selects the raw-15-min path;
+// anything else (absent, garbage, '1h') falls back to the default 'all' (all
+// grains, downsampled). PURE.
+export function parseGrain(raw: string | null): IntervalGrain {
+  return raw === '15m' ? '15m' : 'all';
+}
+
 export function parseSinceDays(raw: string | null): number {
   const n = Number(raw);
   if (!Number.isFinite(n)) return DEFAULT_SINCE_DAYS;
@@ -45,8 +66,10 @@ export type IntervalWindow =
 export function parseIntervalQuery(params: URLSearchParams): {
   fuelType: 'ELECTRIC' | 'GAS';
   window: IntervalWindow;
+  grain: IntervalGrain;
 } {
   const fuelType = parseFuel(params.get('fuel'));
+  const grain = parseGrain(params.get('grain'));
   let from = parseDate(params.get('from'), false);
   let to = parseDate(params.get('to'), true);
   // If both bounds parsed but are inverted, swap so the query window is sane.
@@ -57,5 +80,5 @@ export function parseIntervalQuery(params: URLSearchParams): {
   const window: IntervalWindow = hasWindow
     ? { from: from ?? undefined, to: to ?? undefined }
     : { sinceDays: parseSinceDays(params.get('sinceDays')) };
-  return { fuelType, window };
+  return { fuelType, window, grain };
 }

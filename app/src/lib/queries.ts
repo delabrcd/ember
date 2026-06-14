@@ -191,7 +191,7 @@ export type IntervalSeriesRow = {
 
 export async function getIntervalSeries(
   accountId: number,
-  opts: { fuelType?: string; sinceDays?: number; from?: Date; to?: Date } = {}
+  opts: { fuelType?: string; sinceDays?: number; from?: Date; to?: Date; intervalSeconds?: number } = {}
 ): Promise<IntervalSeriesRow[]> {
   // A concrete [from, to] window wins over sinceDays (the global RangeControl
   // path); sinceDays remains the trailing-window fallback for any caller that
@@ -210,6 +210,10 @@ export async function getIntervalSeries(
       accountId,
       intervalStart: when,
       ...(opts.fuelType ? { fuelType: opts.fuelType } : {}),
+      // Optional grain filter (the raw-15m history path): when set, the DB returns
+      // only rows of that grain (e.g. intervalSeconds=900 for 15-min electric)
+      // rather than fetching all grains to filter in JS. Omitted = all grains.
+      ...(opts.intervalSeconds ? { intervalSeconds: opts.intervalSeconds } : {}),
     },
     orderBy: { intervalStart: 'asc' },
     select: {
