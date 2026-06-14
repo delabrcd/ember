@@ -19,18 +19,26 @@ export const FIFTEEN_MIN_SECONDS = 900;
 
 // The interval HISTORY widget's resolution grain. `'all'` (the default) returns
 // every grain, downsampled to ≤ MAX_POINTS for the smooth multi-year line — the
-// long-standing behaviour. `'15m'` (issue: the 15m view was eating the downsampled
-// feed and collapsing the recent 15-min sliver to a handful of points) returns
-// ONLY the raw 900s rows for the window, UN-decimated — 15-min data is inherently
-// recent/bounded (NRT, ~days), so serving it raw is cheap and avoids the spurious
-// sparsity the time-bucket downsampler caused over a wide range.
-export type IntervalGrain = 'all' | '15m';
+// long-standing behaviour, kept for back-compat / non-dashboard callers. `'15m'`
+// (issue: the 15m view was eating the downsampled feed and collapsing the recent
+// 15-min sliver to a handful of points) returns ONLY the raw 900s rows for the
+// window, UN-decimated — 15-min data is inherently recent/bounded (NRT, ~days), so
+// serving it raw is cheap and avoids the spurious sparsity the time-bucket
+// downsampler caused over a wide range. `'1h'` is the symmetric hourly path: it
+// RECONCILES the raw rows to one value per hour (4 complete 15-min slots win, else
+// the API hourly row) and THEN downsamples — the order matters, because doing it
+// the other way (downsample the mixed feed, then reconcile on the client) silently
+// drops every downsampled lone-15-min slot via reconcile's "partial 15-min, no
+// hourly → skip" rule, capping the 1h line at the moment 15-min data begins.
+export type IntervalGrain = 'all' | '15m' | '1h';
 
-// Parse the `?grain=` param. Only an exact `'15m'` selects the raw-15-min path;
-// anything else (absent, garbage, '1h') falls back to the default 'all' (all
-// grains, downsampled). PURE.
+// Parse the `?grain=` param. An exact `'15m'` selects the raw-15-min path; `'1h'`
+// selects the reconcile-then-downsample hourly path; anything else (absent,
+// garbage) falls back to the default 'all' (all grains, downsampled). PURE.
 export function parseGrain(raw: string | null): IntervalGrain {
-  return raw === '15m' ? '15m' : 'all';
+  if (raw === '15m') return '15m';
+  if (raw === '1h') return '1h';
+  return 'all';
 }
 
 export function parseSinceDays(raw: string | null): number {

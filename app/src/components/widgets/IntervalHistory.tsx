@@ -79,7 +79,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { reconcileToHourly, type IntervalProfileRow } from '@/lib/intervalProfile';
+import { type IntervalProfileRow } from '@/lib/intervalProfile';
 import { toHistoryPoints, type HistoryPoint } from '@/lib/intervalHistory';
 import { classifyZoomSelection, zoomSpanToRange } from '@/lib/intervalZoom';
 import { ChartShell } from '../ChartShell';
@@ -314,12 +314,15 @@ export function IntervalHistory({
     // wide the window is — but a narrow zoom span fits under the cap, so it comes
     // back at (or near) the finest available grain.
     const rangeQuery = fetchFrom && fetchTo ? `&from=${fetchFrom}&to=${fetchTo}` : '';
-    // At 15m, ask the route for the RAW 900s rows (un-decimated). 15-min data is
-    // recent/bounded so this is cheap, and it stops the server time-bucket
-    // downsampler from collapsing the recent 15-min sliver to a handful of points
-    // over a wide range (the bug: the chart looked empty until you zoomed in). The
-    // 1h path stays on the default (all-grain, downsampled) feed.
-    const grainQuery = effectiveResolution === '15m' ? '&grain=15m' : '';
+    // Ask the route for the grain that matches the resolution toggle. 15m → the RAW
+    // 900s rows (un-decimated; 15-min data is recent/bounded so this is cheap, and
+    // it stops the time-bucket downsampler collapsing the recent 15-min sliver over
+    // a wide range). 1h → the route RECONCILES raw rows to hourly and THEN
+    // downsamples; we must NOT use the legacy default feed here, because it
+    // downsamples the mixed grains first and the recent 15-min rows then get dropped
+    // by reconcile's "partial 15-min, no hourly → skip" rule, capping the line at
+    // the moment 15-min data begins. The server returns these already-hourly.
+    const grainQuery = effectiveResolution === '15m' ? '&grain=15m' : '&grain=1h';
     fetch(`/api/interval?fuel=${fuel}${rangeQuery}${grainQuery}${acctQuery}`)
       .then((r) => r.json())
       .then((j) => {
@@ -343,15 +346,17 @@ export function IntervalHistory({
   const color = fuel === 'GAS' ? GAS : ELEC;
   const unit = FUEL_UNIT[fuel];
 
-  // Shape the raw rows into chart points. For 1h: run through reconcileToHourly
-  // first (best hourly value, 15-min-summed where available), then toHistoryPoints.
-  // For 15m: filter to intervalSeconds=900 only, then toHistoryPoints.
-  // Missing rows = missing points (no zeros fabricated — connectNulls=false means
-  // gaps render as line breaks in the chart, the correct behavior).
+  // Shape the rows into chart points. For 1h: the route already reconciled the raw
+  // rows to one value per hour (grain=1h, reconcile-then-downsample), so we just map
+  // them straight through — reconciling here too would be reconciling already-hourly
+  // rows (a no-op) AND, on a wide downsampled range, would re-trigger the exact
+  // "drop the lone 15-min slots" bug we moved server-side to avoid. For 15m: filter
+  // to intervalSeconds=900 only, then toHistoryPoints. Missing rows = missing points
+  // (no zeros fabricated — connectNulls=false renders gaps as line breaks).
   const data: HistoryPoint[] = useMemo(() => {
     if (!state || 'error' in state) return [];
     if (effectiveResolution === '1h') {
-      return toHistoryPoints(reconcileToHourly(state.rows));
+      return toHistoryPoints(state.rows);
     } else {
       // 15m: raw 15-min electric reads only
       const rows15 = state.rows.filter((r) => r.intervalSeconds === 900);
