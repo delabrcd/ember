@@ -90,3 +90,34 @@ export function parseIntervalQuery(params: URLSearchParams): {
     : { sinceDays: parseSinceDays(params.get('sinceDays')) };
   return { fuelType, window, grain };
 }
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// Resolve a parsed IntervalWindow to a CONCRETE [from, to] pair so the history
+// route can compute a span (→ chooseBucket) and a SQL range. `now` is injected (an
+// epoch-ms instant) so this stays PURE + hand-calc unit-testable — the impure route
+// passes Date.now().
+//
+// Rules (mirroring the precedence the route has always used):
+//   • Both bounds present → use them as-is.
+//   • Only `from` present → close the window at `now` (an open-ended "from X to
+//     present" range).
+//   • Only `to` present   → open the window DEFAULT_SINCE_DAYS before `to` (a
+//     trailing window anchored at the explicit end).
+//   • Neither (the sinceDays fallback) → [now − sinceDays·days, now].
+// The returned bounds are always ordered (from ≤ to); a degenerate/inverted case
+// collapses to a zero-width window at `to`, which chooseBucket handles (finest
+// grain, ≤ 1 bucket). PURE.
+export function resolveWindowBounds(window: IntervalWindow, now: number): { from: Date; to: Date } {
+  if ('sinceDays' in window) {
+    const days = window.sinceDays > 0 ? window.sinceDays : DEFAULT_SINCE_DAYS;
+    return { from: new Date(now - days * DAY_MS), to: new Date(now) };
+  }
+  const toMs = window.to ? window.to.getTime() : now;
+  const fromMs = window.from ? window.from.getTime() : toMs - DEFAULT_SINCE_DAYS * DAY_MS;
+  // Order the bounds defensively (parseIntervalQuery already swaps inverted
+  // explicit pairs, but a from-only/to-only mix could still cross here).
+  const lo = Math.min(fromMs, toMs);
+  const hi = Math.max(fromMs, toMs);
+  return { from: new Date(lo), to: new Date(hi) };
+}

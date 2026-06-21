@@ -5,6 +5,7 @@ import {
   parseDate,
   parseGrain,
   parseIntervalQuery,
+  resolveWindowBounds,
   FIFTEEN_MIN_SECONDS,
 } from '../src/lib/intervalParams';
 
@@ -100,5 +101,51 @@ describe('parseIntervalQuery', () => {
     const w = q.window as { from?: Date; to?: Date };
     expect(w.from!.toISOString()).toBe('2026-06-01T00:00:00.000Z');
     expect(w.to!.toISOString()).toBe('2026-06-07T23:59:59.999Z');
+  });
+});
+
+// Hand-calculated tests for resolveWindowBounds — the PURE helper that turns a
+// parsed IntervalWindow into a concrete [from, to] (clock injected) so the history
+// route can compute a span for chooseBucket + a SQL range. WS1 rework of #36.
+describe('resolveWindowBounds', () => {
+  const NOW = Date.UTC(2026, 5, 21, 12, 0, 0); // 2026-06-21T12:00:00Z
+  const DAY = 24 * 60 * 60 * 1000;
+
+  it('uses both explicit bounds as-is', () => {
+    const from = new Date('2026-06-01T00:00:00.000Z');
+    const to = new Date('2026-06-07T23:59:59.999Z');
+    const r = resolveWindowBounds({ from, to }, NOW);
+    expect(r.from.toISOString()).toBe(from.toISOString());
+    expect(r.to.toISOString()).toBe(to.toISOString());
+  });
+
+  it('closes a from-only window at `now`', () => {
+    const from = new Date('2026-06-01T00:00:00.000Z');
+    const r = resolveWindowBounds({ from }, NOW);
+    expect(r.from.toISOString()).toBe(from.toISOString());
+    expect(r.to.getTime()).toBe(NOW);
+  });
+
+  it('opens a to-only window DEFAULT_SINCE_DAYS (30) before `to`', () => {
+    const to = new Date('2026-06-30T00:00:00.000Z');
+    const r = resolveWindowBounds({ to }, NOW);
+    expect(r.to.toISOString()).toBe(to.toISOString());
+    expect(r.from.getTime()).toBe(to.getTime() - 30 * DAY);
+  });
+
+  it('maps a sinceDays fallback to [now − days, now]', () => {
+    const r = resolveWindowBounds({ sinceDays: 14 }, NOW);
+    expect(r.to.getTime()).toBe(NOW);
+    expect(r.from.getTime()).toBe(NOW - 14 * DAY);
+  });
+
+  it('orders crossed bounds defensively (from ≤ to)', () => {
+    // from after `now` with no `to` would yield from > to (to defaults to now); the
+    // helper swaps them so the span is non-negative.
+    const from = new Date(NOW + 5 * DAY);
+    const r = resolveWindowBounds({ from }, NOW);
+    expect(r.from.getTime()).toBeLessThanOrEqual(r.to.getTime());
+    expect(r.from.getTime()).toBe(NOW);
+    expect(r.to.getTime()).toBe(NOW + 5 * DAY);
   });
 });

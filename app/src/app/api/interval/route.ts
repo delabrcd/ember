@@ -1,108 +1,119 @@
 import { NextResponse } from 'next/server';
-import { getIntervalSeries } from '@/lib/queries';
+import {
+  getIntervalAggregated,
+  getIntervalRaw,
+  getFifteenMinFrom,
+  getFinestGrainInWindow,
+} from '@/lib/queries';
 import { withAccount } from '@/lib/route';
-import { parseIntervalQuery, FIFTEEN_MIN_SECONDS } from '@/lib/intervalParams';
-import { reconcileToHourly } from '@/lib/intervalProfile';
-import { downsampleByTime, MAX_POINTS } from '@/lib/viz/downsampleInterval';
-import { wasDownsampled } from '@/lib/intervalZoom';
+import { parseIntervalQuery, resolveWindowBounds } from '@/lib/intervalParams';
+import { chooseBucket } from '@/lib/viz/chooseBucket';
+import { toFifteenMinGrid } from '@/lib/viz/fifteenMinGrid';
+import { MAX_POINTS } from '@/lib/viz/downsampleInterval';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
-// Recent smart-meter interval reads (issue #76) for the HISTORY time-series line.
-// READ-ONLY + additive: it returns the raw IntervalUsage rows for ONE fuel over a
-// window, ordered by intervalStart, server-downsampled to ≤ MAX_POINTS for the
-// line chart. This never touches /api/verify, the monthly series, or any
-// billed-cost number.
+// Smart-meter interval reads (issue #76) for the "Usage history" line chart — ONE
+// energy (kWh / therms) line per fuel over a window. READ-ONLY + additive: it never
+// touches /api/verify, the monthly series, or any billed-cost number.
+//
+// FINEST-AVAILABLE, SERVER-PICKED RESOLUTION (WS1 rework of #36 / #143 / #77). The
+// client no longer chooses a 1h/15m grain — the SERVER picks the bucket width from
+// the requested [from, to] window so the returned series is always bounded
+// (≤ MAX_POINTS points) AND every point is an honest SUM of the energy in its
+// bucket (energy is additive: combine adjacent intervals, never subsample a
+// representative point). The old route hydrated ~19.5k+8k rows into Node and
+// reconciled/downsampled in JS on every request; now the aggregation happens in
+// Postgres (getIntervalAggregated) and only the ≤ MAX_POINTS aggregated rows cross
+// the wire.
 //
 //   ?fuel=ELECTRIC|GAS   (default ELECTRIC) — anything else falls back to ELECTRIC.
 //   ?from=YYYY-MM-DD     — window start (inclusive). If from/to are present they
 //   ?to=YYYY-MM-DD         WIN over sinceDays — this is the global-RangeControl path.
-//   ?sinceDays=<n>       (default 30, clamped to 1..400) — trailing-window fallback
-//                          for callers that don't pass from/to.
+//   ?sinceDays=<n>       (default 30, 1..400) — trailing-window fallback for callers
+//                          that don't pass from/to.
 //   ?accountId=<id>      — scopes to that account (the shared resolveRequestAccount
 //                          dance); omitted = the default account, bad id = 400.
-//   ?grain=15m           — RAW 15-minute path: returns ONLY the 900s rows for the
-//                          window, UN-decimated, ordered by intervalStart, with
-//                          downsampled:false. 15-min data is inherently recent/
-//                          bounded (NRT, ~days), so serving it raw is cheap. It
-//                          exists because the 15m view used to consume the
-//                          downsampled feed: over a wide range the recent 15-min
-//                          sliver collapsed into a handful of representative rows,
-//                          so the chart looked empty until the user zoomed in. Raw
-//                          900s rows render at their true extent.
-//   ?grain=1h            — HOURLY path: RECONCILE the raw mixed-grain rows to one
-//                          value per hour (4 complete 15-min slots win, else the API
-//                          hourly row) and THEN downsample to ≤ MAX_POINTS. The 1h
-//                          history view uses this. The order is load-bearing — see
-//                          the grain=='1h' branch below — and is why this can't just
-//                          reuse the default 'all' feed.
-//   (no grain)           — default 'all': returns ALL grains DOWNSAMPLED to
-//                          ≤ MAX_POINTS (the smooth multi-year line). Kept for
-//                          back-compat / non-dashboard callers; the dashboard's 1h
-//                          view now uses grain=1h instead (a downsample-then-
-//                          reconcile mix dropped the recent 15-min tail).
+//   ?grain=…             — IGNORED (back-compat: older widget builds sent it; the
+//                          server now picks the bucket itself). Harmless if present.
 //
-// DOWNSAMPLING (issue #36): a wide range (e.g. "All" = 2+ years of hourly ≈ 17k
-// rows) is decimated SERVER-SIDE to ≤ MAX_POINTS (~600) representative rows via
-// the PURE downsampleByTime (bucket-mean) before it leaves the route, so both the
-// payload and the client render stay bounded for any range. This decimation is for
-// the DISPLAY line ONLY. The day×hour heatmap, the average-day load shape and the
-// peak-demand readout need the RAW finest grain (decimation merges adjacent hours
-// → spurious "no data" cells, and decimates away 15-min demand spikes), so those
-// aggregate SERVER-SIDE over the raw rows via the sibling /api/interval/heatmap +
-// /api/interval/profile routes — NOT this downsampled feed (issue #77).
+// THE TWO PATHS (chosen by chooseBucket on the window span):
+//   • bucketSecs ≥ 3600  → SQL RECONCILE-THEN-SUM. getIntervalAggregated collapses
+//     the coexisting 15-min/hourly grains to one value per UTC hour
+//     (reconcileToHourly's rule, in SQL — 4 complete 15-min slots win, else the
+//     hourly row, else skip), then SUMs those into bucketSecs buckets. No row
+//     hydration in Node.
+//   • bucketSecs == 900  → the 15-MINUTE GRID. The window is small here (≤ ~6 days),
+//     so we hydrate the raw 900s+3600s rows and shape a uniform 15-min grid in the
+//     pure toFifteenMinGrid: real 900s where present, four equal quarter-steps for
+//     hourly-only hours (so the line doesn't cliff-end at the start of 15-min data),
+//     gaps elsewhere (never fabricated zeros).
 //
-// No account / no data → { rows: [] } (the widget renders its friendly empty
-// state, not a broken blank chart).
+// RESPONSE: { rows, grain, fifteenMinFrom, downsampled }
+//   • rows           — the aggregated/gridded points (≤ MAX_POINTS), ascending.
+//   • grain          — the chosen bucketSecs (900 / 3600 / …) so the client can label
+//                      the resolution and format axes.
+//   • fifteenMinFrom — the earliest 15-min (900s) intervalStart for this acct+fuel
+//                      (ISO string, or null) so the widget can mark "end of 15-min
+//                      data". Returned regardless of grain.
+//   • downsampled    — true when bucketSecs is COARSER than the finest grain present
+//                      in the window (finer detail exists than what's returned) →
+//                      drives the widget's "finest detail" badge.
+//
+// No account / no data → { rows: [], grain, fifteenMinFrom: null, downsampled: false }
+// (the widget renders its friendly empty state, not a broken blank chart).
+//
+// CACHE: interval data only changes on a scrape (every ~N minutes at most), so a
+// short private cache window is safe and cheap. The response varies by
+// ?accountId / ?fuel / ?from / ?to — all in the URL — so a URL-keyed cache stays
+// correct per account; `private` keeps it in the user's browser regardless.
+const CACHE_HEADER = 'private, max-age=120';
+
 export async function GET(req: Request) {
   const params = new URL(req.url).searchParams;
-  const { fuelType, window, grain } = parseIntervalQuery(params);
+  const { fuelType, window } = parseIntervalQuery(params);
+  // Resolve the parsed window to concrete bounds NOW (pure helper, clock injected)
+  // so chooseBucket has a real span and the SQL has a real [from, to].
+  const { from, to } = resolveWindowBounds(window, Date.now());
+  const bucketSecs = chooseBucket(to.getTime() - from.getTime(), MAX_POINTS);
 
   return withAccount(
     req.url,
-    () => NextResponse.json({ rows: [] }),
+    () =>
+      NextResponse.json(
+        { rows: [], grain: bucketSecs, fifteenMinFrom: null, downsampled: false },
+        { headers: { 'Cache-Control': CACHE_HEADER } }
+      ),
     async (acct) => {
-      // RAW 15-minute path (?grain=15m): push the 900s grain filter into the DB and
-      // return those rows UN-decimated. 15-min data is inherently recent/bounded
-      // (NRT, ~days), so this is cheap — and it avoids the time-bucket downsampler
-      // collapsing the recent 15-min sliver to a handful of points over a wide
-      // range. `downsampled` is correct-by-construction false here (we never
-      // decimate), which keeps the widget's "Max zoom · finest detail" badge right.
-      if (grain === '15m') {
-        const rows = await getIntervalSeries(acct.id, {
-          fuelType,
-          ...window,
-          intervalSeconds: FIFTEEN_MIN_SECONDS,
-        });
-        return NextResponse.json({ rows, downsampled: false });
-      }
-      // Hourly path (?grain=1h): RECONCILE the raw mixed-grain rows to one value
-      // per hour FIRST (reconcileToHourly: four complete 15-min slots sum and win,
-      // else the API hourly row), and only THEN downsample for display. This
-      // ordering is the whole point of the param: the legacy 'all' path below
-      // downsamples the mixed feed and leaves the client to reconcile, but
-      // downsampling turns the recent 15-min rows into lone slots that reconcile's
-      // "partial 15-min + no hourly → skip" rule discards — capping the 1h line at
-      // the moment 15-min data begins (and we DO have a good hourly row for every
-      // one of those hours). Reconciling over the RAW rows keeps the full timeline.
-      // `downsampled` reflects whether the RECONCILED (hourly) set exceeded the cap,
-      // so the widget's "finest detail" badge stays correct.
-      if (grain === '1h') {
-        const raw = await getIntervalSeries(acct.id, { fuelType, ...window });
-        const hourly = reconcileToHourly(raw);
-        const downsampled = wasDownsampled(hourly.length, MAX_POINTS);
-        return NextResponse.json({ rows: downsampleByTime(hourly, MAX_POINTS), downsampled });
-      }
-      const rows = await getIntervalSeries(acct.id, { fuelType, ...window });
-      // `downsampled` (issue #141) reports whether decimation actually reduced the
-      // set — i.e. whether FINER detail exists than what's returned, so the history
-      // widget can show its "Max zoom · finest detail" badge when it's false. It
-      // mirrors downsampleByTime's own gate (raw rows > cap). ADDITIVE: `rows` is
-      // returned exactly as before, so every other reader (the load-shape/heatmap
-      // endpoints are separate) is unaffected.
-      const downsampled = wasDownsampled(rows.length, MAX_POINTS);
-      return NextResponse.json({ rows: downsampleByTime(rows, MAX_POINTS), downsampled });
+      // fifteenMinFrom + the finest in-window grain are independent of the chosen
+      // path, so fetch them alongside the rows (two cheap index-backed lookups).
+      const [rows, fifteenMinFrom, finestGrain] = await Promise.all([
+        bucketSecs <= 900
+          ? // 15-min grid: hydrate the small raw window and shape it purely.
+            getIntervalRaw(acct.id, { fuelType, from, to }).then((raw) =>
+              toFifteenMinGrid(raw, from.getTime(), to.getTime())
+            )
+          : // Coarser: reconcile-then-sum in SQL, ≤ MAX_POINTS rows back.
+            getIntervalAggregated(acct.id, { fuelType, from, to, bucketSecs }),
+        getFifteenMinFrom(acct.id, fuelType),
+        getFinestGrainInWindow(acct.id, { fuelType, from, to }),
+      ]);
+
+      // `downsampled` = the returned bucket is coarser than the finest grain the
+      // window actually holds → finer detail exists than what's shown. When the
+      // window has no rows (finestGrain == null) nothing was reduced → false.
+      const downsampled = finestGrain != null && bucketSecs > finestGrain;
+
+      return NextResponse.json(
+        {
+          rows,
+          grain: bucketSecs,
+          fifteenMinFrom: fifteenMinFrom ? fifteenMinFrom.toISOString() : null,
+          downsampled,
+        },
+        { headers: { 'Cache-Control': CACHE_HEADER } }
+      );
     }
   );
 }
