@@ -54,6 +54,39 @@ export function formatHistoryLabel(ts: number): string {
   return `${month} ${day} ${hour}:${minute}`;
 }
 
+// Human-format a server-chosen bucket width (the /api/interval `grain` field, a
+// NUMBER of seconds — WS1's rework replaced the old '1h'/'15m' token) into a short
+// resolution label for the widget subtitle and tooltip. PURE — no React/DOM/DB.
+//
+// The server picks the bucket from the requested window span (chooseBucket), so the
+// values we actually see are the standard ladder 900 / 3600 / 21600 / 86400 /
+// 604800. We name those exactly; anything off-ladder degrades gracefully to a
+// derived "<n>-min" / "<n>-hour" / "<n>-day" label so an unexpected bucket never
+// renders as a bare number. `null`/`undefined`/non-finite (grain absent from an
+// older/empty response) → empty string so the caller can omit the segment cleanly.
+export function formatGrain(seconds: number | null | undefined): string {
+  if (seconds == null || !Number.isFinite(seconds) || seconds <= 0) return '';
+  // Exact names for the buckets chooseBucket actually emits.
+  switch (seconds) {
+    case 900:
+      return '15-min';
+    case 3600:
+      return 'hourly';
+    case 21600:
+      return '6-hour';
+    case 86400:
+      return 'daily';
+    case 604800:
+      return 'weekly';
+  }
+  // Off-ladder fallback: pick the largest whole unit that divides evenly. Keeps the
+  // label honest without a unit table.
+  if (seconds % 86400 === 0) return `${seconds / 86400}-day`;
+  if (seconds % 3600 === 0) return `${seconds / 3600}-hour`;
+  if (seconds % 60 === 0) return `${seconds / 60}-min`;
+  return `${seconds}s`;
+}
+
 // Map raw interval rows to history chart points, sorted ascending by
 // intervalStart. Drops rows with non-finite quantity or unparseable timestamp.
 // DOES NOT fabricate zeros for gaps — absent rows = absent points (the caller

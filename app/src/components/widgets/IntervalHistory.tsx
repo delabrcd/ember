@@ -1,72 +1,71 @@
 'use client';
 
-// The interval HISTORY widget (issue #121 part 2): a self-contained dashboard
-// tile showing the RAW historical smart-meter reads over time. Unlike the
-// load-shape widget (which shows an AVERAGE DAY profile), this widget plots
-// the actual timeline so the user can see usage trends, daily patterns, and
-// gaps in the data.
+// The interval HISTORY widget (issue #121 part 2; WS2 UX rework): a self-contained
+// dashboard tile showing the historical smart-meter reads over time. Unlike the
+// load-shape widget (which shows an AVERAGE DAY profile), this widget plots the
+// actual timeline so the user can see usage trends, daily patterns, and gaps.
 //
-// SELF-FETCHING (deliberately contained): like IntervalLoadShape, this widget
-// owns its own data. On mount (and whenever a control or the selected account
-// changes) it fetches /api/interval, optionally shapes the rows via
-// reconcileToHourly, and draws the result with Recharts. It does NOT touch the
-// ChartSpec/ConfigurableChart seam.
+// SELF-FETCHING (deliberately contained): like IntervalLoadShape, this widget owns
+// its own data. On mount (and whenever the fuel, the selected account, or the
+// window changes) it fetches /api/interval and draws the result with Recharts. It
+// does NOT touch the ChartSpec/ConfigurableChart seam.
+//
+// SERVER-PICKED RESOLUTION (WS1 + WS2). The widget no longer chooses a 1h/15m
+// grain. WS1 moved ALL resolution logic to the server: /api/interval picks the
+// bucket width from the requested [from, to] window (chooseBucket), SUMS energy
+// into those buckets in SQL (energy is additive), and — when the window is small
+// enough to fall in the 15-min band — returns a uniform 15-min grid. The response
+// carries `grain` (the chosen bucket in SECONDS), `fifteenMinFrom` (the earliest
+// 15-min timestamp for this fuel/account, or null), and `downsampled` (whether
+// finer detail exists than what's returned). So WS2's client:
+//   • renders the server `rows` DIRECTLY — no client reconcile, filter, or
+//     downsample; a thin map (toHistoryPoints) to {label, ts, value} is all.
+//   • has ONE energy line per fuel (the Resolution 1h/15m toggle is GONE).
+//   • labels the resolution from the numeric `grain` (formatGrain).
 //
 // CONTROLS:
-//   • Resolution: 1h | 15m
-//     - 1h  → reconcileToHourly(rows) (best hourly value, 15-min-summed where
-//             available, else the hourly row).
-//     - 15m → rows.filter(r => r.intervalSeconds === 900) (raw 15-min reads).
-//             Disabled / falls back to 1h for Gas (no 15-min gas data).
-//   • Fuel: Electric | Gas
+//   • Fuel: Electric | Gas  (the only toggle now)
 //
-// RANGE (issue #36): the widget no longer owns its time window — it follows the
-// GLOBAL RangeControl, receiving the resolved `from`/`to` ISO day bounds as props
-// (the same range every monthly chart uses) and fetching /api/interval?from=…&to=….
-// A wide range (e.g. "All") is downsampled SERVER-SIDE (bucket-mean, ≤ MAX_POINTS)
-// so the chart stays smooth; the 15m resolution still only has the recent ~48h of
-// detail the API serves (older spans render at the hourly grain).
+// RANGE (issue #36): the widget follows the GLOBAL RangeControl, receiving the
+// resolved `from`/`to` ISO day bounds as props and fetching
+// /api/interval?fuel=…&from=…&to=… (it no longer sends `grain`). The server bounds
+// the series to ≤ MAX_POINTS regardless of how wide the range is.
 //
-// ZOOM (issue #141): on TOP of the global range, the user can narrow into a
-// sub-span LOCALLY by DRAG-SELECTING a band across the chart (the classic
-// stock-chart gesture) without mutating the global RangeControl. We listen to the
-// Recharts LineChart mouse handlers: onMouseDown records the start x, onMouseMove
-// (while dragging) updates the current x, onMouseUp commits. The in-progress band
-// is drawn with a <ReferenceArea>. On commit, the two selected x positions map to
-// their data points' ts and become the zoom window; we refetch /api/interval for
-// just that span (finer, less server-downsampled detail).
+// ZOOM (issue #141): on TOP of the global range, the user narrows into a sub-span
+// LOCALLY by DRAG-SELECTING a band across the chart, without mutating the global
+// RangeControl. We listen to the Recharts LineChart mouse handlers: onMouseDown
+// records the start x, onMouseMove (while dragging) updates the current x, onMouseUp
+// commits. The in-progress band is a <ReferenceArea>. On commit the two selected x
+// positions map to their points' ts and become the zoom window; we refetch
+// /api/interval for just that span — a narrower window → the server picks a FINER
+// grain (e.g. the 15-min grid), so zooming literally trades range for resolution.
 //
-// WHY DRAG-SELECT, NOT A BRUSH: the previous design used a Recharts <Brush> whose
-// handle sub-selects the loaded data. When a narrow drag refetched finer data, the
-// new data WAS that span, so the handle had nothing left to sub-select and reset
-// to full width — the user saw the chart "snap back to the start" (intermittently,
-// "every other drag"). A drag-select gesture has no persistent handle, so there is
-// nothing that can snap: each drag simply commits a new zoom and refetches.
+// WHY DRAG-SELECT, NOT A BRUSH: a Recharts <Brush> handle sub-selects the loaded
+// data; when a narrow drag refetched finer data the handle had nothing left to
+// sub-select and reset to full width ("snap back to the start"). A drag-select has
+// no persistent handle, so nothing can snap — each drag commits a new zoom + refetch.
 //
-// The refetch swaps the rows IN PLACE — it never blanks the chart to the loading
-// skeleton (only the fuel/account/global-range load does that). Dragging again on
-// the zoomed chart zooms FURTHER (refetch for the new, narrower span). A "Reset
-// zoom" affordance returns to the global window. The zoom is per-widget ephemeral
-// state (lib/intervalZoom.ts holds the pure span/selection math).
+// "END OF 15-MIN DATA" MARKER (WS2): when the response's `fifteenMinFrom` falls
+// inside the visible window AND the fuel is Electric (there is no 15-min GAS data),
+// we draw a <ReferenceLine> at that x. Left of it the line is coarser (hourly, or
+// the grid's quarter-steps); the marker tells the user "this is where true 15-min
+// detail begins" so the flatter left side reads as lower resolution, not as a data
+// problem. Out-of-window or null fifteenMinFrom, or Gas → no marker.
 //
-// CLICK vs DRAG vs TOO-SMALL (issue #141): classifyZoomSelection sorts a gesture
-// into three outcomes. A pure click (mouse-down + up on one data point — same
-// index) stays SILENT (no zoom, no hint). A deliberate drag (distinct points) whose
-// span is below the hard floor MIN_ZOOM_SPAN_MS is REFUSED and flashes a transient
-// "Max zoom reached" hint (~2s) so it isn't a silent no-op. A productive drag (span
-// ≥ floor) zooms as before.
+// STALE-WHILE-REVALIDATE — NEVER COLD-BLANK (WS2): historically a base reload
+// (fuel/range/account change) blanked the whole chart to the pulse skeleton. Now,
+// once there is ANY data on screen, a reload KEEPS the prior chart visible and
+// overlays a subtle "updating" shimmer while the new response loads, then swaps the
+// rows in place. Only the very first load (nothing cached, nothing on screen) shows
+// the skeleton. A small client SWR cache (lib/intervalCache.ts) backs this: the
+// widget paints the last-seen series for the new key INSTANTLY from cache (if warm)
+// while revalidating, so a fuel-toggle / range-change feels instant. The `alive`
+// stale-response guard still prevents an out-of-order response from overwriting a
+// newer one.
 //
-// INDICATORS (issue #141): on top of the zoom interaction, two at-a-glance cues —
-//   • a PERSISTENT "Max zoom · finest detail" badge whenever /api/interval reports
-//     it did NOT downsample (the response's `downsampled:false`), meaning the chart
-//     is already at its native resolution. Correct zoomed or not.
-//   • the TRANSIENT "Max zoom reached" hint above for a refused too-tight drag.
-// Both can be true together (you're at finest detail AND you tried to zoom tighter).
-//
-// GAPS: the chart uses connectNulls={false} so real gaps in the data (missing
-// intervals — the API omits them) render as line breaks, NEVER as fabricated
-// zeros. This holds through zoom + refetch (the refetch path runs the same
-// toHistoryPoints shaper, which drops gaps).
+// GAPS: connectNulls={false} is load-bearing — missing intervals (the API omits
+// them) render as line BREAKS, NEVER as fabricated zeros. The server returns gaps
+// as absent rows; toHistoryPoints keeps them absent.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -74,14 +73,21 @@ import {
   Line,
   LineChart,
   ReferenceArea,
+  ReferenceLine,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
 } from 'recharts';
 import { type IntervalProfileRow } from '@/lib/intervalProfile';
-import { toHistoryPoints, type HistoryPoint } from '@/lib/intervalHistory';
+import { toHistoryPoints, formatGrain, type HistoryPoint } from '@/lib/intervalHistory';
 import { classifyZoomSelection, zoomSpanToRange } from '@/lib/intervalZoom';
+import {
+  getCached,
+  swrFetch,
+  intervalCacheKey,
+  type IntervalResponse,
+} from '@/lib/intervalCache';
 import { ChartShell } from '../ChartShell';
 
 // ---- Theme constants (mirrors IntervalLoadShape) ----------------------------
@@ -96,14 +102,13 @@ const tooltipStyle = {
 const axisStyle = { stroke: '#475569', fontSize: 11 } as const;
 
 // ---- Zoom tuning ------------------------------------------------------------
-// Hard minimum zoom window (issue #141). A deliberate drag whose span is below
-// this floor is REFUSED (no zoom) and surfaces the "Max zoom reached" hint instead
-// of silently doing nothing. 1 hour is the floor because the finest grain the data
-// ever reaches is 15-min electric (older spans are hourly): an hour-wide window
-// already shows the densest data the chart can hold (~4 points at 15m, 1 at 1h), so
-// drawing a tighter band can't reveal anything new — it's the natural "you've hit
-// max zoom" boundary. (A pure click — both endpoints on one point — is handled
-// separately by classifyZoomSelection and stays silent.)
+// Hard minimum zoom window (issue #141). A deliberate drag whose span is below this
+// floor is REFUSED (no zoom) and surfaces the "Max zoom reached" hint instead of
+// silently doing nothing. 1 hour is the floor because the finest grain the data
+// ever reaches is 15-min electric: an hour-wide window already shows the densest
+// data the chart can hold (~4 points at 15-min), so a tighter band can't reveal
+// anything new — it's the natural "you've hit max zoom" boundary. (A pure click is
+// handled separately by classifyZoomSelection and stays silent.)
 const MIN_ZOOM_SPAN_MS = 60 * 60_000;
 
 // How long the transient "Max zoom reached" hint stays up before auto-clearing.
@@ -111,20 +116,25 @@ const ZOOM_HINT_MS = 2_000;
 
 // ---- Types ------------------------------------------------------------------
 type Fuel = 'ELECTRIC' | 'GAS';
-type Resolution = '1h' | '15m';
 
 const FUELS: readonly Fuel[] = ['ELECTRIC', 'GAS'];
 const FUEL_LABEL: Record<Fuel, string> = { ELECTRIC: 'Electric', GAS: 'Gas' };
 const FUEL_UNIT: Record<Fuel, string> = { ELECTRIC: 'kWh', GAS: 'therms' };
 
 // The /api/interval payload rows (fuelType + unit from the API, plus the
-// IntervalProfileRow fields the shapers need).
+// IntervalProfileRow fields toHistoryPoints needs).
 type IntervalApiRow = IntervalProfileRow & { fuelType?: string; unit?: string };
 
-// `downsampled` (issue #141): whether /api/interval reduced the set, i.e. whether
-// FINER detail than what's shown exists. false → the chart is at native resolution
-// → show the "Max zoom · finest detail" badge.
-type LoadState = { rows: IntervalApiRow[]; downsampled: boolean } | { error: true } | undefined;
+// What the widget keeps in component state once it has a response. We normalize the
+// SWR-cache payload (IntervalResponse, whose `rows` are `unknown[]`) into the typed
+// rows + the WS1 metadata the UI reads. `error: true` is a distinct terminal state.
+type Loaded = {
+  rows: IntervalApiRow[];
+  grain: number | undefined; // chosen bucket width in seconds (WS1); undefined if absent
+  fifteenMinFrom: string | null; // earliest 15-min timestamp, or null
+  downsampled: boolean; // finer detail exists than what's shown
+};
+type LoadState = Loaded | { error: true } | undefined;
 
 // A locally-zoomed window: the day bounds we refetched for finer detail, plus the
 // raw ms span the user selected (so the reset/label can describe it). Ephemeral
@@ -137,62 +147,55 @@ type Zoom = { from: string; to: string; startMs: number; endMs: number };
 // non-null and `refX2` differs from `refX1`, we draw the selection band.
 type DragSel = { refX1: string; refX2: string | null };
 
+// Narrow a cached/fetched IntervalResponse into the typed Loaded the UI reads.
+// Centralized so the cache-hydrate path and the revalidate path agree.
+function toLoaded(resp: IntervalResponse): Loaded {
+  return {
+    rows: Array.isArray(resp.rows) ? (resp.rows as IntervalApiRow[]) : [],
+    grain: typeof resp.grain === 'number' ? resp.grain : undefined,
+    fifteenMinFrom: resp.fifteenMinFrom ?? null,
+    // Absent flag → treat as native resolution (badge shown). Matches WS1's intent:
+    // a missing `downsampled` means nothing was reported reduced.
+    downsampled: resp.downsampled === true,
+  };
+}
+
 // ---- Segmented toggle -------------------------------------------------------
 // A reusable generic segmented control (mirrors the toggle in IntervalLoadShape).
 function Segmented<T extends string>({
   options,
   value,
   onChange,
-  disabledValues,
 }: {
   options: { label: string; value: T }[];
   value: T;
   onChange: (v: T) => void;
-  disabledValues?: Set<T>;
 }) {
   return (
     <div className="inline-flex overflow-hidden rounded-lg border border-slate-700">
-      {options.map((opt) => {
-        const disabled = disabledValues?.has(opt.value) ?? false;
-        return (
-          <button
-            key={opt.value}
-            onClick={() => !disabled && onChange(opt.value)}
-            disabled={disabled}
-            className={`px-2.5 py-1 text-xs transition ${
-              value === opt.value
-                ? 'bg-amber-500 text-slate-950'
-                : disabled
-                  ? 'cursor-not-allowed bg-slate-800/50 text-slate-600'
-                  : 'bg-slate-800/50 text-slate-300 hover:bg-slate-700'
-            }`}
-          >
-            {opt.label}
-          </button>
-        );
-      })}
+      {options.map((opt) => (
+        <button
+          key={opt.value}
+          onClick={() => onChange(opt.value)}
+          className={`px-2.5 py-1 text-xs transition ${
+            value === opt.value
+              ? 'bg-amber-500 text-slate-950'
+              : 'bg-slate-800/50 text-slate-300 hover:bg-slate-700'
+          }`}
+        >
+          {opt.label}
+        </button>
+      ))}
     </div>
   );
 }
 
 // ---- Settings panel ---------------------------------------------------------
-// Rendered inside ChartShell's Customize popover / expand side. Mirrors
-// ChartConfigMenu's row layout (uppercase label + a segmented control): Fuel and
-// Resolution (1h/15m, 15m disabled for gas). The time window is GLOBAL (issue
-// #36 — driven by the dashboard RangeControl), so there's no per-widget range row.
-function HistorySettings({
-  fuel,
-  onFuel,
-  resolution,
-  onResolution,
-  resolutionDisabled,
-}: {
-  fuel: Fuel;
-  onFuel: (f: Fuel) => void;
-  resolution: Resolution;
-  onResolution: (r: Resolution) => void;
-  resolutionDisabled: boolean;
-}) {
+// Rendered inside ChartShell's Customize popover / expand side. Just the Fuel
+// toggle now (WS2 removed the Resolution segmented control — the server picks the
+// grain). The time window is GLOBAL (issue #36 — the dashboard RangeControl), so
+// there's no per-widget range row.
+function HistorySettings({ fuel, onFuel }: { fuel: Fuel; onFuel: (f: Fuel) => void }) {
   return (
     <div className="space-y-3 text-sm">
       <div>
@@ -201,18 +204,6 @@ function HistorySettings({
           options={FUELS.map((f) => ({ label: FUEL_LABEL[f], value: f }))}
           value={fuel}
           onChange={onFuel}
-        />
-      </div>
-      <div>
-        <div className="mb-1 text-xs font-medium uppercase tracking-wide text-slate-500">Resolution</div>
-        <Segmented
-          options={[
-            { label: '1h', value: '1h' as Resolution },
-            { label: '15m', value: '15m' as Resolution },
-          ]}
-          value={resolution}
-          onChange={onResolution}
-          disabledValues={resolutionDisabled ? new Set<Resolution>(['15m']) : undefined}
         />
       </div>
     </div>
@@ -233,148 +224,150 @@ export function IntervalHistory({
   to?: string;
 }) {
   const [fuel, setFuel] = useState<Fuel>('ELECTRIC');
-  const [resolution, setResolution] = useState<Resolution>('1h');
   const [state, setState] = useState<LoadState>(undefined);
+  // `revalidating` (WS2): true while a fetch is in flight AND we already have data
+  // on screen — drives the subtle "updating" shimmer instead of a cold skeleton.
+  const [revalidating, setRevalidating] = useState(false);
   // The locally-zoomed window (issue #141). When set, the widget has refetched
   // /api/interval for [zoom.from, zoom.to] (finer detail) and renders that span.
   const [zoom, setZoom] = useState<Zoom | null>(null);
   // The in-progress drag-selection (issue #141). Non-null between onMouseDown and
-  // onMouseUp; drives the <ReferenceArea> band. Committed (or discarded) on mouse
-  // up, then cleared.
+  // onMouseUp; drives the <ReferenceArea> band. Committed (or discarded) on mouse up.
   const [drag, setDrag] = useState<DragSel | null>(null);
   // A brief, auto-dismissing "Max zoom reached" hint (issue #141), shown when a
-  // deliberate drag is refused for being tighter than MIN_ZOOM_SPAN_MS. Cleared on
-  // a timer (and on any base reload via the effect below).
+  // deliberate drag is refused for being tighter than MIN_ZOOM_SPAN_MS.
   const [zoomHint, setZoomHint] = useState(false);
-
-  // Gas has no 15-min data → disable the 15m option when fuel=Gas.
-  // If the user switches to Gas while on 15m, fall back to 1h.
-  const resolutionDisabled = fuel === 'GAS';
-  const effectiveResolution: Resolution = resolutionDisabled ? '1h' : resolution;
-
-  // When switching to Gas while 15m is selected, silently fall back to 1h in the
-  // display as well (the effectiveResolution above governs shaping; this updates
-  // the control so it doesn't show 15m selected but visually greyed out the same
-  // slot that IS selected — confusing).
-  useEffect(() => {
-    if (fuel === 'GAS' && resolution === '15m') {
-      setResolution('1h');
-    }
-  }, [fuel, resolution]);
 
   // The window actually fetched: the zoomed span when zoomed, else the global one.
   const fetchFrom = zoom ? zoom.from : from;
   const fetchTo = zoom ? zoom.to : to;
 
-  // Drop any active zoom (and any in-progress drag) whenever the fuel, the
-  // account, or the GLOBAL range changes — a zoom into the old context would be
-  // stale (the reset is then a no-op the next fetch already reflects). Resolution
-  // does NOT clear the zoom (the user may be zooming specifically to inspect 15m
-  // detail); we just abandon any in-progress drag so a stale band can't commit
-  // against the new grain.
+  // Drop any active zoom (and any in-progress drag) whenever the fuel, the account,
+  // or the GLOBAL range changes — a zoom into the old context would be stale.
   useEffect(() => {
     setZoom(null);
     setDrag(null);
     setZoomHint(false);
   }, [fuel, from, to, accountId]);
-  useEffect(() => {
-    setDrag(null);
-  }, [effectiveResolution]);
 
-  // Auto-dismiss the "Max zoom reached" hint ~2s after it's shown (issue #141), so
-  // the refused-drag feedback is transient and never lingers.
+  // Auto-dismiss the "Max zoom reached" hint ~2s after it's shown (issue #141).
   useEffect(() => {
     if (!zoomHint) return;
     const id = setTimeout(() => setZoomHint(false), ZOOM_HINT_MS);
     return () => clearTimeout(id);
   }, [zoomHint]);
 
-  // To decide whether a given fetch should show the loading skeleton, we track
-  // the "base" reload key (fuel/global-range/account). When ONLY the zoom-derived
-  // window changed (a finer-detail refetch), the base key is unchanged → we keep
-  // the current chart visible and swap data in place; we only blank to the
-  // skeleton for a true base reload (mount, fuel/account/global-range change).
+  // The "base" reload key (fuel/global-range/account) is kept only so the fetch
+  // effect can record what it last fetched. WS2's no-cold-blank rule no longer needs
+  // a base-vs-zoom branch: we NEVER setState(undefined) once there's data on screen.
   const baseKeyRef = useRef<string | null>(null);
 
-  // Fetch on mount + whenever controls, account, or the (possibly zoomed) window
-  // change. Track an `alive` flag so a stale response (the user changed a control
-  // mid-flight) can't overwrite the current one.
+  // Fetch on mount + whenever the fuel, account, or the (possibly zoomed) window
+  // changes. STALE-WHILE-REVALIDATE: paint the cached series for this exact key
+  // instantly (if warm), then revalidate and swap in place. `alive` guards against
+  // an out-of-order response overwriting a newer one.
   useEffect(() => {
     let alive = true;
-    const baseKey = `${fuel}|${from ?? ''}|${to ?? ''}|${accountId ?? ''}`;
-    const isBaseReload = baseKeyRef.current !== baseKey;
-    baseKeyRef.current = baseKey;
-    // Skeleton only for a base reload; a zoom refetch keeps the prior chart up
-    // (issue #141: no blank/loading flash while zooming).
-    if (isBaseReload) setState(undefined);
     const acctQuery = accountId != null ? `&accountId=${accountId}` : '';
     // Follow the zoomed span when zoomed, else the GLOBAL range; otherwise let the
-    // route default to its trailing window (non-dashboard caller). Server-side
-    // downsampling keeps the returned series bounded (≤ MAX_POINTS) no matter how
-    // wide the window is — but a narrow zoom span fits under the cap, so it comes
-    // back at (or near) the finest available grain.
+    // route default to its trailing window (non-dashboard caller). The client no
+    // longer sends `grain` — WS1's server picks the bucket from the window span.
     const rangeQuery = fetchFrom && fetchTo ? `&from=${fetchFrom}&to=${fetchTo}` : '';
-    // Ask the route for the grain that matches the resolution toggle. 15m → the RAW
-    // 900s rows (un-decimated; 15-min data is recent/bounded so this is cheap, and
-    // it stops the time-bucket downsampler collapsing the recent 15-min sliver over
-    // a wide range). 1h → the route RECONCILES raw rows to hourly and THEN
-    // downsamples; we must NOT use the legacy default feed here, because it
-    // downsamples the mixed grains first and the recent 15-min rows then get dropped
-    // by reconcile's "partial 15-min, no hourly → skip" rule, capping the line at
-    // the moment 15-min data begins. The server returns these already-hourly.
-    const grainQuery = effectiveResolution === '15m' ? '&grain=15m' : '&grain=1h';
-    fetch(`/api/interval?fuel=${fuel}${rangeQuery}${grainQuery}${acctQuery}`)
-      .then((r) => r.json())
-      .then((j) => {
+    const url = `/api/interval?fuel=${fuel}${rangeQuery}${acctQuery}`;
+    // The cache key keys off the FETCHED window (fetchFrom/fetchTo) so a zoom and a
+    // base view are distinct cache entries — each repaints its own last-seen series.
+    const key = intervalCacheKey({ fuel, from: fetchFrom, to: fetchTo, accountId });
+
+    // NEVER COLD-BLANK. The single state change that makes this true:
+    //   • warm cache for THIS key → hydrate state from cache NOW (instant repaint),
+    //   • else if we ALREADY have data on screen (any prior Loaded) → keep it up,
+    //   • else (genuine first load, nothing to show) → skeleton (state=undefined).
+    // Then revalidate in the background and swap in place. We do NOT
+    // setState(undefined) for a base reload anymore — that was the old cold-blank.
+    const cached = getCached(key);
+    setState((prev) => {
+      if (cached) return toLoaded(cached); // warm → instant repaint of last-seen series
+      if (prev && !('error' in prev)) return prev; // have data → keep it, shimmer over it
+      return undefined; // genuine first load → the only cold (skeleton) state left
+    });
+    // Shimmer whenever we already have something to show (cache hit or prior data);
+    // only the true first load (no cache, no prior data) suppresses it for the skeleton.
+    setRevalidating(!!cached || (!!state && !('error' in state)));
+    baseKeyRef.current = key;
+
+    swrFetch(key, url)
+      .then((resp) => {
         if (!alive) return;
-        setState({
-          rows: Array.isArray(j?.rows) ? (j.rows as IntervalApiRow[]) : [],
-          // `downsampled` drives the "finest detail" badge (issue #141). Default to
-          // false (badge shown) when the flag is absent — a missing flag means no
-          // reduction was reported, i.e. treat the data as native-resolution.
-          downsampled: j?.downsampled === true,
-        });
+        setState(toLoaded(resp));
+        setRevalidating(false);
       })
       .catch(() => {
-        if (alive) setState({ error: true });
+        if (!alive) return;
+        // On a hard failure keep any stale data we were showing (stale beats blank);
+        // only show the error card if we have nothing at all.
+        setRevalidating(false);
+        setState((prev) => (prev && !('error' in prev) ? prev : { error: true }));
       });
     return () => {
       alive = false;
     };
-  }, [fuel, fetchFrom, fetchTo, accountId, from, to, effectiveResolution]);
+    // `state` is read only to decide the shimmer flag at fetch START; including it in
+    // deps would re-run the effect on every swap (an infinite loop). The fetch
+    // identity is fully determined by fuel/window/account.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fuel, fetchFrom, fetchTo, accountId]);
 
   const color = fuel === 'GAS' ? GAS : ELEC;
   const unit = FUEL_UNIT[fuel];
 
-  // Shape the rows into chart points. For 1h: the route already reconciled the raw
-  // rows to one value per hour (grain=1h, reconcile-then-downsample), so we just map
-  // them straight through — reconciling here too would be reconciling already-hourly
-  // rows (a no-op) AND, on a wide downsampled range, would re-trigger the exact
-  // "drop the lone 15-min slots" bug we moved server-side to avoid. For 15m: filter
-  // to intervalSeconds=900 only, then toHistoryPoints. Missing rows = missing points
-  // (no zeros fabricated — connectNulls=false renders gaps as line breaks).
+  // The server already chose the bucket and SUMMED energy into it (and shaped the
+  // 15-min grid when zoomed in), so we map the rows STRAIGHT to chart points — no
+  // client reconcile/filter/downsample. Missing rows = missing points (no zeros
+  // fabricated; connectNulls=false renders gaps as line breaks).
   const data: HistoryPoint[] = useMemo(() => {
     if (!state || 'error' in state) return [];
-    if (effectiveResolution === '1h') {
-      return toHistoryPoints(state.rows);
-    } else {
-      // 15m: raw 15-min electric reads only
-      const rows15 = state.rows.filter((r) => r.intervalSeconds === 900);
-      return toHistoryPoints(rows15);
-    }
-  }, [state, effectiveResolution]);
+    return toHistoryPoints(state.rows);
+  }, [state]);
 
   const loading = state === undefined;
   const errored = !!state && 'error' in state;
   const empty = !loading && !errored && data.length === 0;
 
-  // "Max zoom · finest detail" badge (issue #141): true when the route did NOT
-  // downsample — the chart is at its native resolution and zooming further reveals
-  // nothing new. Correct whether or not the user has zoomed (a naturally-small
-  // global range that wasn't reduced shows it too). Suppressed while loading/errored
-  // or with no data to qualify.
+  // The chosen grain (seconds) and its human label for the subtitle/tooltip.
+  const grainSecs = state && !('error' in state) ? state.grain : undefined;
+  const grainLabel = formatGrain(grainSecs);
+
+  // "Max zoom · finest detail" badge (issue #141): keyed off downsampled===false —
+  // the server did NOT reduce the set, so the chart is at native resolution and
+  // zooming further reveals nothing new. Suppressed while loading/errored/empty.
   const atFinestDetail =
     !!state && !('error' in state) && !state.downsampled && data.length > 0;
+
+  // "End of 15-min data" marker (WS2). Resolve the categorical x-position (a `label`)
+  // to draw the <ReferenceLine> at: the FIRST rendered point at/after fifteenMinFrom.
+  // The X axis is categorical (dataKey="label"), so a ReferenceLine needs an x that
+  // matches an actual label — not a raw timestamp. We only show it when:
+  //   • fuel is ELECTRIC (there is no 15-min GAS data), AND
+  //   • fifteenMinFrom is non-null, AND
+  //   • fifteenMinFrom falls WITHIN the visible window (after the first point, before
+  //     the last) so it isn't pinned to an axis edge for a window entirely
+  //     before/after the 15-min band.
+  // Out-of-window / null / Gas → null → no marker.
+  const fifteenMinMarkerLabel: string | null = useMemo(() => {
+    if (fuel !== 'ELECTRIC') return null;
+    const fmFrom = state && !('error' in state) ? state.fifteenMinFrom : null;
+    if (!fmFrom || data.length === 0) return null;
+    const fmTs = new Date(fmFrom).getTime();
+    if (!Number.isFinite(fmTs)) return null;
+    const firstTs = data[0].ts;
+    const lastTs = data[data.length - 1].ts;
+    // Strictly inside the band: a marker exactly at the left edge would just overlap
+    // the axis (the whole window is 15-min); at/after the right edge it's off-window.
+    if (fmTs <= firstTs || fmTs >= lastTs) return null;
+    // Snap to the first rendered point at/after fifteenMinFrom (data is ascending).
+    const pt = data.find((p) => p.ts >= fmTs);
+    return pt ? pt.label : null;
+  }, [fuel, state, data]);
 
   // Look up a rendered point's ts (epoch-ms) + index by its XAxis label. The drag
   // handlers receive `e.activeLabel` (the category value, i.e. our `label`); we map
@@ -382,18 +375,12 @@ export function IntervalHistory({
   const pointByLabel = useMemo(() => {
     const m = new Map<string, { ts: number; index: number }>();
     data.forEach((p, i) => {
-      // Labels are unique per point in practice (distinct minute timestamps); if a
-      // duplicate ever occurs the first wins, which is fine for span endpoints.
       if (!m.has(p.label)) m.set(p.label, { ts: p.ts, index: i });
     });
     return m;
   }, [data]);
 
   // ---- Drag-to-select-zoom handlers (issue #141) ----------------------------
-  // Recharts reports the category under the cursor as `e.activeLabel`. We record
-  // it on mouse-down, track it on mouse-move while a drag is active, and on
-  // mouse-up map the two labels to their points' ts and (if the selection is
-  // deliberate) commit a zoom that refetches the finer span.
   const onChartMouseDown = useCallback((e: { activeLabel?: string | number } | null) => {
     const label = e?.activeLabel;
     if (label == null) return;
@@ -402,7 +389,6 @@ export function IntervalHistory({
 
   const onChartMouseMove = useCallback(
     (e: { activeLabel?: string | number } | null) => {
-      // Only track while a drag is in progress (mouse-down happened on the chart).
       if (!drag) return;
       const label = e?.activeLabel;
       if (label == null) return;
@@ -414,30 +400,26 @@ export function IntervalHistory({
 
   const commitDrag = useCallback(() => {
     setDrag((sel) => {
-      // Always clear the band on mouse-up/leave. Beyond that we have three cases
-      // (issue #141), decided by the PURE classifyZoomSelection:
+      // Three cases (issue #141), decided by the PURE classifyZoomSelection:
       //   • 'click'     — silent no-op (no zoom, no hint).
       //   • 'too-small' — a deliberate drag below the floor → refuse + show hint.
       //   • 'zoom'      — productive drag → commit the zoom + refetch.
       if (!sel || sel.refX2 == null) return null;
       const a = pointByLabel.get(sel.refX1);
       const b = pointByLabel.get(sel.refX2);
-      // A missing endpoint or both endpoints on the same label is a click.
       if (!a || !b || sel.refX2 === sel.refX1) return null;
       const kind = classifyZoomSelection(a.index, b.index, a.ts, b.ts, MIN_ZOOM_SPAN_MS);
       if (kind === 'click') return null;
       if (kind === 'too-small') {
-        // Deliberate drag tighter than the floor: surface the transient hint so the
-        // drag isn't a silent no-op, but do NOT zoom.
         setZoomHint(true);
         return null;
       }
       const { from: zf, to: zt } = zoomSpanToRange(a.ts, b.ts);
       const startMs = Math.min(a.ts, b.ts);
       const endMs = Math.max(a.ts, b.ts);
-      // Commit the zoom (the fetch effect picks up the new fetchFrom/fetchTo and
-      // refetches in place). Skip a redundant set if we're already on that span.
-      setZoom((prev) => (prev && prev.from === zf && prev.to === zt ? prev : { from: zf, to: zt, startMs, endMs }));
+      setZoom((prev) =>
+        prev && prev.from === zf && prev.to === zt ? prev : { from: zf, to: zt, startMs, endMs },
+      );
       return null;
     });
   }, [pointByLabel]);
@@ -447,23 +429,41 @@ export function IntervalHistory({
     setZoom(null);
   }, []);
 
-  // Subtitle: e.g. "Electric · kWh · 1h" (the global time window is shown in the
-  // dashboard header). When zoomed, append the local span so it's clear the chart
-  // is showing a narrowed, finer-detail view.
-  const subtitle = `${FUEL_LABEL[fuel]} · ${unit} · ${effectiveResolution}${
+  // Subtitle: e.g. "Electric · kWh · hourly" (the global time window is in the
+  // dashboard header). The grain segment is human-formatted from the numeric
+  // `grain` (WS2) and omitted when absent. When zoomed, append the local span.
+  const subtitle = `${FUEL_LABEL[fuel]} · ${unit}${grainLabel ? ` · ${grainLabel}` : ''}${
     zoom ? ` · zoomed ${zoom.from} → ${zoom.to}` : ''
   }`;
 
-  // Empty-state message: distinguish "no data at all" from "no data at this grain".
-  const emptyMsg =
-    effectiveResolution === '15m'
-      ? `No 15-minute data yet for ${FUEL_LABEL[fuel].toLowerCase()} — it's collected on each scheduled check.`
-      : `No interval data yet for ${FUEL_LABEL[fuel].toLowerCase()} — it's collected on each scheduled check.`;
+  // Empty-state message. There's only one grain now (server-chosen), so a single
+  // friendly line regardless of resolution.
+  const emptyMsg = `No interval data yet for ${FUEL_LABEL[
+    fuel
+  ].toLowerCase()} — it's collected on each scheduled check.`;
 
-  // The chart body (render-prop for ChartShell): keeps the loading/empty/errored
-  // states and the Recharts tree, drawn into the height ChartShell supplies.
+  // Tooltip formatter: value + unit + the grain so the user sees the resolution of
+  // the point under the cursor (e.g. "1.234 kWh · hourly").
+  const tooltipFormatter = (v: number | string): [string, string] => [
+    `${Number(v).toFixed(3)} ${unit}${grainLabel ? ` · ${grainLabel}` : ''}`,
+    'usage',
+  ];
+
+  // The chart body (render-prop for ChartShell): the loading/empty/errored states,
+  // the revalidate shimmer, the overlay badges, and the Recharts tree.
   const renderBody = (h: number | string) => (
     <div style={{ height: h }} className="relative w-full">
+      {/* Subtle "updating" shimmer (WS2): a thin top progress bar shown whenever a
+          revalidation is in flight AND there's already a chart up — so a reload
+          NEVER cold-blanks. Pointer-events-none so it can't intercept the drag. */}
+      {revalidating && !loading && !errored && (
+        <div
+          title="Updating…"
+          className="pointer-events-none absolute inset-x-0 top-0 z-20 h-0.5 overflow-hidden"
+        >
+          <div className="h-full w-1/3 animate-pulse rounded-full bg-amber-500/70" />
+        </div>
+      )}
       {/* Reset-zoom affordance (issue #141): overlaid top-left, shown only when a
           local zoom is active. Returns to the global RangeControl window. */}
       {zoom && !loading && !errored && (
@@ -475,10 +475,8 @@ export function IntervalHistory({
           Reset zoom
         </button>
       )}
-      {/* Persistent "finest detail" badge (issue #141): shown whenever the route
-          did NOT downsample, so the chart is at its native resolution and zooming
-          further reveals nothing new. Sits top-right, opposite the Reset-zoom
-          affordance, so the two never collide. */}
+      {/* Persistent "finest detail" badge (issue #141): shown whenever the server
+          did NOT downsample. Sits top-right, opposite the Reset-zoom affordance. */}
       {atFinestDetail && (
         <div
           title="The chart is at its finest available resolution — zooming further won't reveal more detail."
@@ -488,8 +486,7 @@ export function IntervalHistory({
         </div>
       )}
       {/* Transient refused-drag hint (issue #141): shown ~2s when a deliberate drag
-          is tighter than the zoom floor. Centered at the top so it reads as a
-          momentary toast, then auto-clears. */}
+          is tighter than the zoom floor. Centered at the top as a momentary toast. */}
       {zoomHint && !loading && !errored && (
         <div className="pointer-events-none absolute left-1/2 top-1 z-20 -translate-x-1/2 rounded-md border border-amber-500/60 bg-slate-900/90 px-2 py-0.5 text-[11px] text-amber-300 backdrop-blur">
           Max zoom reached
@@ -511,10 +508,7 @@ export function IntervalHistory({
         <ResponsiveContainer width="100%" height="100%">
           {/* Drag-to-select-zoom (issue #141): mouse-down records the start x,
               mouse-move tracks it while dragging, mouse-up commits. onMouseLeave
-              cancels an in-progress drag (also a safe place to commit so a drag
-              that ends just off the plot still zooms). The cursor hints the
-              gesture is a selection (crosshair). No persistent handle exists, so
-              nothing can "snap back" the way the old Brush did. */}
+              also commits so a drag that ends just off the plot still zooms. */}
           <LineChart
             data={data}
             margin={{ top: 5, right: 10, left: 0, bottom: 0 }}
@@ -529,26 +523,23 @@ export function IntervalHistory({
               dataKey="label"
               {...axisStyle}
               minTickGap={40}
-              // Show a readable but not crowded set of tick labels.
-              // For dense ranges (30d at 1h = ~720 points) minTickGap prevents
-              // crowding; for sparse ranges (24h at 15m = ~96 points) it's fine.
               interval="preserveStartEnd"
             />
             <YAxis
               {...axisStyle}
               width={42}
-              tickFormatter={(v: number) => Number(v).toFixed(effectiveResolution === '15m' ? 2 : 1)}
+              // One precision now (server-chosen grain). 2 decimals reads well for
+              // both the small 15-min kWh values and the larger coarse-bucket sums.
+              tickFormatter={(v: number) => Number(v).toFixed(2)}
             />
             <Tooltip
               contentStyle={tooltipStyle}
-              formatter={(v: number | string) => [`${Number(v).toFixed(3)} ${unit}`, 'usage']}
+              formatter={tooltipFormatter}
               labelFormatter={(l) => `${l}`}
             />
-            {/* connectNulls={false} (the Recharts default) is load-bearing:
-                missing intervals must render as line BREAKS, never as
-                straight lines over a gap or fabricated zeros. We make it
-                explicit here for clarity and to guard against future
-                defaults changing. */}
+            {/* connectNulls={false} is load-bearing: missing intervals must render
+                as line BREAKS, never as straight lines over a gap or fabricated
+                zeros. Explicit here to guard against future defaults changing. */}
             <Line
               type="monotone"
               dataKey="value"
@@ -559,9 +550,26 @@ export function IntervalHistory({
               isAnimationActive={false}
               connectNulls={false}
             />
-            {/* The in-progress drag-selection band (issue #141). Drawn only while
-                a drag spans two distinct x positions; it disappears on mouse-up
-                (the zoom is committed and the data refetched for that span). */}
+            {/* "End of 15-min data" marker (WS2): a vertical reference line at the
+                first point where true 15-min detail begins (electric only, and only
+                when that boundary falls inside the visible window). Drawn AFTER the
+                Line so it sits on top; the label points right ("15-min data →")
+                toward the finer-resolution side. */}
+            {fifteenMinMarkerLabel != null && (
+              <ReferenceLine
+                x={fifteenMinMarkerLabel}
+                stroke="#94a3b8"
+                strokeDasharray="4 3"
+                strokeOpacity={0.7}
+                label={{
+                  value: '15-min data →',
+                  position: 'insideTopLeft',
+                  fill: '#94a3b8',
+                  fontSize: 10,
+                }}
+              />
+            )}
+            {/* The in-progress drag-selection band (issue #141). */}
             {drag && drag.refX2 != null && drag.refX2 !== drag.refX1 && (
               <ReferenceArea
                 x1={drag.refX1}
@@ -584,15 +592,7 @@ export function IntervalHistory({
       subtitle={subtitle}
       fill
       body={renderBody}
-      settings={
-        <HistorySettings
-          fuel={fuel}
-          onFuel={setFuel}
-          resolution={effectiveResolution}
-          onResolution={setResolution}
-          resolutionDisabled={resolutionDisabled}
-        />
-      }
+      settings={<HistorySettings fuel={fuel} onFuel={setFuel} />}
     />
   );
 }
