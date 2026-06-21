@@ -492,6 +492,27 @@ export function IntervalHistory({
           Max zoom reached
         </div>
       )}
+      {/* In-grid GRAIN indicator (WS2b): an always-rendered overlay pill naming the
+          server-chosen resolution the user is currently viewing (e.g. "15-min",
+          "hourly", "weekly"). ChartShell only paints its subtitle when NOT `fill`,
+          so the grain in the subtitle is invisible on the in-grid (fill) card — it
+          only surfaces in the Expand modal. This pill closes that gap at-a-glance.
+          Absolutely-positioned (no layout height → can't break the fit-cockpit
+          sizing) and pointer-events-none (mustn't intercept the drag-zoom). Pinned
+          BOTTOM-LEFT: the one free corner (Reset-zoom is top-left, the finest-detail
+          badge top-right, the "Max zoom reached" hint top-center, the "15-min data →"
+          ReferenceLine label rides the plot). Rendered only with real data and a
+          valid grain (formatGrain returns '' for an absent/odd grain → omit). Styled
+          like the sibling overlay pills. Redundant with the Expand-modal subtitle by
+          design (WS2b: render in both, don't detect fill-vs-expand). */}
+      {!loading && !errored && data.length > 0 && grainLabel && (
+        <div
+          title="Current chart resolution (the server picks the bucket from the visible window)."
+          className="pointer-events-none absolute bottom-1 left-1 z-10 rounded-md border border-slate-700 bg-slate-900/80 px-2 py-0.5 text-[11px] text-slate-400 backdrop-blur"
+        >
+          {grainLabel}
+        </div>
+      )}
       {loading ? (
         <div className="flex h-full w-full items-center justify-center">
           <div className="h-full w-full animate-pulse rounded-lg bg-slate-800/40" />
