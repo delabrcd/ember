@@ -8,6 +8,7 @@ import {
   zoomWindowAroundCenter,
   panWindow,
   navCursor,
+  viewDomainFor,
 } from '../src/lib/intervalZoom';
 
 // Hand-calculated tests for the PURE interval-zoom helpers (issue #141). The
@@ -272,6 +273,59 @@ describe('wasDownsampled (hand-calculated)', () => {
   it('is false for non-finite inputs', () => {
     expect(wasDownsampled(NaN, 600)).toBe(false);
     expect(wasDownsampled(1000, NaN)).toBe(false);
+  });
+});
+
+describe('viewDomainFor (WS7 live numeric-axis domain, hand-calculated)', () => {
+  const B_LO = 1_000;
+  const B_HI = 1_000 + 100 * HOUR;
+
+  it('uses a valid ordered zoom window verbatim (ignores the bounds)', () => {
+    // A real zoom span [20h,60h] (offset from B_LO) is returned as-is — it's already
+    // clamped by panWindow/zoomWindowAroundCenter, so viewDomainFor trusts it.
+    const zf = B_LO + 20 * HOUR;
+    const zt = B_LO + 60 * HOUR;
+    expect(viewDomainFor(zf, zt, B_LO, B_HI)).toEqual({ fromMs: zf, toMs: zt });
+  });
+
+  it('falls back to the (ordered) global bounds when there is no zoom', () => {
+    // null zoom → follow the global window.
+    expect(viewDomainFor(null, null, B_LO, B_HI)).toEqual({ fromMs: B_LO, toMs: B_HI });
+    // bounds given out of order are normalized lo..hi.
+    expect(viewDomainFor(null, null, B_HI, B_LO)).toEqual({ fromMs: B_LO, toMs: B_HI });
+  });
+
+  it('ignores a degenerate / non-finite zoom and falls back to bounds', () => {
+    // from === to (zero span) is not a usable zoom → bounds.
+    expect(viewDomainFor(B_LO + 5 * HOUR, B_LO + 5 * HOUR, B_LO, B_HI)).toEqual({
+      fromMs: B_LO,
+      toMs: B_HI,
+    });
+    // from > to (inverted) → not used → bounds.
+    expect(viewDomainFor(B_LO + 60 * HOUR, B_LO + 20 * HOUR, B_LO, B_HI)).toEqual({
+      fromMs: B_LO,
+      toMs: B_HI,
+    });
+    // NaN endpoints → bounds.
+    expect(viewDomainFor(Number.NaN, B_LO + 20 * HOUR, B_LO, B_HI)).toEqual({
+      fromMs: B_LO,
+      toMs: B_HI,
+    });
+  });
+
+  it('returns null when neither a zoom nor usable bounds exist (auto-fit)', () => {
+    // No zoom and non-finite bounds (a non-dashboard caller) → null → Recharts
+    // auto-fits the numeric domain to the data.
+    expect(viewDomainFor(null, null, Number.NaN, Number.NaN)).toBeNull();
+    // Degenerate bounds (lo === hi) are also unusable → null.
+    expect(viewDomainFor(null, null, 5_000, 5_000)).toBeNull();
+  });
+
+  it('prefers a valid zoom even when the bounds are unusable', () => {
+    // A real zoom should win regardless of the bounds' validity.
+    const zf = 10 * HOUR;
+    const zt = 30 * HOUR;
+    expect(viewDomainFor(zf, zt, Number.NaN, Number.NaN)).toEqual({ fromMs: zf, toMs: zt });
   });
 });
 

@@ -223,6 +223,50 @@ export function panWindow(
   return { fromMs: lo + d, toMs: hi + d };
 }
 
+// ---- WS7: live view-domain resolver -----------------------------------------
+// WS7 makes pan/zoom track the gesture LIVE: the chart X axis is a NUMERIC TIME
+// axis whose `domain` is a view window in epoch-ms, DECOUPLED from the loaded data.
+// During a gesture we move the view window every wheel-notch / drag-move so the
+// *already-loaded* points re-render under the new domain (the line visibly slides /
+// scales), then a DEBOUNCED refetch swaps fresh rows in for the settled window.
+//
+// `viewDomainFor` is the tiny PURE piece of that: given the current live window
+// (the zoom span when zoomed, else null = follow the global bounds) and the global
+// `[boundsFromMs, boundsToMs]`, it returns the `[fromMs, toMs]` the numeric XAxis
+// `domain` should use. Kept pure so the (impure) widget never buries the choice in
+// JSX. Rules:
+//   • a valid zoom window (finite, fromMs < toMs) → use it verbatim (live edits to
+//     the zoom window are already clamped by panWindow/zoomWindowAroundCenter);
+//   • otherwise → fall back to the global bounds (ordered);
+//   • if the bounds themselves are non-finite (a non-dashboard caller with no range)
+//     → return null so the caller lets Recharts auto-fit the domain to the data.
+// PURE — no React/DOM.
+export function viewDomainFor(
+  zoomFromMs: number | null | undefined,
+  zoomToMs: number | null | undefined,
+  boundsFromMs: number,
+  boundsToMs: number,
+): WindowMs | null {
+  // Prefer an explicit live zoom window when it's a real, ordered span.
+  if (
+    zoomFromMs != null &&
+    zoomToMs != null &&
+    Number.isFinite(zoomFromMs) &&
+    Number.isFinite(zoomToMs) &&
+    zoomFromMs < zoomToMs
+  ) {
+    return { fromMs: zoomFromMs, toMs: zoomToMs };
+  }
+  // Else fall back to the global bounds, if they're usable.
+  if (Number.isFinite(boundsFromMs) && Number.isFinite(boundsToMs)) {
+    const lo = Math.min(boundsFromMs, boundsToMs);
+    const hi = Math.max(boundsFromMs, boundsToMs);
+    if (lo < hi) return { fromMs: lo, toMs: hi };
+  }
+  // No usable window → let Recharts auto-fit the numeric domain to the data.
+  return null;
+}
+
 // ---- WS6: modifier → cursor resolver ----------------------------------------
 // WS6 gives the focused chart MODAL cursor feedback so the held modifier signals
 // which navigation gesture is armed. The mapping is a tiny pure function so it can

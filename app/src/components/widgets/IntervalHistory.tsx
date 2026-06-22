@@ -92,6 +92,37 @@
 // CLEAR the local zoom (equivalent to Reset; the "Reset zoom" affordance hides).
 // The display window (`zoom`) updates IMMEDIATELY for responsiveness; the actual
 // fetch window (`fetchZoom`) is a debounced copy so rapid ticks don't spam the route.
+//
+// LIVE PAN/ZOOM + NUMERIC TIME AXIS (WS7): WS5/WS6 updated the *window* live but the
+// LINE only re-rendered after the debounced refetch — so the graph didn't track the
+// gesture; it jumped when the new data landed. WS7 makes the motion CONTINUOUS by
+// DECOUPLING the rendered DATA from the rendered VIEW:
+//   • The X axis is now a NUMERIC TIME axis — `dataKey="ts"`, `type="number"`,
+//     `scale="time"`, with an explicit `domain={[view.fromMs, view.toMs]}` and
+//     `allowDataOverflow` so the line CLIPS to the domain. (It was a CATEGORICAL
+//     `dataKey="label"` axis, which can only show the loaded points edge-to-edge and
+//     so can't slide/scale under a moving window.) Tick labels reuse the SAME
+//     `formatHistoryLabel` the categorical `label` used, so they read identically.
+//   • A LIVE VIEW WINDOW (`view = {fromMs,toMs}`) is held in state, driving that
+//     `domain`. Every wheel-notch / drag-move updates `view` IMMEDIATELY, so the
+//     currently-loaded points re-render under the new domain → the graph visibly
+//     slides (pan) / scales (zoom) in real time, with NO refetch in the loop.
+//   • The /api/interval refetch for the SETTLED window is still DEBOUNCED
+//     (NAV_REFETCH_DEBOUNCE_MS); when the new (finer) rows arrive we swap them in and
+//     RECONCILE `view` to the fetched window. A brief blank at a leading edge before
+//     that ~15–40ms refetch lands is acceptable.
+// The window MATH is unchanged — the same PURE panWindow / zoomWindowAroundCenter
+// produce the next window; WS7 just also pushes that window straight into `view`
+// (the numeric domain) instead of only into the debounced fetch. `viewDomainFor`
+// (pure, in lib/intervalZoom.ts) resolves the domain from the zoom-or-bounds.
+//
+// WS7 also fixes a SCROLL LEAK: shift+wheel used to pan the graph AND scroll the
+// page (an early `return` skipped preventDefault for the no-data path, and the
+// `focused` closure could be stale right after focusing). The native wheel listener
+// now reads focus from a fresh REF and ALWAYS preventDefault()s while focused (zoom
+// AND pan paths), and reads BOTH deltaY and deltaX (shift+wheel emits a horizontal
+// delta on many setups). Net: while focused the page never scrolls from the wheel;
+// while unfocused the wheel is untouched.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -106,13 +137,19 @@ import {
   YAxis,
 } from 'recharts';
 import { type IntervalProfileRow } from '@/lib/intervalProfile';
-import { toHistoryPoints, formatGrain, type HistoryPoint } from '@/lib/intervalHistory';
+import {
+  toHistoryPoints,
+  formatGrain,
+  formatHistoryLabel,
+  type HistoryPoint,
+} from '@/lib/intervalHistory';
 import {
   classifyZoomSelection,
   zoomSpanToRange,
   zoomWindowAroundCenter,
   panWindow,
   navCursor,
+  viewDomainFor,
   type WindowMs,
 } from '@/lib/intervalZoom';
 import {
@@ -213,11 +250,12 @@ type LoadState = Loaded | { error: true } | undefined;
 // per-widget state — it never touches the global RangeControl.
 type Zoom = { from: string; to: string; startMs: number; endMs: number };
 
-// An in-progress drag-select on the main chart: the activeLabel (XAxis category
-// value) under the mouse-down and the current mouse position. Both are the
-// `dataKey="label"` strings Recharts reports as `e.activeLabel`. While this is
-// non-null and `refX2` differs from `refX1`, we draw the selection band.
-type DragSel = { refX1: string; refX2: string | null };
+// An in-progress drag-select on the main chart (WS7: numeric axis). With the
+// numeric time XAxis, Recharts reports `e.activeLabel` as the `ts` VALUE (epoch-ms)
+// of the nearest point — NOT the categorical `label` string it was before. So the
+// band endpoints are now NUMBERS (ts). While this is non-null and `refX2` differs
+// from `refX1`, we draw the selection <ReferenceArea x1/x2={ts}>.
+type DragSel = { refX1: number; refX2: number | null };
 
 // Narrow a cached/fetched IntervalResponse into the typed Loaded the UI reads.
 // Centralized so the cache-hydrate path and the revalidate path agree.
@@ -315,6 +353,12 @@ export function IntervalHistory({
   // while focused, and the native wheel listener captures page-scroll ONLY while
   // focused — so scrolling past an unfocused chart is never trapped.
   const [focused, setFocused] = useState(false);
+  // WS7: a FRESH mirror of `focused` for the native wheel listener. The listener's
+  // closure can be stale right after a click focuses the chart (the effect that
+  // re-binds it on `focused` hasn't run yet), which let the very first shift+wheel
+  // leak through to the page. Reading this ref means preventDefault() is never
+  // skipped for a focused chart due to a stale closure. Kept in sync below.
+  const focusedRef = useRef(false);
   // The DEBOUNCED copy of `zoom` that actually drives the fetch (WS5). Gestures
   // update `zoom` immediately (responsive subtitle/reset affordance) but only push
   // into `fetchZoom` after NAV_REFETCH_DEBOUNCE_MS so a flurry of ticks → one fetch.
@@ -345,7 +389,7 @@ export function IntervalHistory({
   // non-passive wheel listener here and draw the focus ring on it.
   const bodyRef = useRef<HTMLDivElement | null>(null);
   // The time (epoch-ms) under the cursor, tracked from the Recharts onMouseMove via
-  // pointByLabel. The wheel handler uses it as the zoom center (fallback: midpoint).
+  // pointFromActive. The wheel handler uses it as the zoom center (fallback: midpoint).
   const hoverTsRef = useRef<number | null>(null);
   // Whether Ctrl is currently held — tracked from document keydown/keyup AND from the
   // native mouse/wheel events, because Recharts' synthetic mouse-state object doesn't
@@ -362,7 +406,9 @@ export function IntervalHistory({
   const fetchTo = fetchZoom ? fetchZoom.to : to;
 
   // Drop any active zoom (and any in-progress drag) whenever the fuel, the account,
-  // or the GLOBAL range changes — a zoom into the old context would be stale.
+  // or the GLOBAL range changes — a zoom into the old context would be stale. WS7:
+  // also reset the live `view` to the new global bounds so the numeric axis domain
+  // snaps to the fresh context (it's reconciled again when the fetch lands).
   useEffect(() => {
     setZoom(null);
     setFetchZoom(null);
@@ -374,6 +420,13 @@ export function IntervalHistory({
       navTimerRef.current = null;
     }
   }, [fuel, from, to, accountId]);
+
+  // WS7: keep the wheel listener's fresh-focus ref in lockstep with `focused`, so a
+  // shift+wheel fired the instant the chart is clicked still preventDefault()s (the
+  // stale closure that caused the page-scroll leak can't win against a ref read).
+  useEffect(() => {
+    focusedRef.current = focused;
+  }, [focused]);
 
   // The GLOBAL window bounds in epoch-ms (the outer clamp for every WS5 gesture).
   // Parsed from the day-string props; null when either bound is absent (a
@@ -574,17 +627,16 @@ export function IntervalHistory({
   const atFinestDetail =
     !!state && !('error' in state) && !state.downsampled && data.length > 0;
 
-  // "End of 15-min data" marker (WS2). Resolve the categorical x-position (a `label`)
-  // to draw the <ReferenceLine> at: the FIRST rendered point at/after fifteenMinFrom.
-  // The X axis is categorical (dataKey="label"), so a ReferenceLine needs an x that
-  // matches an actual label — not a raw timestamp. We only show it when:
+  // "End of 15-min data" marker (WS2 → WS7 numeric axis). The X axis is now a NUMERIC
+  // TIME axis, so the <ReferenceLine> takes the RAW timestamp directly (`x={fmTs}`) —
+  // no need to snap to a rendered point's categorical label. We only show it when:
   //   • fuel is ELECTRIC (there is no 15-min GAS data), AND
-  //   • fifteenMinFrom is non-null, AND
-  //   • fifteenMinFrom falls WITHIN the visible window (after the first point, before
-  //     the last) so it isn't pinned to an axis edge for a window entirely
-  //     before/after the 15-min band.
-  // Out-of-window / null / Gas → null → no marker.
-  const fifteenMinMarkerLabel: string | null = useMemo(() => {
+  //   • fifteenMinFrom is non-null + parseable, AND
+  //   • fifteenMinFrom falls strictly WITHIN the loaded data extent (after the first
+  //     point, before the last) so it isn't pinned to an axis edge for a window
+  //     entirely before/after the 15-min band.
+  // Out-of-window / null / Gas → null → no marker. Returns the numeric ts (epoch-ms).
+  const fifteenMinMarkerTs: number | null = useMemo(() => {
     if (fuel !== 'ELECTRIC') return null;
     const fmFrom = state && !('error' in state) ? state.fifteenMinFrom : null;
     if (!fmFrom || data.length === 0) return null;
@@ -595,21 +647,37 @@ export function IntervalHistory({
     // Strictly inside the band: a marker exactly at the left edge would just overlap
     // the axis (the whole window is 15-min); at/after the right edge it's off-window.
     if (fmTs <= firstTs || fmTs >= lastTs) return null;
-    // Snap to the first rendered point at/after fifteenMinFrom (data is ascending).
-    const pt = data.find((p) => p.ts >= fmTs);
-    return pt ? pt.label : null;
+    return fmTs;
   }, [fuel, state, data]);
 
-  // Look up a rendered point's ts (epoch-ms) + index by its XAxis label. The drag
-  // handlers receive `e.activeLabel` (the category value, i.e. our `label`); we map
-  // it back to the underlying point. A Map keeps the lookup O(1) per move event.
-  const pointByLabel = useMemo(() => {
-    const m = new Map<string, { ts: number; index: number }>();
+  // Look up a rendered point's index by its ts (WS7: numeric axis). With the numeric
+  // time XAxis, Recharts reports `e.activeLabel` as the `ts` VALUE of the nearest
+  // point (not the categorical `label` string it used to). The drag handlers map that
+  // ts back to the underlying point's index — needed by classifyZoomSelection's
+  // distinct-index check. A Map keeps the lookup O(1) per move event.
+  const indexByTs = useMemo(() => {
+    const m = new Map<number, number>();
     data.forEach((p, i) => {
-      if (!m.has(p.label)) m.set(p.label, { ts: p.ts, index: i });
+      if (!m.has(p.ts)) m.set(p.ts, i);
     });
     return m;
   }, [data]);
+
+  // Resolve a Recharts `activeLabel` (a ts value, possibly stringified) to a
+  // { ts, index } for the nearest rendered point. Returns null when the chart has no
+  // data or the value isn't a finite ts we can map. WS7 helper shared by the drag /
+  // pan handlers (replaces the old label-string lookup).
+  const pointFromActive = useCallback(
+    (active: string | number | undefined | null): { ts: number; index: number } | null => {
+      if (active == null) return null;
+      const ts = typeof active === 'number' ? active : Number(active);
+      if (!Number.isFinite(ts)) return null;
+      const idx = indexByTs.get(ts);
+      if (idx == null) return null;
+      return { ts, index: idx };
+    },
+    [indexByTs],
+  );
 
   // The CURRENT window in epoch-ms: the live zoom span when zoomed, else the global
   // bounds. This is the window every WS5 gesture transforms (zoom/pan) before
@@ -617,6 +685,27 @@ export function IntervalHistory({
   // boundsFromMs..boundsToMs.)
   const curFromMs = zoom ? zoom.startMs : boundsFromMs;
   const curToMs = zoom ? zoom.endMs : boundsToMs;
+
+  // ---- WS7: the LIVE numeric-axis domain ------------------------------------
+  // The X-axis `domain` is DERIVED from the live `zoom` window (or the global bounds
+  // when not zoomed) via the PURE viewDomainFor — NOT separate state. Because every
+  // gesture sets `zoom` IMMEDIATELY (applyNavWindow / commitDrag run synchronously,
+  // ahead of the debounced refetch), this memo recomputes on every wheel-notch /
+  // drag-move, so the numeric domain — and therefore the rendered line — slides /
+  // scales LIVE under the *currently-loaded* data. The debounced refetch later swaps
+  // finer rows in for the settled window; the domain already matches it, so the swap
+  // just sharpens the line in place (no jump). `null` ⇒ no explicit domain → Recharts
+  // auto-fits to the data (the non-dashboard / no-bounds caller). PURE-derived.
+  const view = useMemo(
+    () => viewDomainFor(zoom ? zoom.startMs : null, zoom ? zoom.endMs : null, boundsFromMs, boundsToMs),
+    [zoom, boundsFromMs, boundsToMs],
+  );
+  // The concrete numeric domain handed to <XAxis domain>. When `view` is null
+  // (no bounds, no zoom) we fall back to Recharts' auto-fit sentinels so the axis
+  // still spans the loaded data instead of collapsing.
+  const xDomain: [number | 'dataMin', number | 'dataMax'] = view
+    ? [view.fromMs, view.toMs]
+    : ['dataMin', 'dataMax'];
 
   // ---- WS5: apply a gesture-produced ms window ------------------------------
   // Clamp the new [fromMs,toMs] to the global bounds + min span, then:
@@ -675,53 +764,50 @@ export function IntervalHistory({
   const onChartMouseDown = useCallback(
     (e: { activeLabel?: string | number } | null) => {
       setFocused(true);
-      const label = e?.activeLabel;
-      if (label == null) return;
+      // WS7: with the numeric axis, activeLabel is the ts of the nearest point.
+      const pt = pointFromActive(e?.activeLabel);
+      if (!pt) return;
       if (ctrlDownRef.current && boundsValid) {
         // Ctrl+drag PAN: capture the start point's ts + the window we're panning.
-        const a = pointByLabel.get(String(label));
-        const startTs = a ? a.ts : hoverTsRef.current;
+        const startTs = Number.isFinite(pt.ts) ? pt.ts : hoverTsRef.current;
         if (startTs != null && Number.isFinite(startTs)) {
           panDragRef.current = { startTs, fromMs: curFromMs, toMs: curToMs };
           setCtrlDragging(true); // WS6: cursor → 'grabbing' while the pan is live
           return; // suppress the zoom-select band while panning
         }
       }
-      // Plain drag → the existing zoom-select band (UNCHANGED).
-      setDrag({ refX1: String(label), refX2: null });
+      // Plain drag → the existing zoom-select band (WS7: numeric ts endpoints).
+      setDrag({ refX1: pt.ts, refX2: null });
     },
-    [boundsValid, pointByLabel, curFromMs, curToMs],
+    [boundsValid, pointFromActive, curFromMs, curToMs],
   );
 
   const onChartMouseMove = useCallback(
     (e: { activeLabel?: string | number } | null) => {
-      const label = e?.activeLabel;
+      // WS7: activeLabel is the nearest point's ts under the numeric axis.
+      const pt = pointFromActive(e?.activeLabel);
       // Always track the time under the cursor for the wheel-zoom center (WS5).
-      if (label != null) {
-        const pt = pointByLabel.get(String(label));
-        if (pt) hoverTsRef.current = pt.ts;
-      }
+      if (pt) hoverTsRef.current = pt.ts;
       // Ctrl+drag PAN in progress (WS5): pan the captured window by the TIME delta
       // between the start point and the current point (the window moves OPPOSITE the
       // cursor — grabbing the plot drags the data, so dragging right reveals EARLIER
-      // time → shift the window left).
+      // time → shift the window left). WS7: applyNavWindow sets `zoom` synchronously,
+      // so the numeric domain (`view`) — and the line — slide LIVE as the mouse moves.
       const pan = panDragRef.current;
       if (pan) {
-        if (label == null) return;
-        const cur = pointByLabel.get(String(label));
-        if (!cur) return;
-        const cursorDelta = cur.ts - pan.startTs;
+        if (!pt) return;
+        const cursorDelta = pt.ts - pan.startTs;
         const next = panWindow(pan.fromMs, pan.toMs, -cursorDelta, boundsFromMs, boundsToMs);
-        applyNavWindow(next); // debounced refetch; live window updates immediately
+        applyNavWindow(next); // debounced refetch; live domain updates immediately
         return;
       }
-      // Plain zoom-SELECT band (issue #141, UNCHANGED).
+      // Plain zoom-SELECT band (issue #141). WS7: endpoints are numeric ts now.
       if (!drag) return;
-      if (label == null) return;
-      const next = String(label);
+      if (!pt) return;
+      const next = pt.ts;
       setDrag((prev) => (prev && prev.refX2 !== next ? { ...prev, refX2: next } : prev));
     },
-    [drag, pointByLabel, boundsFromMs, boundsToMs, applyNavWindow],
+    [drag, pointFromActive, boundsFromMs, boundsToMs, applyNavWindow],
   );
 
   const commitDrag = useCallback(() => {
@@ -740,18 +826,22 @@ export function IntervalHistory({
       //   • 'too-small' — a deliberate drag below the floor → refuse + show hint.
       //   • 'zoom'      — productive drag → commit the zoom + refetch.
       if (!sel || sel.refX2 == null) return null;
-      const a = pointByLabel.get(sel.refX1);
-      const b = pointByLabel.get(sel.refX2);
-      if (!a || !b || sel.refX2 === sel.refX1) return null;
-      const kind = classifyZoomSelection(a.index, b.index, a.ts, b.ts, MIN_ZOOM_SPAN_MS);
+      // WS7: the band endpoints are ts values; map each to its point index for the
+      // distinct-index (click vs drag) check, and use the ts directly for the span.
+      const aIdx = indexByTs.get(sel.refX1);
+      const bIdx = indexByTs.get(sel.refX2);
+      if (aIdx == null || bIdx == null || sel.refX2 === sel.refX1) return null;
+      const aTs = sel.refX1;
+      const bTs = sel.refX2;
+      const kind = classifyZoomSelection(aIdx, bIdx, aTs, bTs, MIN_ZOOM_SPAN_MS);
       if (kind === 'click') return null;
       if (kind === 'too-small') {
         setZoomHint(true);
         return null;
       }
-      const { from: zf, to: zt } = zoomSpanToRange(a.ts, b.ts);
-      const startMs = Math.min(a.ts, b.ts);
-      const endMs = Math.max(a.ts, b.ts);
+      const { from: zf, to: zt } = zoomSpanToRange(aTs, bTs);
+      const startMs = Math.min(aTs, bTs);
+      const endMs = Math.max(aTs, bTs);
       const z: Zoom = { from: zf, to: zt, startMs, endMs };
       setZoom((prev) => (prev && prev.from === zf && prev.to === zt ? prev : z));
       // WS6: a committed drag-zoom-select is a nav gesture → arm the line-morph.
@@ -764,7 +854,7 @@ export function IntervalHistory({
       setFetchZoom(z);
       return null;
     });
-  }, [pointByLabel, zoom, boundsFromMs, boundsToMs, applyNavWindow]);
+  }, [indexByTs, zoom, boundsFromMs, boundsToMs, applyNavWindow]);
 
   const resetZoom = useCallback(() => {
     setDrag(null);
@@ -779,27 +869,59 @@ export function IntervalHistory({
     setFetchZoom(null);
   }, []);
 
-  // ---- WS5: native non-passive wheel listener (zoom / shift-pan) ------------
+  // ---- WS5/WS7: native non-passive wheel listener (zoom / shift-pan) --------
   // React's onWheel is PASSIVE — it can't preventDefault to stop page scroll. So we
   // attach a native listener with { passive: false } on the chart body, gated on
-  // `focused`: it's only present (and only captures scroll) while the chart is
-  // focused, so scrolling past an UNfocused chart is never trapped. Wheel up = zoom
-  // IN, down = zoom OUT, centered on hoverTsRef (fallback: window midpoint);
-  // Shift+wheel = pan. The window update is immediate; the refetch is debounced.
+  // `focused`: it's only present while the chart is focused, so scrolling past an
+  // UNfocused chart is never trapped. Wheel up = zoom IN, down = zoom OUT, centered on
+  // hoverTsRef (fallback: window midpoint); Shift+wheel = pan. The window update is
+  // immediate (and so, via the derived `view`, the line slides/scales LIVE); the
+  // refetch is debounced.
+  //
+  // WS7 SCROLL-LEAK FIX. Two changes stop shift+wheel from ALSO scrolling the page:
+  //   (1) preventDefault() ALWAYS fires while focused — it's the FIRST thing the
+  //       handler does, BEFORE any no-data / no-bounds early return. Previously a
+  //       `return` on `data.length === 0` skipped preventDefault, leaking the wheel to
+  //       the page; now while focused the page NEVER scrolls from the wheel (the
+  //       gesture math is what no-ops on missing data, not the prevent).
+  //   (2) Focus is read from a FRESH ref (`focusedRef`), not the effect closure: right
+  //       after a click focuses the chart the `focused`-deps effect may not have re-run
+  //       yet, so the closure's `focused` could be stale-false and skip the prevent.
+  //       The ref is always current, so the very first shift+wheel is captured too.
+  // We also read BOTH deltaY AND deltaX: shift+wheel emits a HORIZONTAL delta on many
+  // setups (the OS/browser maps shift+vertical-wheel to deltaX), so we pan by whichever
+  // axis is non-zero (preferring the larger magnitude) and derive direction from its
+  // sign.
+  //
+  // The listener is bound for the lifetime of the chart body (no longer re-bound on
+  // `focused`) and self-gates on `focusedRef.current` at the top: when unfocused it
+  // returns IMMEDIATELY without calling preventDefault, so the page scrolls normally;
+  // when focused it always prevents. Binding it once removes the race where a brief
+  // unbound window (between focusing and the effect re-running) let a wheel leak.
   useEffect(() => {
     const el = bodyRef.current;
-    if (!el || !focused) return;
+    if (!el) return;
     const onWheel = (e: WheelEvent) => {
-      // No-op (and let the page scroll) when we can't compute a window.
+      // WS7: while FOCUSED, ALWAYS swallow the wheel so the page can't scroll —
+      // before any early return. Read focus from the always-fresh ref (not the stale
+      // closure). When unfocused the wheel is untouched (normal page scroll).
+      if (!focusedRef.current) return;
+      e.preventDefault();
+      // Past here the page is already prevented; the gesture math no-ops (returns)
+      // when we can't compute a window — but the page stays put either way.
       if (!boundsValid || data.length === 0) return;
-      e.preventDefault(); // capture: don't scroll the page while navigating
       ctrlDownRef.current = e.ctrlKey || e.metaKey; // keep Ctrl tracking fresh
       const fromMs = zoom ? zoom.startMs : boundsFromMs;
       const toMs = zoom ? zoom.endMs : boundsToMs;
       if (e.shiftKey) {
-        // Shift+wheel → pan. deltaY > 0 (wheel down) pans RIGHT (later); < 0 LEFT.
+        // Shift+wheel → pan. WS7: use whichever wheel axis carries the delta. Many
+        // setups report shift+wheel as deltaX; some still report deltaY — pick the
+        // axis with the larger magnitude so a single source drives the pan. A positive
+        // delta pans RIGHT (later time); negative pans LEFT.
+        const raw = Math.abs(e.deltaX) >= Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+        if (raw === 0) return; // nothing to pan (page already prevented)
         const span = toMs - fromMs;
-        const dir = e.deltaY > 0 ? 1 : -1;
+        const dir = raw > 0 ? 1 : -1;
         const next = panWindow(
           fromMs,
           toMs,
@@ -811,11 +933,14 @@ export function IntervalHistory({
       } else {
         // Wheel up (deltaY < 0) → zoom IN; wheel down → zoom OUT. Center on the
         // hovered ts, falling back to the window midpoint when no hover is tracked.
+        // WS7: fall back to deltaX when a setup reports the plain wheel horizontally.
+        const raw = e.deltaY !== 0 ? e.deltaY : e.deltaX;
+        if (raw === 0) return; // no scroll magnitude → nothing to zoom
         const center =
           hoverTsRef.current != null && Number.isFinite(hoverTsRef.current)
             ? hoverTsRef.current
             : (fromMs + toMs) / 2;
-        const factor = e.deltaY < 0 ? WHEEL_ZOOM_IN_FACTOR : WHEEL_ZOOM_OUT_FACTOR;
+        const factor = raw < 0 ? WHEEL_ZOOM_IN_FACTOR : WHEEL_ZOOM_OUT_FACTOR;
         const next = zoomWindowAroundCenter(
           fromMs,
           toMs,
@@ -830,7 +955,7 @@ export function IntervalHistory({
     };
     el.addEventListener('wheel', onWheel, { passive: false });
     return () => el.removeEventListener('wheel', onWheel);
-  }, [focused, boundsValid, boundsFromMs, boundsToMs, zoom, data.length, applyNavWindow]);
+  }, [boundsValid, boundsFromMs, boundsToMs, zoom, data.length, applyNavWindow]);
 
   // Subtitle: e.g. "Electric · kWh · hourly" (the global time window is in the
   // dashboard header). The grain segment is human-formatted from the numeric
@@ -851,6 +976,21 @@ export function IntervalHistory({
     `${Number(v).toFixed(3)} ${unit}${grainLabel ? ` · ${grainLabel}` : ''}`,
     'usage',
   ];
+
+  // WS7: the tooltip's header label is now the numeric `ts` (the numeric axis reports
+  // the x value, not the old `label` string), so format it back to the SAME
+  // "Jun 8 14:00" style the categorical label used — reusing formatHistoryLabel so the
+  // header reads identically to before. Non-numeric / non-finite → passthrough.
+  const tooltipLabelFormatter = (l: number | string): string => {
+    const ts = typeof l === 'number' ? l : Number(l);
+    return Number.isFinite(ts) ? formatHistoryLabel(ts) : `${l}`;
+  };
+
+  // WS7: numeric-axis TICK formatter — the axis ticks are `ts` values now; format them
+  // with the SAME label style (reused formatHistoryLabel) so tick text reads exactly
+  // as the old categorical `label` did. Non-finite ticks degrade to an empty string.
+  const xTickFormatter = (ts: number): string =>
+    Number.isFinite(ts) ? formatHistoryLabel(ts) : '';
 
   // The chart body (render-prop for ChartShell): the loading/empty/errored states,
   // the revalidate shimmer, the overlay badges, and the Recharts tree.
@@ -961,8 +1101,21 @@ export function IntervalHistory({
             style={{ cursor: chartCursor, userSelect: 'none' }}
           >
             <CartesianGrid stroke="#1e293b" vertical={false} />
+            {/* WS7: NUMERIC TIME X axis. `dataKey="ts"` + type="number" + scale="time"
+                with an explicit `domain={[view.fromMs, view.toMs]}` and
+                `allowDataOverflow` decouples the rendered WINDOW from the loaded DATA:
+                the domain comes from the live `view` (derived from the zoom window), so
+                a gesture that moves `view` slides/scales the line LIVE under the
+                currently-loaded points, and `allowDataOverflow` CLIPS points outside the
+                domain (instead of forcing the axis to span all data). Ticks reuse the
+                old label style via xTickFormatter so they read identically. */}
             <XAxis
-              dataKey="label"
+              dataKey="ts"
+              type="number"
+              scale="time"
+              domain={xDomain}
+              allowDataOverflow
+              tickFormatter={xTickFormatter}
               {...axisStyle}
               minTickGap={40}
               interval="preserveStartEnd"
@@ -977,7 +1130,9 @@ export function IntervalHistory({
             <Tooltip
               contentStyle={tooltipStyle}
               formatter={tooltipFormatter}
-              labelFormatter={(l) => `${l}`}
+              // WS7: the tooltip header is the numeric `ts` now → format it to the same
+              // "Jun 8 14:00" style via formatHistoryLabel so it reads as before.
+              labelFormatter={tooltipLabelFormatter}
             />
             {/* connectNulls={false} is load-bearing: missing intervals must render
                 as line BREAKS, never as straight lines over a gap or fabricated
@@ -1007,10 +1162,12 @@ export function IntervalHistory({
                 first point where true 15-min detail begins (electric only, and only
                 when that boundary falls inside the visible window). Drawn AFTER the
                 Line so it sits on top; the label points right ("15-min data →")
-                toward the finer-resolution side. */}
-            {fifteenMinMarkerLabel != null && (
+                toward the finer-resolution side. WS7: `x` is the raw numeric ts now
+                (the X axis is a numeric time axis), so the line lands exactly at the
+                15-min boundary instant. */}
+            {fifteenMinMarkerTs != null && (
               <ReferenceLine
-                x={fifteenMinMarkerLabel}
+                x={fifteenMinMarkerTs}
                 stroke="#94a3b8"
                 strokeDasharray="4 3"
                 strokeOpacity={0.7}
@@ -1022,7 +1179,8 @@ export function IntervalHistory({
                 }}
               />
             )}
-            {/* The in-progress drag-selection band (issue #141). */}
+            {/* The in-progress drag-selection band (issue #141). WS7: x1/x2 are
+                numeric ts values now (the numeric axis takes raw timestamps). */}
             {drag && drag.refX2 != null && drag.refX2 !== drag.refX1 && (
               <ReferenceArea
                 x1={drag.refX1}
