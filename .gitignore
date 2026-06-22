@@ -8,6 +8,7 @@ app/.next/
 app/next-env.d.ts
 app/.tsbuildinfo
 *.tsbuildinfo
+app/coverage/
 
 # misc
 .DS_Store
