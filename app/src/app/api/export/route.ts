@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
-import { getBills, getMonthlySeries, resolveRequestAccount } from '@/lib/queries';
-import { unknownAccount } from '@/lib/route';
+import { getBills, getMonthlySeries } from '@/lib/queries';
+import { withAccount } from '@/lib/route';
 import { billsToCsv, seriesToCsv } from '@/lib/csv';
 import { filterByYm, filterBillsByYm } from '@/lib/range';
 
@@ -34,23 +34,31 @@ export async function GET(req: Request) {
   const toYm = ymParam(url.searchParams.get('to')) ?? 999912;
   const range = { fromYm, toYm };
 
-  const resolved = await resolveRequestAccount(req.url);
-  if (resolved === 'invalid') return unknownAccount();
-  const acct = resolved;
-  let csv: string;
-  if (dataset === 'series') {
-    const rows = acct ? await getMonthlySeries(acct.id) : [];
-    csv = seriesToCsv(filterByYm(rows, range));
-  } else {
-    const bills = acct ? await getBills(acct.id) : [];
-    csv = billsToCsv(filterBillsByYm(bills, range));
-  }
-
+  // Wrap the CSV string in the download Response (shared by the no-account and
+  // resolved-account paths). seriesToCsv / billsToCsv with no rows already emit
+  // the header line, so the no-account branch is the same header-only CSV the old
+  // `acct ? … : []` path returned.
   const date = new Date().toISOString().slice(0, 10);
-  return new Response(csv, {
-    headers: {
-      'Content-Type': 'text/csv; charset=utf-8',
-      'Content-Disposition': `attachment; filename="ngrid-${dataset}-${date}.csv"`,
-    },
+  const csvResponse = (csv: string) =>
+    new Response(csv, {
+      headers: {
+        'Content-Type': 'text/csv; charset=utf-8',
+        'Content-Disposition': `attachment; filename="ngrid-${dataset}-${date}.csv"`,
+      },
+    });
+  const emptyCsv = () =>
+    csvResponse(
+      dataset === 'series'
+        ? seriesToCsv(filterByYm([], range))
+        : billsToCsv(filterBillsByYm([], range))
+    );
+
+  // The shared resolveRequestAccount dance: bad ?accountId= → 400, no account →
+  // header-only CSV, otherwise build the scoped export.
+  return withAccount(req.url, emptyCsv, async (acct) => {
+    if (dataset === 'series') {
+      return csvResponse(seriesToCsv(filterByYm(await getMonthlySeries(acct.id), range)));
+    }
+    return csvResponse(billsToCsv(filterBillsByYm(await getBills(acct.id), range)));
   });
 }

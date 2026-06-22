@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { withAccount, errorResponse } from '@/lib/route';
+import { withAccount } from '@/lib/route';
 import { getSetting, setSetting } from '@/lib/settings';
 import {
   DEFAULT_DASHBOARD_LAYOUT,
@@ -41,19 +41,17 @@ export async function GET(req: Request) {
     // No account yet (fresh install): the default layout, not yet imported.
     () => NextResponse.json({ layout: DEFAULT_DASHBOARD_LAYOUT, imported: false }),
     async (acct) => {
-      try {
-        const raw = await getSetting(layoutKey(acct.id));
-        if (raw == null) {
-          return NextResponse.json({ layout: DEFAULT_DASHBOARD_LAYOUT, imported: false });
-        }
-        // Repair on read: a saved blob written by an older app version (or a
-        // partial one) is canonicalized through the same merge the client uses,
-        // so the response is always a well-formed DashboardLayout.
-        const parsed = JSON.parse(raw) as unknown;
-        return NextResponse.json({ layout: mergeDashboardLayout(parsed), imported: true });
-      } catch (e) {
-        return errorResponse(e);
+      // withAccount wraps this in errorResponse, so an unexpected throw here
+      // (getSetting / a malformed-but-non-JSON blob) yields the uniform 500.
+      const raw = await getSetting(layoutKey(acct.id));
+      if (raw == null) {
+        return NextResponse.json({ layout: DEFAULT_DASHBOARD_LAYOUT, imported: false });
       }
+      // Repair on read: a saved blob written by an older app version (or a
+      // partial one) is canonicalized through the same merge the client uses,
+      // so the response is always a well-formed DashboardLayout.
+      const parsed = JSON.parse(raw) as unknown;
+      return NextResponse.json({ layout: mergeDashboardLayout(parsed), imported: true });
     }
   );
 }
@@ -70,16 +68,14 @@ export async function PUT(req: Request) {
     // No account to scope to: nothing to persist against.
     () => NextResponse.json({ error: 'no account' }, { status: 400 }),
     async (acct) => {
-      try {
-        if (!isPlausibleLayout(body)) {
-          return NextResponse.json({ error: 'malformed layout' }, { status: 400 });
-        }
-        const layout = mergeDashboardLayout(body);
-        await setSetting(layoutKey(acct.id), JSON.stringify(layout));
-        return NextResponse.json({ layout, imported: true });
-      } catch (e) {
-        return errorResponse(e);
+      // withAccount wraps this in errorResponse for any unexpected throw
+      // (setSetting, etc.); the explicit 400 below stays its own status.
+      if (!isPlausibleLayout(body)) {
+        return NextResponse.json({ error: 'malformed layout' }, { status: 400 });
       }
+      const layout = mergeDashboardLayout(body);
+      await setSetting(layoutKey(acct.id), JSON.stringify(layout));
+      return NextResponse.json({ layout, imported: true });
     }
   );
 }

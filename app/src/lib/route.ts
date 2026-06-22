@@ -27,15 +27,27 @@ export function unknownAccount() {
 //               {empty:true}, ...)
 //   { id }    → handler({ id }) runs and owns the success response.
 // `reqUrl` is req.url (resolveRequestAccount reads ?accountId= off it).
+//
+// The whole thing (resolution + the empty/handler callbacks) is wrapped in
+// `errorResponse`, so an unexpected throw — a Prisma blip in `handler`, etc. —
+// surfaces as the SAME { error } + 500 envelope the write/management routes
+// return, rather than Next's default unstructured 500 (issue #159). Callers
+// therefore do NOT need their own try/catch around the handler body; the few
+// that still have one (a route that wants a NON-500 status on a specific failure)
+// keep it deliberately, and it just runs inside this guard.
 export async function withAccount(
   reqUrl: string,
   empty: () => Response,
   handler: (acct: { id: number }) => Response | Promise<Response>
 ): Promise<Response> {
-  const acct = await resolveRequestAccount(reqUrl);
-  if (acct === 'invalid') return unknownAccount();
-  if (!acct) return empty();
-  return handler(acct);
+  try {
+    const acct = await resolveRequestAccount(reqUrl);
+    if (acct === 'invalid') return unknownAccount();
+    if (!acct) return empty();
+    return await handler(acct);
+  } catch (e) {
+    return errorResponse(e);
+  }
 }
 
 // The repeated catch-all 500 wrapper: { error: String((e as Error)?.message || e) }.
