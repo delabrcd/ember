@@ -125,26 +125,35 @@ export function IntervalHeatmap({
           </span>
         }
       >
-          <>
-            {/* Peak-demand readout caption (#77): value + when. Hidden if no peak. */}
-            {peakReadout && (
-              <div className="mb-1 shrink-0 text-xs text-slate-400">
-                <span className="font-medium text-slate-200">{peakReadout}</span>
+          {/* #150 regression fix: `children` is evaluated EAGERLY by React when
+              IntervalHeatmap renders — BEFORE IntervalWidgetBody decides to show the
+              loading skeleton. During the loading tick useIntervalPayload returns
+              payload === null, so dereferencing payload.grid here would throw an
+              unguarded render-time TypeError and take the WHOLE dashboard down. Gate
+              the populated subtree on `payload &&` so children is falsy until the
+              payload exists; IntervalWidgetBody renders its skeleton/empty meanwhile. */}
+          {payload && (
+            <>
+              {/* Peak-demand readout caption (#77): value + when. Hidden if no peak. */}
+              {peakReadout && (
+                <div className="mb-1 shrink-0 text-xs text-slate-400">
+                  <span className="font-medium text-slate-200">{peakReadout}</span>
+                </div>
+              )}
+              {/* The grid fills the remaining height. HeatmapViz draws a scalable SVG
+                  inside a box of the height we pass; in the fill cell we let it take
+                  the flex remainder via a min-h-0 flex-1 wrapper. We pass the
+                  SERVER-computed grid + rowLabels (no client re-aggregation). */}
+              <div className="min-h-0 flex-1">
+                <HeatmapViz
+                  spec={spec}
+                  grid={payload.grid}
+                  rowLabels={payload.rowLabels}
+                  height={pxHeight ?? 260}
+                />
               </div>
-            )}
-            {/* The grid fills the remaining height. HeatmapViz draws a scalable SVG
-                inside a box of the height we pass; in the fill cell we let it take
-                the flex remainder via a min-h-0 flex-1 wrapper. We pass the
-                SERVER-computed grid + rowLabels (no client re-aggregation). */}
-            <div className="min-h-0 flex-1">
-              <HeatmapViz
-                spec={spec}
-                grid={payload!.grid}
-                rowLabels={payload!.rowLabels}
-                height={pxHeight ?? 260}
-              />
-            </div>
-          </>
+            </>
+          )}
       </IntervalWidgetBody>
     );
   };
