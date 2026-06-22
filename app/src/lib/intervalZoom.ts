@@ -223,6 +223,45 @@ export function panWindow(
   return { fromMs: lo + d, toMs: hi + d };
 }
 
+// ---- WS10: pixel-anchored Ctrl+drag pan delta -------------------------------
+// The Ctrl+drag pan (WS5) originally derived its delta from the nearest DATA
+// POINT's ts under the cursor, measured against the LIVE-MOVING numeric domain.
+// That created a feedback loop: as the pan shifts the domain, the same screen
+// pixel maps to a different ts, so each move fed the next delta → the pan
+// oscillated, quantized to data points (glitchy), and netted back toward the
+// start window ("snapped back"). Deriving a pan from the axis coordinate that the
+// pan itself is moving is the bug.
+//
+// WS10 drives the pan from a RAW PIXEL delta anchored to the drag START instead.
+// Given a horizontal pixel delta from the start of the drag, the plot's pixel
+// width, and the START window's span (ms), this returns the ms the window should
+// shift. It is anchored to fixed START values (start pixel + start window), so
+// there is NO feedback loop — the same `deltaPx` always yields the same `deltaMs`
+// regardless of how far the domain has already moved.
+//
+// SIGN: the caller negates this to "grab the plot" (drag RIGHT → reveal EARLIER
+// time → window moves LEFT). This helper itself returns the proportional ms for a
+// given pixel delta and span; it is direction-agnostic about screen vs window —
+// the caller applies the grab sign. `deltaMs = (deltaPx / plotWidthPx) * spanMs`.
+//
+// Guards: a non-finite input or a non-positive plot width yields 0 (no pan) —
+// you can't map pixels to ms without a positive plot width. PURE — no React/DOM.
+export function pixelPanDeltaMs(
+  deltaPx: number,
+  plotWidthPx: number,
+  spanMs: number,
+): number {
+  if (
+    !Number.isFinite(deltaPx) ||
+    !Number.isFinite(plotWidthPx) ||
+    !Number.isFinite(spanMs) ||
+    plotWidthPx <= 0
+  ) {
+    return 0;
+  }
+  return (deltaPx / plotWidthPx) * spanMs;
+}
+
 // ---- WS7: live view-domain resolver -----------------------------------------
 // WS7 makes pan/zoom track the gesture LIVE: the chart X axis is a NUMERIC TIME
 // axis whose `domain` is a view window in epoch-ms, DECOUPLED from the loaded data.

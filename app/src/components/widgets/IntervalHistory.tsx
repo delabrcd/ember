@@ -173,6 +173,7 @@ import {
   zoomSpanToRange,
   zoomWindowAroundCenter,
   panWindow,
+  pixelPanDeltaMs,
   navCursor,
   viewDomainFor,
   msToYmd,
@@ -204,6 +205,20 @@ const tooltipStyle = {
   fontSize: 12,
 } as const;
 const axisStyle = { stroke: '#475569', fontSize: 11 } as const;
+
+// ---- WS10: plot pixel geometry ----------------------------------------------
+// The Ctrl+drag pan (WS10) converts a raw pixel delta into a window shift, so it
+// needs the PLOT's pixel width (the drawable area inside the axes). We derive it
+// from the chart body's measured width minus the horizontal insets that aren't
+// plot: the LineChart `margin.left`/`margin.right` plus the YAxis `width`. These
+// MUST mirror the values on the <LineChart margin> and <YAxis width> below — they
+// only scale pan sensitivity, so an exact match isn't critical, but keep them in
+// sync. (The X axis sits at the bottom, so it doesn't eat horizontal plot width.)
+const CHART_MARGIN_LEFT = 0;
+const CHART_MARGIN_RIGHT = 10;
+const Y_AXIS_WIDTH = 42;
+// Total horizontal pixels reserved for chrome (everything that isn't plot width).
+const PLOT_X_INSET = CHART_MARGIN_LEFT + CHART_MARGIN_RIGHT + Y_AXIS_WIDTH;
 
 // ---- Zoom tuning ------------------------------------------------------------
 // Hard minimum zoom window (issue #141). A deliberate drag whose span is below this
@@ -439,9 +454,19 @@ export function IntervalHistory({
   // native mouse/wheel events, because Recharts' synthetic mouse-state object doesn't
   // reliably expose modifier keys. Drives the Ctrl+drag pan branch.
   const ctrlDownRef = useRef(false);
-  // The in-flight Ctrl+drag pan, if any: the hover ts + window captured at mouse-down.
-  // While set, plain drag-select is suppressed and moves pan the window instead.
-  const panDragRef = useRef<{ startTs: number; fromMs: number; toMs: number } | null>(null);
+  // The in-flight Ctrl+drag pan, if any (WS10: PIXEL-ANCHORED). Captured at native
+  // mousedown: the START window (`fromMs`/`toMs`), the START cursor `clientX`, and the
+  // plot's pixel width. Every move computes `deltaPx = e.clientX - startClientX`,
+  // converts it to ms via the START span (pixelPanDeltaMs), and shifts the START
+  // window — so there's NO feedback loop (the old version derived the delta from the
+  // nearest data point's ts against the LIVE-moving domain, which oscillated and
+  // snapped back). While set, the Recharts plain drag-select is suppressed.
+  const panDragRef = useRef<{
+    startClientX: number;
+    fromMs: number;
+    toMs: number;
+    plotWidthPx: number;
+  } | null>(null);
   // The debounce timer handle for the gesture refetch.
   const navTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -813,6 +838,15 @@ export function IntervalHistory({
   const curFromMs = zoom ? zoom.startMs : boundsFromMs;
   const curToMs = zoom ? zoom.endMs : boundsToMs;
 
+  // WS10: a FRESH mirror of the current window for the native Ctrl+drag listener.
+  // The native mousedown/move/up listener is bound once (it needs `e.clientX` + the
+  // plot geometry, which Recharts' synthetic state doesn't give reliably), so it must
+  // capture the LATEST window at mousedown without re-binding on every `zoom` change.
+  const curWindowRef = useRef<{ fromMs: number; toMs: number }>({ fromMs: curFromMs, toMs: curToMs });
+  useEffect(() => {
+    curWindowRef.current = { fromMs: curFromMs, toMs: curToMs };
+  }, [curFromMs, curToMs]);
+
   // ---- WS7: the LIVE numeric-axis domain ------------------------------------
   // The X-axis `domain` is DERIVED from the live `zoom` window (or the global bounds
   // when not zoomed) via the PURE viewDomainFor — NOT separate state. Because every
@@ -869,28 +903,26 @@ export function IntervalHistory({
     [boundsValid, boundsFromMs, boundsToMs, scheduleReconcile],
   );
 
-  // ---- Drag handlers (issue #141 zoom-select + WS5 Ctrl+drag pan) -----------
-  // Mouse-down focuses the chart (WS5) and starts either a Ctrl+drag PAN (record the
-  // start hover ts + the current window) or the existing zoom-SELECT band (no Ctrl).
+  // ---- Drag handlers (issue #141 zoom-select; WS10 Ctrl+drag pan is native) --
+  // Mouse-down focuses the chart (WS5). The Ctrl+drag PAN is NO LONGER handled here —
+  // WS10 moved it to a NATIVE mousedown/move/up listener on the chart body, because
+  // the pan needs the raw `clientX` + plot pixel geometry (Recharts' synthetic
+  // `activeLabel` only gives the nearest DATA POINT's ts against the LIVE-moving
+  // domain, which fed back into the next delta and made the pan snap back / glitch).
+  // So here we only START the plain zoom-SELECT band, and ONLY when Ctrl isn't held
+  // (a Ctrl+down is owned by the native pan listener, which also `setCtrlDragging`).
   const onChartMouseDown = useCallback(
     (e: { activeLabel?: string | number } | null) => {
       setFocused(true);
+      // Ctrl+down → the native pan listener owns this gesture; don't start a band.
+      if (ctrlDownRef.current) return;
       // WS7: with the numeric axis, activeLabel is the ts of the nearest point.
       const pt = pointFromActive(e?.activeLabel);
       if (!pt) return;
-      if (ctrlDownRef.current && boundsValid) {
-        // Ctrl+drag PAN: capture the start point's ts + the window we're panning.
-        const startTs = Number.isFinite(pt.ts) ? pt.ts : hoverTsRef.current;
-        if (startTs != null && Number.isFinite(startTs)) {
-          panDragRef.current = { startTs, fromMs: curFromMs, toMs: curToMs };
-          setCtrlDragging(true); // WS6: cursor → 'grabbing' while the pan is live
-          return; // suppress the zoom-select band while panning
-        }
-      }
       // Plain drag → the existing zoom-select band (WS7: numeric ts endpoints).
       setDrag({ refX1: pt.ts, refX2: null });
     },
-    [boundsValid, pointFromActive, curFromMs, curToMs],
+    [pointFromActive],
   );
 
   const onChartMouseMove = useCallback(
@@ -899,38 +931,24 @@ export function IntervalHistory({
       const pt = pointFromActive(e?.activeLabel);
       // Always track the time under the cursor for the wheel-zoom center (WS5).
       if (pt) hoverTsRef.current = pt.ts;
-      // Ctrl+drag PAN in progress (WS5): pan the captured window by the TIME delta
-      // between the start point and the current point (the window moves OPPOSITE the
-      // cursor — grabbing the plot drags the data, so dragging right reveals EARLIER
-      // time → shift the window left). WS7: applyNavWindow sets `zoom` synchronously,
-      // so the numeric domain (`view`) — and the line — slide LIVE as the mouse moves.
-      const pan = panDragRef.current;
-      if (pan) {
-        if (!pt) return;
-        const cursorDelta = pt.ts - pan.startTs;
-        const next = panWindow(pan.fromMs, pan.toMs, -cursorDelta, boundsFromMs, boundsToMs);
-        applyNavWindow(next); // debounced refetch; live domain updates immediately
-        return;
-      }
+      // WS10: the Ctrl+drag PAN is handled by the native listener now, so if a pan is
+      // in flight, do NOT also run the band logic (the native listener suppressed the
+      // band at mousedown, but guard here too).
+      if (panDragRef.current) return;
       // Plain zoom-SELECT band (issue #141). WS7: endpoints are numeric ts now.
       if (!drag) return;
       if (!pt) return;
       const next = pt.ts;
       setDrag((prev) => (prev && prev.refX2 !== next ? { ...prev, refX2: next } : prev));
     },
-    [drag, pointFromActive, boundsFromMs, boundsToMs, applyNavWindow],
+    [drag, pointFromActive],
   );
 
   const commitDrag = useCallback(() => {
-    // End a Ctrl+drag pan first (WS5): the live window already tracked the drag; just
-    // force a synchronous refetch of the final window and clear the pan state.
-    if (panDragRef.current) {
-      panDragRef.current = null;
-      setCtrlDragging(false); // WS6: pan ended → cursor back to 'grab' (Ctrl still held)
-      if (zoom) applyNavWindow({ fromMs: zoom.startMs, toMs: zoom.endMs }, true);
-      else applyNavWindow({ fromMs: boundsFromMs, toMs: boundsToMs }, true);
-      return;
-    }
+    // WS10: a Ctrl+drag pan is committed by the native mouseup handler now, not here.
+    // If one is somehow still in flight when Recharts fires mouseup/leave, just bail
+    // (the band logic must not run during a pan).
+    if (panDragRef.current) return;
     setDrag((sel) => {
       // Three cases (issue #141), decided by the PURE classifyZoomSelection:
       //   • 'click'     — silent no-op (no zoom, no hint).
@@ -1066,6 +1084,93 @@ export function IntervalHistory({
     el.addEventListener('wheel', onWheel, { passive: false });
     return () => el.removeEventListener('wheel', onWheel);
   }, [boundsValid, boundsFromMs, boundsToMs, zoom, data.length, applyNavWindow]);
+
+  // ---- WS10: native Ctrl+drag PAN (pixel-anchored) --------------------------
+  // The Ctrl+drag pan is driven by the RAW PIXEL delta from the drag START — NOT the
+  // nearest data point's ts under the (live-moving) numeric domain. The old version
+  // computed `cursorDelta = pt.ts - pan.startTs` against the domain the pan itself was
+  // moving, so the same screen pixel mapped to a different ts each move → the delta fed
+  // back, the window oscillated/quantized (glitchy) and netted back toward the start
+  // ("snapped back"). WS10 anchors everything to fixed START values, so there is NO
+  // feedback loop: the same `deltaPx` always yields the same window, and the window
+  // tracks the cursor 1:1 and STAYS on release.
+  //
+  // We need `e.clientX` + the plot pixel width, neither of which Recharts' synthetic
+  // mouse-state exposes — so this is a NATIVE listener on the chart body (like the
+  // wheel listener). On Ctrl+mousedown we capture the START window (from the fresh
+  // `curWindowRef`), the START clientX, and the plot width (the body's measured width
+  // minus the chart's non-plot horizontal insets). Each move: `deltaPx = clientX −
+  // startClientX`; `deltaMs = -pixelPanDeltaMs(deltaPx, plotWidthPx, startSpanMs)` (the
+  // NEGATION is the "grab the plot" direction — drag RIGHT → reveal EARLIER time →
+  // window moves LEFT); then `panWindow(startFrom, startTo, deltaMs, …)` clamps to the
+  // global bounds and `applyNavWindow` pushes it into the live `zoom` domain. mouseup
+  // forces a synchronous overscan reconcile of the final window. The non-Ctrl path is
+  // left entirely to Recharts (the plain zoom-SELECT band), so the two never conflict.
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (!el) return;
+
+    const endPan = () => {
+      const pan = panDragRef.current;
+      if (!pan) return;
+      panDragRef.current = null;
+      setCtrlDragging(false); // WS6: pan ended → cursor back to 'grab' (Ctrl still held)
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      // Force a synchronous overscan reconcile of the FINAL window (the live `zoom`
+      // already tracked the drag; this tops up the loaded superset for the rest spot).
+      const w = curWindowRef.current;
+      applyNavWindow({ fromMs: w.fromMs, toMs: w.toMs }, true);
+    };
+
+    const onMove = (e: MouseEvent) => {
+      const pan = panDragRef.current;
+      if (!pan) return;
+      const deltaPx = e.clientX - pan.startClientX;
+      const startSpan = pan.toMs - pan.fromMs;
+      // "Grab the plot": drag right (deltaPx > 0) reveals EARLIER time → window LEFT,
+      // hence the negation. Anchored to the START window + START pixel → no feedback.
+      const deltaMs = -pixelPanDeltaMs(deltaPx, pan.plotWidthPx, startSpan);
+      const next = panWindow(pan.fromMs, pan.toMs, deltaMs, boundsFromMs, boundsToMs);
+      applyNavWindow(next); // live domain updates immediately; reconcile is debounced
+    };
+
+    const onUp = () => endPan();
+
+    const onDown = (e: MouseEvent) => {
+      // Only a PRIMARY-button Ctrl(/Cmd)+drag starts a pan; everything else (plain
+      // drag, right-click) is left to Recharts' handlers (the zoom-SELECT band).
+      if (e.button !== 0) return;
+      if (!(e.ctrlKey || e.metaKey)) return;
+      if (!boundsValid) return;
+      ctrlDownRef.current = true; // keep Ctrl tracking fresh
+      // Plot pixel width = measured body width − the non-plot horizontal insets
+      // (YAxis width + left/right margins). Guard against a zero/negative width.
+      const rect = el.getBoundingClientRect();
+      const plotWidthPx = rect.width - PLOT_X_INSET;
+      if (!(plotWidthPx > 0)) return;
+      const w = curWindowRef.current;
+      panDragRef.current = {
+        startClientX: e.clientX,
+        fromMs: w.fromMs,
+        toMs: w.toMs,
+        plotWidthPx,
+      };
+      setCtrlDragging(true); // WS6: cursor → 'grabbing' while the pan is live
+      // Suppress text-selection / Recharts' band for this gesture; track on the
+      // DOCUMENT so a drag that leaves the chart body keeps panning until mouseup.
+      e.preventDefault();
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    };
+
+    el.addEventListener('mousedown', onDown);
+    return () => {
+      el.removeEventListener('mousedown', onDown);
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+  }, [boundsValid, boundsFromMs, boundsToMs, applyNavWindow]);
 
   // Subtitle: e.g. "Electric · kWh · hourly" (the global time window is in the
   // dashboard header). The grain segment is human-formatted from the numeric
@@ -1203,7 +1308,7 @@ export function IntervalHistory({
               also commits so a drag that ends just off the plot still zooms. */}
           <LineChart
             data={data}
-            margin={{ top: 5, right: 10, left: 0, bottom: 0 }}
+            margin={{ top: 5, right: CHART_MARGIN_RIGHT, left: CHART_MARGIN_LEFT, bottom: 0 }}
             onMouseDown={onChartMouseDown}
             onMouseMove={onChartMouseMove}
             onMouseUp={commitDrag}
@@ -1237,7 +1342,7 @@ export function IntervalHistory({
             />
             <YAxis
               {...axisStyle}
-              width={42}
+              width={Y_AXIS_WIDTH}
               // One precision now (server-chosen grain). 2 decimals reads well for
               // both the small 15-min kWh values and the larger coarse-bucket sums.
               tickFormatter={(v: number) => Number(v).toFixed(2)}

@@ -9,6 +9,7 @@ import {
   panWindow,
   navCursor,
   viewDomainFor,
+  pixelPanDeltaMs,
 } from '../src/lib/intervalZoom';
 
 // Hand-calculated tests for the PURE interval-zoom helpers (issue #141). The
@@ -249,6 +250,43 @@ describe('panWindow (hand-calculated, WS5)', () => {
       fromMs: 20 * HOUR,
       toMs: 40 * HOUR,
     });
+  });
+});
+
+describe('pixelPanDeltaMs (hand-calculated, WS10)', () => {
+  // Proportional: deltaPx / plotWidthPx of the span. With a 1000px plot over a
+  // 10-hour (36_000_000 ms) span, a 100px drag = 1/10 of the plot = 1/10 of the
+  // span = 1 hour = 3_600_000 ms. Worked by hand: (100/1000)*36_000_000.
+  it('maps a fractional pixel delta to the same fraction of the span', () => {
+    expect(pixelPanDeltaMs(100, 1000, 10 * HOUR)).toBe(HOUR);
+  });
+
+  // A full-plot drag (deltaPx === plotWidthPx) shifts by the whole span.
+  it('maps a full-width drag to the full span', () => {
+    expect(pixelPanDeltaMs(800, 800, 6 * HOUR)).toBe(6 * HOUR);
+  });
+
+  // Negative pixel delta → negative ms (direction is the caller's; this is linear).
+  it('preserves sign (a leftward pixel delta is a negative ms delta)', () => {
+    expect(pixelPanDeltaMs(-250, 1000, 8 * HOUR)).toBe(-2 * HOUR);
+  });
+
+  // Zero drag → zero shift.
+  it('returns 0 for a zero pixel delta', () => {
+    expect(pixelPanDeltaMs(0, 1000, 10 * HOUR)).toBe(0);
+  });
+
+  // Guard: a non-positive plot width can't map pixels to ms → 0 (no pan), not Inf.
+  it('returns 0 when plotWidthPx is zero or negative', () => {
+    expect(pixelPanDeltaMs(100, 0, 10 * HOUR)).toBe(0);
+    expect(pixelPanDeltaMs(100, -50, 10 * HOUR)).toBe(0);
+  });
+
+  // Guard: non-finite inputs → 0.
+  it('returns 0 for non-finite inputs', () => {
+    expect(pixelPanDeltaMs(NaN, 1000, HOUR)).toBe(0);
+    expect(pixelPanDeltaMs(100, NaN, HOUR)).toBe(0);
+    expect(pixelPanDeltaMs(100, 1000, NaN)).toBe(0);
   });
 });
 
