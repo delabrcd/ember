@@ -66,6 +66,41 @@ export function parseBucket(raw: string | null): number | null {
   return (BUCKET_LADDER_SECONDS as readonly number[]).includes(secs) ? secs : null;
 }
 
+// WS9 (Fix 3): decide the EFFECTIVE bucket the route should actually serve, given the
+// REQUESTED bucket and the finest REAL grain present in the window. This guards the
+// 15-min grid's hourly→15-min extrapolation so it only ever fires when the window
+// genuinely contains 15-min data.
+//
+// Background: when bucketSecs == 900 the 15-min-grid path fabricates `hourly/4` flat
+// quarter-steps for every hourly-only hour so the line doesn't cliff-end where 15-min
+// recording began (the straddle case). But if the window is ENTIRELY in the hourly-only
+// region (a deep-history view zoomed narrow), there are NO real 15-min rows and that
+// path would produce an ALL-FAKE 15-min view of old hourly data. The operator only
+// wants the extrapolation in the STRADDLE (real 15-min AND hourly-only present).
+//
+// The decision, keyed on the finest in-window grain (the min intervalSeconds present):
+//   • requested != 900            → serve as requested (the SQL aggregate path; no grid).
+//   • finestGrain == 900          → window HAS real 15-min rows (straddle or all-15-min)
+//                                    → keep 900 (the grid; flats fill only the hourly-only
+//                                    portion if any).
+//   • finestGrain == null         → empty window → keep 900 (the grid returns []; nothing
+//                                    to fabricate, and 900 keeps the empty-state grain stable).
+//   • else (finestGrain > 900)    → NO real 15-min rows (entirely hourly-only) → FALL BACK
+//                                    to hourly (3600), the finest REAL grain there, instead
+//                                    of fabricating a 15-min grid of flats.
+// Returns the effective bucket seconds; the route uses it for BOTH the path selection
+// AND the response `grain` (so `grain` reflects what was actually served — 3600 in the
+// fallback). PURE — no DB; the finestGrain probe is injected by the impure route.
+export function resolveServedBucket(
+  requestedBucketSecs: number,
+  finestGrainInWindow: number | null
+): number {
+  if (requestedBucketSecs !== 900) return requestedBucketSecs;
+  if (finestGrainInWindow === 900) return 900; // real 15-min present → grid
+  if (finestGrainInWindow == null) return 900; // empty window → grid (returns [])
+  return 3600; // hourly-only window → serve hourly, don't fabricate a 15-min grid
+}
+
 export function parseSinceDays(raw: string | null): number {
   const n = Number(raw);
   if (!Number.isFinite(n)) return DEFAULT_SINCE_DAYS;

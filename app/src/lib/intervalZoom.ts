@@ -276,7 +276,7 @@ export function viewDomainFor(
 //
 // The precedence is deliberate and matches the gesture-handler precedence in the
 // widget (the Ctrl branch is checked FIRST in onChartMouseDown / the wheel handler):
-//   • NOT focused                  → 'default'    (gestures are inert; normal page)
+//   • NOT focused, no modifier on hover → 'default'  (gestures inert; normal page)
 //   • Ctrl held + actively dragging → 'grabbing'  (the viewport is being grabbed)
 //   • Ctrl held (not yet dragging)  → 'grab'      ("you can grab to move the viewport")
 //   • Shift held                    → 'ew-resize' (shift+wheel pans left/right)
@@ -284,20 +284,40 @@ export function viewDomainFor(
 // Ctrl wins over Shift if (improbably) both are held, mirroring the handlers where
 // the Ctrl+drag pan is checked before anything else. `ctrlDragging` only matters
 // while Ctrl is down, so we read it under the Ctrl branch.
+//
+// WS9 (Fix 1) — HOVER-DISCOVERABILITY: the shift+wheel pan now engages on HOVER, not
+// only when the chart is clicked-to-focus (the operator naturally shift+scrolls on
+// hover). So the MODIFIER cursors (ew-resize / grab / grabbing) must also show while
+// merely HOVERING with a modifier held, even before focus — otherwise the gesture is
+// invisible until you click. The resolver gates the *modifier* cursors on
+// `focused || hovering`; the plain-no-modifier crosshair stays FOCUS-ONLY (a bare
+// hover over an unfocused chart leaves the normal 'default' cursor so the chart
+// doesn't look armed when it isn't, and plain page-scroll past it is undisturbed).
+// `hovering` is optional and defaults false → unchanged for any caller that omits it.
 export type NavCursorState = {
   focused: boolean;
   ctrlDown: boolean;
   shiftDown: boolean;
   ctrlDragging: boolean;
+  // WS9: true while the cursor is over the chart body. Lets a held modifier resolve
+  // its cursor on hover (pan is hover-capturable now), even without focus. Optional
+  // for back-compat with the WS6 callers/tests that only pass the four flags.
+  hovering?: boolean;
 };
 
 export type NavCursor = 'default' | 'crosshair' | 'grab' | 'grabbing' | 'ew-resize';
 
 export function navCursor(state: NavCursorState): NavCursor {
-  if (!state.focused) return 'default';
-  if (state.ctrlDown) return state.ctrlDragging ? 'grabbing' : 'grab';
-  if (state.shiftDown) return 'ew-resize';
-  return 'crosshair';
+  // The modifier cursors are armed when the gesture is reachable — i.e. focused OR
+  // merely hovering (WS9: shift+wheel pans on hover; ctrl+drag still needs the click,
+  // but showing 'grab' on hover with Ctrl is a harmless, consistent hint).
+  const armed = state.focused || !!state.hovering;
+  if (armed && state.ctrlDown) return state.ctrlDragging ? 'grabbing' : 'grab';
+  if (armed && state.shiftDown) return 'ew-resize';
+  // No modifier: the plain drag-to-zoom crosshair is FOCUS-ONLY (a bare hover over an
+  // unfocused chart stays 'default' so it doesn't look armed and page-scroll is free).
+  if (state.focused) return 'crosshair';
+  return 'default';
 }
 
 // Decide whether the /api/interval downsampler actually reduced a result set —

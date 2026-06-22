@@ -7,6 +7,7 @@ import {
   parseBucket,
   parseIntervalQuery,
   resolveWindowBounds,
+  resolveServedBucket,
   FIFTEEN_MIN_SECONDS,
 } from '../src/lib/intervalParams';
 import { BUCKET_LADDER_SECONDS } from '../src/lib/viz/chooseBucket';
@@ -190,5 +191,31 @@ describe('resolveWindowBounds', () => {
     expect(r.from.getTime()).toBeLessThanOrEqual(r.to.getTime());
     expect(r.from.getTime()).toBe(NOW);
     expect(r.to.getTime()).toBe(NOW + 5 * DAY);
+  });
+});
+
+describe('resolveServedBucket (WS9 Fix 3 — straddle-only 15-min extrapolation)', () => {
+  it('serves a non-900 request unchanged regardless of the in-window grain', () => {
+    expect(resolveServedBucket(3600, 900)).toBe(3600);
+    expect(resolveServedBucket(86400, 3600)).toBe(86400);
+    expect(resolveServedBucket(7200, null)).toBe(7200);
+  });
+
+  it('keeps 900 when the window HAS real 15-min rows (straddle / all-15-min)', () => {
+    // finestGrain == 900 ⇒ at least one real 900s row present ⇒ the 15-min grid is
+    // legitimate (flats, if any, fill only the hourly-only side).
+    expect(resolveServedBucket(900, 900)).toBe(900);
+  });
+
+  it('keeps 900 for an EMPTY window (grid returns [], grain stays stable)', () => {
+    expect(resolveServedBucket(900, null)).toBe(900);
+  });
+
+  it('falls back to hourly (3600) when 900 is requested over an HOURLY-ONLY window', () => {
+    // No real 15-min rows (finest is hourly) ⇒ don't fabricate an all-fake 15-min grid;
+    // serve the finest REAL grain (hourly). `grain` in the response will read 3600.
+    expect(resolveServedBucket(900, 3600)).toBe(3600);
+    // Even a daily-only window (finest 86400) falls back to hourly, not to the grid.
+    expect(resolveServedBucket(900, 86400)).toBe(3600);
   });
 });

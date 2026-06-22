@@ -284,7 +284,10 @@ export type IntervalAggregatedRow = {
 // outer SELECT carries them through via MIN()/an aggregate-friendly pick. The SQL
 // can't be hermetically unit-tested (it needs a DB); it's verified against a seeded
 // DB by the lead. The TESTABLE arithmetic lives in the pure chooseBucket / grid
-// shapers. IMPURE (DB).
+// shapers, and — for WS9's trailing-edge anchor (the bucket point lands at the
+// LATEST reading, not the bucket start) — in the pure MIRROR
+// `viz/bucketAnchor.ts::aggregateAnchoredBuckets` (hand-calc tested). Keep the SQL's
+// group/sum/max-anchor in lockstep with that reference. IMPURE (DB).
 export async function getIntervalAggregated(
   accountId: number,
   opts: { fuelType: string; from: Date; to: Date; bucketSecs: number }
@@ -294,14 +297,17 @@ export async function getIntervalAggregated(
   // risking injection (it never comes from free-text — chooseBucket produces it).
   const bucket = Math.max(3600, Math.floor(opts.bucketSecs));
   const rows = await prisma.$queryRaw<
-    { bucketStart: Date; quantity: number; fuelType: string; unit: string }[]
+    { pointStart: Date; quantity: number; fuelType: string; unit: string }[]
   >(Prisma.sql`
     WITH hourly AS (
       -- Reconcile coexisting 15-min (900s) + hourly (3600s) grains to ONE value per
       -- UTC hour (reconcileToHourly's rule, in SQL): 4 complete 15-min slots win
       -- (their SUM), else the hourly row, else (partial 15-min, no hourly) skip.
+      -- latest_start carries the MOST RECENT raw intervalStart that fell into the
+      -- hour, so the bucket can later anchor its point at the freshest reading (WS9).
       SELECT
         to_timestamp(floor(extract(epoch from "intervalStart") / 3600) * 3600) AS hour_start,
+        max("intervalStart") AS latest_start,
         MIN("unit") AS unit,
         CASE
           WHEN count(*) FILTER (WHERE "intervalSeconds" = 900) = 4
@@ -318,22 +324,31 @@ export async function getIntervalAggregated(
       GROUP BY 1
     )
     SELECT
-      to_timestamp(floor(extract(epoch from hour_start) / ${bucket}) * ${bucket}) AS "bucketStart",
+      -- WS9 (Fix 2): anchor each bucket's point at the LATEST reading inside it
+      -- (max latest_start over the bucket's hours), NOT the bucket START. At a coarse
+      -- grain the current partial bucket spans [bucket-start, now]; timestamping it at
+      -- the start plotted the trailing point a full bucket-width in the past, so the
+      -- line appeared to end days before the most recent reading and recent data only
+      -- surfaced after zooming to a finer grain. Anchoring at the latest reading makes
+      -- the line's trailing edge reach the freshest data at EVERY grain. The value is
+      -- still the bucket SUM (unchanged); only the point's x-position moves.
+      max(latest_start) AS "pointStart",
       sum(hour_quantity) AS quantity,
       ${opts.fuelType} AS "fuelType",
       MIN(unit) AS unit
     FROM hourly
     WHERE hour_quantity IS NOT NULL
-    GROUP BY 1
-    ORDER BY 1 ASC
+    -- Group by the epoch-floor BUCKET (the tiling key), but plot at the latest reading.
+    GROUP BY floor(extract(epoch from hour_start) / ${bucket})
+    ORDER BY "pointStart" ASC
   `);
   // $queryRaw returns the SUM as a string/Decimal-ish depending on the driver;
-  // normalize quantity to a JS number (and the bucket start to a Date) so the route
+  // normalize quantity to a JS number (and the point start to a Date) so the route
   // and the chart see plain JSON. unit may be null if the (impossible) hour had no
   // unit — coalesce to '' rather than leak null.
   return rows.map((r) => ({
     fuelType: r.fuelType,
-    intervalStart: r.bucketStart instanceof Date ? r.bucketStart : new Date(r.bucketStart),
+    intervalStart: r.pointStart instanceof Date ? r.pointStart : new Date(r.pointStart),
     intervalSeconds: bucket,
     quantity: Number(r.quantity),
     unit: r.unit ?? '',

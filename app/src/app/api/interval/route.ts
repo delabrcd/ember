@@ -6,7 +6,7 @@ import {
   getFinestGrainInWindow,
 } from '@/lib/queries';
 import { withAccount } from '@/lib/route';
-import { parseIntervalQuery, resolveWindowBounds } from '@/lib/intervalParams';
+import { parseIntervalQuery, resolveWindowBounds, resolveServedBucket } from '@/lib/intervalParams';
 import { chooseBucket } from '@/lib/viz/chooseBucket';
 import { toFifteenMinGrid } from '@/lib/viz/fifteenMinGrid';
 import { MAX_POINTS } from '@/lib/viz/downsampleInterval';
@@ -46,21 +46,31 @@ export const runtime = 'nodejs';
 //                          slice would render too coarse). Validated against the
 //                          ladder (parseBucket); off-ladder/garbage → ignored (server
 //                          picks, unchanged pre-WS8 behaviour). When bucket===900 the
-//                          15-min-grid path still fires, exactly as a server-chosen
-//                          900 would.
+//                          15-min-grid path fires exactly as a server-chosen 900 would
+//                          — subject to WS9 Fix 3 (a 900 over an entirely hourly-only
+//                          window is served as 3600 instead of fabricated flats).
 //
 // THE TWO PATHS (chosen by chooseBucket on the window span, OR by an explicit
-// ?bucket=):
-//   • bucketSecs ≥ 3600  → SQL RECONCILE-THEN-SUM. getIntervalAggregated collapses
+// ?bucket=, then refined by what the window actually CONTAINS — WS9 Fix 3):
+//   • servedBucket ≥ 3600 → SQL RECONCILE-THEN-SUM. getIntervalAggregated collapses
 //     the coexisting 15-min/hourly grains to one value per UTC hour
 //     (reconcileToHourly's rule, in SQL — 4 complete 15-min slots win, else the
-//     hourly row, else skip), then SUMs those into bucketSecs buckets. No row
-//     hydration in Node.
-//   • bucketSecs == 900  → the 15-MINUTE GRID. The window is small here (≤ ~6 days),
+//     hourly row, else skip), then SUMs those into servedBucket buckets. No row
+//     hydration in Node. WS9 Fix 2: each bucket's point is anchored at the LATEST
+//     reading in it (not the bucket start) so the trailing edge reaches recent data.
+//   • servedBucket == 900 → the 15-MINUTE GRID. The window is small here (≤ ~6 days),
 //     so we hydrate the raw 900s+3600s rows and shape a uniform 15-min grid in the
 //     pure toFifteenMinGrid: real 900s where present, four equal quarter-steps for
 //     hourly-only hours (so the line doesn't cliff-end at the start of 15-min data),
 //     gaps elsewhere (never fabricated zeros).
+//
+// WS9 Fix 3 — STRADDLE-ONLY extrapolation. A requested 900 is only SERVED as the
+// 15-min grid when the window genuinely has 15-min rows. resolveServedBucket probes
+// the finest in-window grain: if it's 900 (straddle or all-15-min) → grid (flats fill
+// only the hourly-only side); if the window is entirely hourly-only (no 900s rows) →
+// FALL BACK to hourly (3600) — the finest REAL grain there — instead of fabricating an
+// all-fake 15-min view of old hourly data. `grain` in the response reflects the SERVED
+// bucket (3600 in the fallback).
 //
 // RESPONSE: { rows, grain, fifteenMinFrom, downsampled }
 //   • rows           — the aggregated/gridded points (≤ MAX_POINTS), ascending.
@@ -104,28 +114,43 @@ export async function GET(req: Request) {
       ),
     async (acct) => {
       // fifteenMinFrom + the finest in-window grain are independent of the chosen
-      // path, so fetch them alongside the rows (two cheap index-backed lookups).
-      const [rows, fifteenMinFrom, finestGrain] = await Promise.all([
-        bucketSecs <= 900
-          ? // 15-min grid: hydrate the small raw window and shape it purely.
-            getIntervalRaw(acct.id, { fuelType, from, to }).then((raw) =>
-              toFifteenMinGrid(raw, from.getTime(), to.getTime())
-            )
-          : // Coarser: reconcile-then-sum in SQL, ≤ MAX_POINTS rows back.
-            getIntervalAggregated(acct.id, { fuelType, from, to, bucketSecs }),
+      // path; the finest grain ALSO decides the served bucket (WS9 Fix 3), so probe
+      // both BEFORE fetching the rows (two cheap index-backed lookups).
+      const [fifteenMinFrom, finestGrain] = await Promise.all([
         getFifteenMinFrom(acct.id, fuelType),
         getFinestGrainInWindow(acct.id, { fuelType, from, to }),
       ]);
 
-      // `downsampled` = the returned bucket is coarser than the finest grain the
-      // window actually holds → finer detail exists than what's shown. When the
-      // window has no rows (finestGrain == null) nothing was reduced → false.
-      const downsampled = finestGrain != null && bucketSecs > finestGrain;
+      // WS9 (Fix 3): only extrapolate hourly→15-min in the STRADDLE. When 900 is
+      // requested but the window has NO real 15-min rows (entirely hourly-only — a
+      // deep-history view zoomed narrow), the 15-min grid would fabricate an all-fake
+      // flats view; instead serve the hourly (3600) aggregation — the finest REAL
+      // grain there. `servedBucket` reflects what's actually served and drives BOTH
+      // the path selection and the response `grain`. (When real 15-min IS present —
+      // straddle or all-15-min — servedBucket stays 900 and the grid fills only the
+      // hourly-only side with flats, unchanged.)
+      const servedBucket = resolveServedBucket(bucketSecs, finestGrain);
+
+      const rows =
+        servedBucket <= 900
+          ? // 15-min grid: hydrate the small raw window and shape it purely.
+            await getIntervalRaw(acct.id, { fuelType, from, to }).then((raw) =>
+              toFifteenMinGrid(raw, from.getTime(), to.getTime())
+            )
+          : // Coarser: reconcile-then-sum in SQL, ≤ MAX_POINTS rows back.
+            await getIntervalAggregated(acct.id, { fuelType, from, to, bucketSecs: servedBucket });
+
+      // `downsampled` = the SERVED bucket is coarser than the finest grain the window
+      // actually holds → finer detail exists than what's shown. When the window has no
+      // rows (finestGrain == null) nothing was reduced → false. (In the Fix-3 fallback
+      // servedBucket==3600==finestGrain, so this is correctly false — hourly IS the
+      // finest there.)
+      const downsampled = finestGrain != null && servedBucket > finestGrain;
 
       return NextResponse.json(
         {
           rows,
-          grain: bucketSecs,
+          grain: servedBucket,
           fifteenMinFrom: fifteenMinFrom ? fifteenMinFrom.toISOString() : null,
           downsampled,
         },

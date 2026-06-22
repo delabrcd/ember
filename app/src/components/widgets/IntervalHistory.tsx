@@ -416,6 +416,14 @@ export function IntervalHistory({
   const [ctrlDown, setCtrlDown] = useState(false);
   const [shiftDown, setShiftDown] = useState(false);
   const [ctrlDragging, setCtrlDragging] = useState(false);
+  // WS9 (Fix 1): whether the cursor is currently OVER the chart body. Drives the
+  // modifier-cursor hint on hover (navCursor's `hovering`). The native wheel listener
+  // captures the shift+wheel PAN on hover regardless of focus simply because the
+  // listener only fires for wheel events delivered to the body — so the cursor must be
+  // over it — which is why no separate hover ref is needed there; this state is purely
+  // for the discoverable modifier cursor (the operator naturally shift+scrolls on
+  // hover, and the old `!focusedRef.current → return` gate leaked that to the page).
+  const [hovering, setHovering] = useState(false);
   // WS8: the WS6 line-morph (`animateNextRef`/`animateSwap`) is GONE — see the WS8
   // header note. Nav-driven swaps now happen WITHOUT animation: pan slides the view
   // over a preloaded overscan superset (no swap in the loop), and a finer-grain zoom
@@ -553,7 +561,7 @@ export function IntervalHistory({
   // Derive the chart cursor (WS6) from the focus + modifier + active-drag state via
   // the PURE navCursor resolver. Recomputed on every relevant state change; applied to
   // the LineChart's `style.cursor`. Not focused → 'default' (gestures inert).
-  const chartCursor = navCursor({ focused, ctrlDown, shiftDown, ctrlDragging });
+  const chartCursor = navCursor({ focused, ctrlDown, shiftDown, ctrlDragging, hovering });
 
   // ---- WS8: the overscan reconcile -----------------------------------------
   // A FRESH mirror of `load` so the debounced reconcile reads the current superset
@@ -964,43 +972,50 @@ export function IntervalHistory({
     scheduleReconcile(null, true);
   }, [scheduleReconcile]);
 
-  // ---- WS5/WS7: native non-passive wheel listener (zoom / shift-pan) --------
+  // ---- WS5/WS7/WS9: native non-passive wheel listener (zoom / shift-pan) -----
   // React's onWheel is PASSIVE — it can't preventDefault to stop page scroll. So we
-  // attach a native listener with { passive: false } on the chart body, gated on
-  // `focused`: it's only present while the chart is focused, so scrolling past an
-  // UNfocused chart is never trapped. Wheel up = zoom IN, down = zoom OUT, centered on
-  // hoverTsRef (fallback: window midpoint); Shift+wheel = pan. The window update is
-  // immediate (and so, via the derived `view`, the line slides/scales LIVE); the
-  // refetch is debounced.
+  // attach a native listener with { passive: false } on the chart body. Wheel up =
+  // zoom IN, down = zoom OUT, centered on hoverTsRef (fallback: window midpoint);
+  // Shift+wheel = pan. The window update is immediate (and so, via the derived `view`,
+  // the line slides/scales LIVE); the refetch is debounced.
   //
-  // WS7 SCROLL-LEAK FIX. Two changes stop shift+wheel from ALSO scrolling the page:
-  //   (1) preventDefault() ALWAYS fires while focused — it's the FIRST thing the
-  //       handler does, BEFORE any no-data / no-bounds early return. Previously a
-  //       `return` on `data.length === 0` skipped preventDefault, leaking the wheel to
-  //       the page; now while focused the page NEVER scrolls from the wheel (the
-  //       gesture math is what no-ops on missing data, not the prevent).
-  //   (2) Focus is read from a FRESH ref (`focusedRef`), not the effect closure: right
-  //       after a click focuses the chart the `focused`-deps effect may not have re-run
-  //       yet, so the closure's `focused` could be stale-false and skip the prevent.
-  //       The ref is always current, so the very first shift+wheel is captured too.
-  // We also read BOTH deltaY AND deltaX: shift+wheel emits a HORIZONTAL delta on many
+  // WS9 GATING (capture the PAN on HOVER, keep ZOOM focus-gated). WS7 gated ALL
+  // handling — including preventDefault — on `focusedRef.current`, so shift+scrolling
+  // over the chart WITHOUT first clicking it leaked to the page (the operator
+  // naturally shift+scrolls on hover). The pan gesture (shift+wheel) is now captured
+  // whenever the cursor is over the chart, focused or not; the zoom gesture (plain
+  // wheel) STAYS focus-gated so plain page-scrolling past an unfocused chart still
+  // works (we don't trap it). Ctrl-without-shift while unfocused is left alone too:
+  //   const isPan = e.shiftKey;                         // shift+wheel = the pan
+  //   if (!focusedRef.current && !isPan) return;        // unfocused, non-pan → leave
+  //   e.preventDefault();                               // pan (any focus) / focused
+  // The pan branch computes purely from `zoom`/bounds, so it works regardless of
+  // focus. WS7's other guarantees stand: preventDefault fires BEFORE the no-data
+  // early return (so the page can't scroll from a captured gesture even with no
+  // rows), and focus is read from the always-fresh `focusedRef` (no stale-closure
+  // race on the very first wheel after a click).
+  //
+  // We read BOTH deltaY AND deltaX: shift+wheel emits a HORIZONTAL delta on many
   // setups (the OS/browser maps shift+vertical-wheel to deltaX), so we pan by whichever
   // axis is non-zero (preferring the larger magnitude) and derive direction from its
-  // sign.
+  // sign — preventDefault covers both axes (it's the unconditional `e.preventDefault()`
+  // on the captured path, not an axis-specific guard).
   //
-  // The listener is bound for the lifetime of the chart body (no longer re-bound on
-  // `focused`) and self-gates on `focusedRef.current` at the top: when unfocused it
-  // returns IMMEDIATELY without calling preventDefault, so the page scrolls normally;
-  // when focused it always prevents. Binding it once removes the race where a brief
-  // unbound window (between focusing and the effect re-running) let a wheel leak.
+  // The listener is bound for the lifetime of the chart body. It only fires for wheel
+  // events delivered TO the body (i.e. the cursor is over it), so the hover condition
+  // for the pan is implicit in the listener's target; we still gate the ZOOM on focus
+  // explicitly so an unfocused hover-scroll passes through.
   useEffect(() => {
     const el = bodyRef.current;
     if (!el) return;
     const onWheel = (e: WheelEvent) => {
-      // WS7: while FOCUSED, ALWAYS swallow the wheel so the page can't scroll —
-      // before any early return. Read focus from the always-fresh ref (not the stale
-      // closure). When unfocused the wheel is untouched (normal page scroll).
-      if (!focusedRef.current) return;
+      // WS9: the PAN (shift+wheel) is captured on hover, focused or not; the ZOOM
+      // (plain wheel) needs focus. So: when unfocused AND this isn't a pan, leave the
+      // event for the page (normal scroll). Otherwise we own it → preventDefault. Read
+      // focus from the always-fresh ref (not the stale closure). Ctrl-without-shift on
+      // an unfocused chart falls into the "leave it" branch — the browser handles it.
+      const isPan = e.shiftKey;
+      if (!focusedRef.current && !isPan) return;
       e.preventDefault();
       // Past here the page is already prevented; the gesture math no-ops (returns)
       // when we can't compute a window — but the page stays put either way.
@@ -1103,6 +1118,11 @@ export function IntervalHistory({
         focused ? 'ring-2 ring-amber-500/40' : ''
       }`}
       onMouseDown={() => setFocused(true)}
+      // WS9 (Fix 1): track hover so the shift+wheel PAN is discoverable on hover — the
+      // modifier cursor (ew-resize / grab) shows via navCursor's `hovering` even before
+      // the chart is clicked-to-focus.
+      onMouseEnter={() => setHovering(true)}
+      onMouseLeave={() => setHovering(false)}
     >
       {/* Subtle "updating" shimmer (WS2): a thin top progress bar shown whenever a
           revalidation is in flight AND there's already a chart up — so a reload

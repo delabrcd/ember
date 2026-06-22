@@ -332,11 +332,13 @@ describe('viewDomainFor (WS7 live numeric-axis domain, hand-calculated)', () => 
 describe('navCursor (WS6 modifier → cursor, hand-enumerated)', () => {
   // The full decision table. Precedence: not-focused wins (default); then Ctrl
   // (grabbing while dragging, else grab); then Shift (ew-resize); else crosshair.
-  it('is default whenever the chart is NOT focused, regardless of modifiers', () => {
+  it('is default when NOT focused AND NOT hovering, regardless of modifiers', () => {
+    // `hovering` omitted ⇒ false (WS6 back-compat). An unfocused, un-hovered chart is
+    // never armed: page-scroll past it stays free and it doesn't look interactive.
     expect(navCursor({ focused: false, ctrlDown: false, shiftDown: false, ctrlDragging: false })).toBe('default');
     expect(navCursor({ focused: false, ctrlDown: true, shiftDown: false, ctrlDragging: false })).toBe('default');
     expect(navCursor({ focused: false, ctrlDown: false, shiftDown: true, ctrlDragging: false })).toBe('default');
-    // Even a (stale) ctrlDragging flag can't override an unfocused chart.
+    // Even a (stale) ctrlDragging flag can't arm an unfocused, un-hovered chart.
     expect(navCursor({ focused: false, ctrlDown: true, shiftDown: true, ctrlDragging: true })).toBe('default');
   });
 
@@ -365,5 +367,34 @@ describe('navCursor (WS6 modifier → cursor, hand-enumerated)', () => {
     // A dangling ctrlDragging=true with ctrlDown=false should NOT yield grab/grabbing.
     expect(navCursor({ focused: true, ctrlDown: false, shiftDown: false, ctrlDragging: true })).toBe('crosshair');
     expect(navCursor({ focused: true, ctrlDown: false, shiftDown: true, ctrlDragging: true })).toBe('ew-resize');
+  });
+
+  // WS9 (Fix 1): the shift+wheel PAN is captured on HOVER (not just focus), so the
+  // MODIFIER cursors must be discoverable while merely hovering with a modifier held —
+  // even before the chart is clicked-to-focus. The plain (no-modifier) crosshair stays
+  // FOCUS-ONLY so a bare hover doesn't make an unfocused chart look armed and plain
+  // page-scroll past it is undisturbed.
+  it('shows the Shift pan cursor on HOVER even when not focused (discoverable pan)', () => {
+    expect(
+      navCursor({ focused: false, hovering: true, ctrlDown: false, shiftDown: true, ctrlDragging: false }),
+    ).toBe('ew-resize');
+  });
+
+  it('shows grab/grabbing on HOVER+Ctrl even when not focused', () => {
+    expect(
+      navCursor({ focused: false, hovering: true, ctrlDown: true, shiftDown: false, ctrlDragging: false }),
+    ).toBe('grab');
+    expect(
+      navCursor({ focused: false, hovering: true, ctrlDown: true, shiftDown: false, ctrlDragging: true }),
+    ).toBe('grabbing');
+  });
+
+  it('stays default on a bare hover with NO modifier (crosshair is focus-only)', () => {
+    // Hovering an unfocused chart with no key held must NOT show crosshair — only a
+    // held modifier arms a hover-cursor; otherwise the chart looks inert (and is, for
+    // plain page-scroll).
+    expect(
+      navCursor({ focused: false, hovering: true, ctrlDown: false, shiftDown: false, ctrlDragging: false }),
+    ).toBe('default');
   });
 });
