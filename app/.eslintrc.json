@@ -1,4 +1,19 @@
 {
   "root": true,
-  "extends": "next/core-web-vitals"
+  "extends": "next/core-web-vitals",
+  "overrides": [
+    {
+      "files": ["src/lib/**/*.ts", "src/lib/**/*.tsx"],
+      "parser": "@typescript-eslint/parser",
+      "parserOptions": {
+        "project": "./tsconfig.json"
+      },
+      "plugins": ["@typescript-eslint"],
+      "rules": {
+        "@typescript-eslint/no-floating-promises": "error",
+        "@typescript-eslint/no-misused-promises": "error",
+        "@typescript-eslint/no-explicit-any": "warn"
+      }
+    }
+  ]
 }
