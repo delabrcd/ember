@@ -20,6 +20,7 @@ import type {
   ProfileEncoding,
   ScatterEncoding,
 } from '@/lib/chartSpec';
+import { median, populationStd } from '@/lib/stats';
 
 // Read `row[key]` as a finite number, or `null` if it's absent/non-finite.
 // Generic over the row; the encoding's key (a `NumericKey<Row>`, i.e. a subset of
@@ -195,22 +196,6 @@ function mean(xs: number[]): number {
   let s = 0;
   for (const x of xs) s += x;
   return s / xs.length;
-}
-
-function median(xs: number[]): number {
-  // Caller passes a non-empty array; sort a copy so we don't mutate input.
-  const sorted = [...xs].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
-}
-
-// Population std-dev (divide by N, not N−1): this is a descriptive spread of the
-// observed hours, not an inferential estimate, so N is the right denominator.
-function populationStd(xs: number[], mu: number): number {
-  if (xs.length < 2) return 0;
-  let acc = 0;
-  for (const x of xs) acc += (x - mu) * (x - mu);
-  return Math.sqrt(acc / xs.length);
 }
 
 export function hourOfDayProfile<Row>(

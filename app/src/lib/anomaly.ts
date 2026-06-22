@@ -32,6 +32,7 @@
 // touches totalDueAmount and never feeds /api/verify.
 
 import type { MonthRow } from './chartSpec';
+import { mad, median } from './stats';
 
 // ---------------------------------------------------------------------------
 // Documented constants (style mirrors prediction.ts).
@@ -57,22 +58,6 @@ export const THRESHOLD_K = 3.5;
 export const MAD_SCALE = 1.4826;
 export const MIN_TRAILING = 4;
 export const FLAT_REL_BAND = 0.2;
-
-// Median of a numeric list (caller guards non-empty). Same shape prediction.ts
-// uses inline; factored out here because we need it for both the median and the
-// MAD (median of absolute deviations).
-function median(xs: number[]): number {
-  const s = [...xs].sort((a, b) => a - b);
-  const mid = Math.floor(s.length / 2);
-  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
-}
-
-// Median Absolute Deviation about the median — the robust spread (mirrors
-// prediction.ts intervalSpreadDays). 0 for a flat list.
-function mad(xs: number[]): number {
-  const m = median(xs);
-  return median(xs.map((x) => Math.abs(x - m)));
-}
 
 export type AnomalyFuel = 'elec' | 'gas';
 export type AnomalyMetric = 'usage' | 'rate';
