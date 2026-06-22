@@ -14,6 +14,8 @@ import { extractAmiMeters } from '@/lib/ngrid/interval';
 import { fetchAmiIntervals } from '@/lib/ngrid/portalFetch';
 import { persist } from '@/lib/ngrid/persist';
 import { computeIntervalNextRun } from '@/lib/scheduler/cadence';
+import { errMessage } from '@/lib/ngrid/errMessage';
+import { GQL_URL_RE } from '@/lib/ngrid/collectRaw';
 import type { AccountInfo, CollectResult } from '@/lib/ngrid/types';
 import type { TaskContext, TaskHandler, TaskResult } from '@/lib/scheduler/types';
 
@@ -38,9 +40,9 @@ async function run(ctx: TaskContext): Promise<TaskResult> {
     let rawAccount: unknown = null;
     const onResp = async (resp: import('playwright').Response) => {
       const url = resp.url();
-      if (!/\/api\/[a-z-]+-gql/.test(url)) return;
+      if (!GQL_URL_RE.test(url)) return;
       try {
-        const json = await resp.json();
+        const json = (await resp.json()) as { data?: { billingAccount?: unknown } | null };
         if (json?.data?.billingAccount && !rawAccount) rawAccount = json.data.billingAccount;
       } catch {
         /* not JSON / not interesting */
@@ -111,11 +113,11 @@ async function run(ctx: TaskContext): Promise<TaskResult> {
       status: 'SUCCESS',
       reason: `${intervals.length} interval row(s)`,
     };
-  } catch (err: any) {
+  } catch (err: unknown) {
     return {
       nextRunAt: new Date(now.getTime() + ERROR_BACKOFF_MS),
       status: 'ERROR',
-      reason: String(err?.message || err).slice(0, 200),
+      reason: errMessage(err),
     };
   }
 }

@@ -4,6 +4,7 @@
 // runs on manual but notify does not), runs once, returns nextRunAt=null.
 // Non-fatal — a weather hiccup must never fail the tick (run.ts:224-230).
 import { syncHistoricalWeather } from '@/lib/weather/sync';
+import { errMessage } from '@/lib/ngrid/errMessage';
 import type { TaskContext, TaskHandler, TaskResult } from '@/lib/scheduler/types';
 
 async function run(ctx: TaskContext): Promise<TaskResult> {
@@ -13,8 +14,8 @@ async function run(ctx: TaskContext): Promise<TaskResult> {
     const w = await syncHistoricalWeather(task.accountId);
     log(`weather: ${w.dailyUpserted} daily, ${w.monthsUpserted} monthly${w.skipped ? ` (${w.skipped})` : ''}`);
     return { nextRunAt: null, status: 'SUCCESS' };
-  } catch (werr: any) {
-    log(`weather sync skipped: ${String(werr?.message || werr).slice(0, 200)}`);
+  } catch (werr: unknown) {
+    log(`weather sync skipped: ${errMessage(werr)}`);
     // Non-fatal: still self-deactivate (full-scrape re-arms next pass).
     return { nextRunAt: null, status: 'SUCCESS', reason: 'weather sync skipped' };
   }
