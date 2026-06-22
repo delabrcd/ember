@@ -1040,6 +1040,13 @@ export function IntervalHistory({
       const isPan = e.shiftKey || horizontalWheel;
       if (!focusedRef.current && !isPan) return;
       e.preventDefault();
+      // STOP the event from bubbling to the cockpit paginator's ancestor wheel
+      // listener (WidgetLayout's trackpad horizontal-scroll paging), which would
+      // otherwise also act on this horizontal wheel and FLIP THE PAGE — sliding the
+      // chart off-screen so a pan "works once then stops". preventDefault only
+      // suppresses the browser's default scroll, NOT ancestor JS listeners; we own
+      // this gesture, so stop propagation too.
+      e.stopPropagation();
       // Past here the page is already prevented; the gesture math no-ops (returns)
       // when we can't compute a window — but the page stays put either way.
       if (!boundsValid || data.length === 0) return;
