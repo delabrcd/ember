@@ -888,6 +888,11 @@ export function IntervalHistory({
       if (lo <= boundsFromMs + 1000 && hi >= boundsToMs - 1000) {
         setDrag(null);
         setZoom(null);
+        // WS11: keep the fresh window mirror in lockstep SYNCHRONOUSLY — a reset means
+        // the current window is the global bounds. (The `[curFromMs,curToMs]` effect
+        // also syncs it on the next commit; writing here makes a same-burst follow-up
+        // wheel/drag read the just-applied window instead of a one-commit-stale value.)
+        curWindowRef.current = { fromMs: boundsFromMs, toMs: boundsToMs };
         scheduleReconcile(null, runNow); // null view → follow the global window
         return;
       }
@@ -896,6 +901,11 @@ export function IntervalHistory({
       setZoom((prev) =>
         prev && prev.startMs === lo && prev.endMs === hi ? prev : z,
       );
+      // WS11: mirror the just-committed window into the fresh ref SYNCHRONOUSLY so a
+      // back-to-back wheel notch (a burst that fires before React commits `setZoom`)
+      // ACCUMULATES from this window, not the last-committed one — a clean constant-span
+      // slide per notch. The `[curFromMs,curToMs]` effect still reconciles it on commit.
+      curWindowRef.current = { fromMs: lo, toMs: hi };
       // WS8: hand the reconcile the NEXT view window explicitly (the gesture's result)
       // so it doesn't depend on React having committed `zoom`.
       scheduleReconcile({ fromMs: lo, toMs: hi }, runNow);
@@ -1051,8 +1061,19 @@ export function IntervalHistory({
       // when we can't compute a window — but the page stays put either way.
       if (!boundsValid || data.length === 0) return;
       ctrlDownRef.current = e.ctrlKey || e.metaKey; // keep Ctrl tracking fresh
-      const fromMs = zoom ? zoom.startMs : boundsFromMs;
-      const toMs = zoom ? zoom.endMs : boundsToMs;
+      // WS11: read the CURRENT window from the FRESH committed mirror (`curWindowRef`),
+      // NOT the captured `zoom` closure — the SAME ref WS10's Ctrl+drag uses. A burst of
+      // wheel notches fires faster than React commits `setZoom` + re-binds this listener,
+      // so the closure's `zoom` was STALE: each notch then panned from the SAME old
+      // window, and a stale read that momentarily fell back to the full `boundsFromMs..
+      // boundsToMs` made the span JUMP to the whole range — so repeated horizontal pans
+      // DISTORTED the window (the right edge pinned ~now while the left ran far back: a
+      // widen, not a clean slide). Reading the ref means each notch ACCUMULATES from where
+      // the last one committed, with a CONSTANT span (panWindow preserves the span and
+      // only clamps the SHIFT at the global edge). Mirrors WS10's curWindowRef fix.
+      const cur = curWindowRef.current;
+      const fromMs = cur.fromMs;
+      const toMs = cur.toMs;
       if (isPan) {
         // Shift+wheel (or a horizontal wheel) → pan. Use whichever wheel axis carries
         // the delta. Many
@@ -1096,7 +1117,12 @@ export function IntervalHistory({
     };
     el.addEventListener('wheel', onWheel, { passive: false });
     return () => el.removeEventListener('wheel', onWheel);
-  }, [boundsValid, boundsFromMs, boundsToMs, zoom, data.length, applyNavWindow]);
+    // WS11: `zoom` is no longer a dep — the handler reads the CURRENT window from the
+    // fresh `curWindowRef.current` (a stable ref), so the listener no longer needs to
+    // re-bind on every wheel-notch's `setZoom`. That removal is also what makes the pan
+    // accumulate correctly: a stable handler reading a fresh ref can't read a stale
+    // closure mid-burst. The remaining deps fully determine the gesture math.
+  }, [boundsValid, boundsFromMs, boundsToMs, data.length, applyNavWindow]);
 
   // ---- WS10: native Ctrl+drag PAN (pixel-anchored) --------------------------
   // The Ctrl+drag pan is driven by the RAW PIXEL delta from the drag START — NOT the

@@ -251,6 +251,72 @@ describe('panWindow (hand-calculated, WS5)', () => {
       toMs: 40 * HOUR,
     });
   });
+
+  // WS11: the wheel-pan bug was the impure shell reading a STALE window (the `zoom`
+  // closure) each notch — a stale read that fell back to the full bounds made the span
+  // JUMP, distorting (widening) the window instead of sliding it. The fix reads the
+  // FRESH committed window per notch and re-pans from it. These tests prove the PURE
+  // contract the fix relies on: feeding panWindow's OWN output back in (the
+  // "accumulate from the latest committed window" loop the widget now does via
+  // curWindowRef) translates with a CONSTANT span every notch, and at the global edge
+  // it clamps the SHIFT, never the span.
+  describe('WS11 repeated-pan accumulation (constant span, shift-clamped at the edge)', () => {
+    // A zoomed-in 10h window sitting interior of the 100h global bounds.
+    const WIN_SPAN = 10 * HOUR;
+    // One wheel notch = WHEEL_PAN_FRACTION (0.12) of the CURRENT span (12% of 10h = 1.2h).
+    const NOTCH = -0.12 * WIN_SPAN; // negative = pan LEFT (earlier)
+
+    it('keeps a CONSTANT span across many left-pan notches (no widen/compress)', () => {
+      let win = { fromMs: 60 * HOUR, toMs: 60 * HOUR + WIN_SPAN }; // [60h,70h]
+      const spans: number[] = [];
+      // Five notches, each re-panning from the PRIOR output (the fixed accumulate loop).
+      for (let i = 0; i < 5; i++) {
+        win = panWindow(win.fromMs, win.toMs, NOTCH, B_LO, B_HI);
+        spans.push(win.toMs - win.fromMs);
+      }
+      // Every notch preserved the 10h span exactly — the distortion (span growth) is gone.
+      for (const s of spans) expect(s).toBe(WIN_SPAN);
+      // And it actually MOVED left by 5 notches (1.2h each = 6h): [54h,64h].
+      expect(win.fromMs).toBe(60 * HOUR - 5 * 1.2 * HOUR);
+      expect(win.toMs).toBe(70 * HOUR - 5 * 1.2 * HOUR);
+    });
+
+    it('clamps the SHIFT (not the span) when repeated pans reach the LEFT wall', () => {
+      // Start near the left wall so a few notches run into it. [3h,13h], span 10h.
+      let win = { fromMs: 3 * HOUR, toMs: 13 * HOUR };
+      for (let i = 0; i < 10; i++) {
+        win = panWindow(win.fromMs, win.toMs, NOTCH, B_LO, B_HI);
+      }
+      // Pinned at the left wall: lo === 0, span STILL 10h (the wall reduced the shift,
+      // never the span). The right edge is NOT dragged past its proportional spot.
+      expect(win.fromMs).toBe(B_LO);
+      expect(win.toMs - win.fromMs).toBe(WIN_SPAN);
+      expect(win.toMs).toBe(WIN_SPAN);
+    });
+
+    it('clamps the SHIFT (not the span) when repeated pans reach the RIGHT wall', () => {
+      const RIGHT_NOTCH = +0.12 * WIN_SPAN; // pan RIGHT (later)
+      let win = { fromMs: 87 * HOUR, toMs: 97 * HOUR }; // span 10h, near the right wall
+      for (let i = 0; i < 10; i++) {
+        win = panWindow(win.fromMs, win.toMs, RIGHT_NOTCH, B_LO, B_HI);
+      }
+      // Pinned at the right wall: hi === 100h, span STILL 10h.
+      expect(win.toMs).toBe(B_HI);
+      expect(win.toMs - win.fromMs).toBe(WIN_SPAN);
+      expect(win.fromMs).toBe(B_HI - WIN_SPAN);
+    });
+
+    it('a stale FULL-bounds read (the OLD bug) pins and cannot pan — the fix avoids it', () => {
+      // The old code, on a stale read, could fall back to the FULL global window.
+      // Re-panning from there does nothing (a full-bounds window has no travel) — which
+      // is exactly why the view looked "stuck/distorted at the right edge". The fix never
+      // feeds the full bounds in mid-pan; it feeds the fresh zoomed window. We assert the
+      // degenerate full-bounds input is inert so the fix's reliance on a NON-full input
+      // is explicit.
+      const full = panWindow(B_LO, B_HI, NOTCH, B_LO, B_HI);
+      expect(full).toEqual({ fromMs: B_LO, toMs: B_HI });
+    });
+  });
 });
 
 describe('pixelPanDeltaMs (hand-calculated, WS10)', () => {
