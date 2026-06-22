@@ -54,7 +54,6 @@ import {
   FIT_BREAKPOINT,
   STRIP_COLS,
   computePageFit,
-  findFreeSlot,
   generateDefaultPlacements,
   generateStripPlacements,
   mergePlacements,
@@ -64,6 +63,10 @@ import {
   readStrip,
   rebaseToLocal,
   withStrip,
+  buildPersistBlob,
+  clampToPagesSafe,
+  foldSpacerDefaults,
+  repairStrip,
   type Breakpoint,
   type Placement,
   type Placements,
@@ -199,37 +202,10 @@ export function WidgetLayout(props: WidgetLayoutProps) {
     });
     if (spacerIds.length === 0) return base;
     // SPACERS (CHANGE 2) aren't produced by the generator, so fold each placed
-    // spacer's SAVED geometry (or, missing, a free-slot fallback at its registry
-    // default size) into every breakpoint's defaults — this is what lets
-    // mergePlacements PRESERVE spacers (it keeps only ids present in the default;
-    // without this a spacer would be dropped on the next repair). The saved geometry
-    // is authoritative when present so a moved/resized spacer round-trips.
-    const out: Placements = { ...base };
-    const { defaultSize } = getWidget(spacerIds[0]); // all spacers share the prototype size
-    for (const key of Object.keys(COLS) as Breakpoint[]) {
-      const arr = [...(base[key] ?? [])];
-      const cols = COLS[key];
-      const savedArr = savedPlacements?.[key] ?? [];
-      for (const id of spacerIds) {
-        const saved = savedArr.find((p) => p.i === id);
-        if (saved) {
-          arr.push({ ...saved, minW: defaultSize.minW, minH: defaultSize.minH });
-        } else {
-          const slot = findFreeSlot(arr, defaultSize, cols);
-          arr.push({
-            i: id,
-            x: slot.x,
-            y: slot.y,
-            w: Math.min(defaultSize.w, cols),
-            h: defaultSize.h,
-            minW: defaultSize.minW,
-            minH: defaultSize.minH,
-          });
-        }
-      }
-      out[key] = arr;
-    }
-    return out;
+    // spacer's saved geometry (or a free-slot fallback) into every breakpoint's
+    // defaults via the pure transform — what lets mergePlacements PRESERVE spacers.
+    // All spacers share the prototype size, so we read it off the first id.
+    return foldSpacerDefaults(base, spacerIds, savedPlacements, getWidget(spacerIds[0]).defaultSize);
   }, [statIds, chartIds, panelIds, spacerIds, savedPlacements]);
 
   // The effective per-breakpoint layouts RGL renders: the saved placements
@@ -416,24 +392,11 @@ export function WidgetLayout(props: WidgetLayoutProps) {
     // to respect each card's minW (issue #73 fix: 8 cards × minW=2 → 6 per row +
     // 2, never the old four crushed w=1 cards) and carries its min floor.
     const source = saved ?? generateStripPlacements(statIds, widgetMins(statIds));
-    // Repair against the placed universe: a pinned widget must still be a placed,
-    // available widget (its page-grid counterpart was removed → drop the pin too).
-    const known = new Set(placedIds);
-    const kept = source.filter((p) => known.has(p.i));
-    // Stamp each tile's content-fit min bounds from the registry so it can't be
-    // dragged uselessly small, and lift a sub-min width UP to the floor so a
-    // SAVED strip persisted by the buggy generator (a crushed w=1 stat) self-heals
-    // instead of staying below the minW RGL enforces on resize.
-    return kept.map((p) => {
-      const { defaultSize } = getWidget(p.i);
-      return {
-        ...p,
-        minW: defaultSize.minW,
-        minH: defaultSize.minH,
-        w: Math.max(p.w, defaultSize.minW),
-        h: Math.max(p.h, defaultSize.minH),
-      };
-    });
+    // Repair against the placed universe (drop a pin whose widget was removed) and
+    // stamp/lift each kept tile to its registry min floor (self-heal a crushed
+    // SAVED strip). The pure transform owns the array surgery; we hand it the
+    // registry box lookup so it stays registry-free.
+    return repairStrip(source, placedIds, (id) => getWidget(id).defaultSize);
   }, [statIds, placedIds, savedPlacements]);
 
   // The set of pinned widget ids (whatever currently lives in the strip). Drives
@@ -645,36 +608,26 @@ export function WidgetLayout(props: WidgetLayoutProps) {
   // applying the pinned-widget fold-back and the paged clamp (same transform the
   // fed layout uses, so the persisted geometry and the view-mode partition agree).
   const buildNext = (all: Layouts): Placements => {
-    const next: Placements = {};
+    // Sanitize each breakpoint's RGL items down to serializable placements, then
+    // hand the pinned-fold-back + paged-clamp surgery to the pure transform. The
+    // strip is read off the saved blob (the authority) so a strip the user arranged
+    // survives a later chart drag (`layouts` strips the key via mergePlacements).
+    const sanitizedByBp: Partial<Record<Breakpoint, Placement[]>> = {};
     for (const key of Object.keys(COLS) as Breakpoint[]) {
       const arr = all[key];
-      if (!Array.isArray(arr)) continue;
-      let edited = arr.map((l) => sanitize(l));
-      // At lg, when the strip is shown, the grid excluded the PINNED tiles — fold
-      // their existing saved page placements back so the persisted lg blob stays
-      // complete (so unpinning, and md/sm/xs, keep each widget's page geometry).
-      if (key === FIT_BREAKPOINT && pinActive) {
-        const prevLg = layouts[FIT_BREAKPOINT] ?? [];
-        const pinned = prevLg.filter((p) => pinnedIds.has(p.i));
-        edited = [...pinned, ...edited];
-      }
-      // Clamp the edited lg grid to pages so a tile dragged across a boundary in
-      // the (scrolling) customize canvas is re-banded — keeping the view-mode
-      // partition straddle-free. Only the paged (lg, fit) breakpoint is clamped.
-      if (key === FIT_BREAKPOINT && fitActive) {
-        const grid = edited.filter((p) => gridIds.includes(p.i));
-        const rest = edited.filter((p) => !gridIds.includes(p.i));
-        edited = [...rest, ...clampToPagesSafe(grid, rowsPerPage)];
-      }
-      next[key] = edited;
+      if (Array.isArray(arr)) sanitizedByBp[key] = arr.map((l) => sanitize(l));
     }
-    // Carry the pinned strip's placements through a PAGE-grid persist untouched —
-    // they ride the same blob under STRIP_KEY (issue #73 polish #4) and a page edit
-    // must not drop them. Read from the saved blob (the authority) so a strip the
-    // user arranged survives a later chart drag. `layouts` strips the key via
-    // mergePlacements, so we pull it straight off savedPlacements.
-    const strip = readStrip(savedPlacements);
-    return strip ? withStrip(next, strip) : next;
+    return buildPersistBlob({
+      sanitizedByBp,
+      layouts,
+      pinnedIds,
+      gridIds,
+      rowsPerPage,
+      fitBp: FIT_BREAKPOINT,
+      pinActive,
+      fitActive,
+      savedStrip: readStrip(savedPlacements),
+    });
   };
 
   // The latest full layout RGL has emitted (its post-compaction state), captured
@@ -968,17 +921,6 @@ export function WidgetLayout(props: WidgetLayoutProps) {
       )}
     </div>
   );
-}
-
-// Clamp wrapper that no-ops on an empty grid (paginatePlacements handles non-empty
-// via clampToPages; we re-derive the clamped set here for the persisted blob + the
-// fed layout so they agree). Imported clampToPages is pure; this just guards the
-// rowsPerPage and keeps the call sites terse.
-function clampToPagesSafe(placements: Placement[], rowsPerPage: number): Placement[] {
-  if (placements.length === 0) return placements;
-  // Reuse the engine's partition then flatten (it clamps internally), so a single
-  // source of truth governs both the view partition and the persisted geometry.
-  return paginatePlacements(placements, rowsPerPage).flat();
 }
 
 // Page-boundary guides for the customize canvas: faint dashed lines at each page

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { CHART_SPECS } from '../src/lib/chartSpec';
 import type { Overview } from '../src/components/useDashboardData';
-import { WIDGETS, BILLS_PANEL_TYPE, INTERVAL_HEATMAP_WIDGET_TYPE, INTERVAL_HISTORY_WIDGET_TYPE, INTERVAL_WIDGET_TYPE, SPACER_PREFIX, chartWidgetType, statWidgetType, getWidget, isSpacerId, widgetMins } from '../src/lib/widgets/registry';
+import { WIDGETS, BILLS_PANEL_TYPE, INTERVAL_HEATMAP_WIDGET_TYPE, INTERVAL_HISTORY_WIDGET_TYPE, INTERVAL_WIDGET_TYPE, SPACER_PREFIX, chartWidgetType, statWidgetType, defaultVisibleWidgetTypes, getWidget, isSpacerId, widgetMins } from '../src/lib/widgets/registry';
 import type { MonthRow } from '../src/lib/chartSpec';
 import {
   STAT_IDS,
@@ -131,6 +131,29 @@ describe('widget registry completeness', () => {
     expect(w.defaultSize.h).toBe(7);
     expect(w.defaultSize.minW).toBeGreaterThanOrEqual(3);
     expect(w.defaultSize.minH).toBeGreaterThanOrEqual(3);
+  });
+
+  it('defaultVisibleWidgetTypes derives exactly the 3 interval tiles, in registry order (#155)', () => {
+    // The dashboard derives its interval-widget list / fullChartUniverse / palette
+    // from this single source instead of three hardcoded id-lists. It must be EXACTLY
+    // the self-contained interval tiles (load-shape, history, heatmap) — and nothing
+    // else: charts own visibility via widgetConfig, stats via isVisible, the bills
+    // panel + spacer via placement presence, so none of those carry defaultVisible.
+    expect(defaultVisibleWidgetTypes()).toEqual([
+      INTERVAL_WIDGET_TYPE,
+      INTERVAL_HISTORY_WIDGET_TYPE,
+      INTERVAL_HEATMAP_WIDGET_TYPE,
+    ]);
+    // The flag agrees with the list: precisely the 3 interval defs are defaultVisible.
+    expect(Object.values(WIDGETS).filter((w) => w.defaultVisible).length).toBe(3);
+    for (const t of [INTERVAL_WIDGET_TYPE, INTERVAL_HISTORY_WIDGET_TYPE, INTERVAL_HEATMAP_WIDGET_TYPE]) {
+      expect(getWidget(t).defaultVisible, `${t} should be defaultVisible`).toBe(true);
+    }
+    // A representative non-interval widget of each other kind is NOT defaultVisible.
+    expect(getWidget(BILLS_PANEL_TYPE).defaultVisible).toBe(false);
+    expect(getWidget(SPACER_PREFIX).defaultVisible).toBe(false);
+    expect(getWidget(chartWidgetType(CHART_SPECS[0].id)).defaultVisible).toBe(false);
+    expect(getWidget(statWidgetType(STAT_IDS[0])).defaultVisible).toBe(false);
   });
 
   it('throws on an unknown widget type (a missing registration is a bug)', () => {
