@@ -4,10 +4,12 @@ import {
   parseSinceDays,
   parseDate,
   parseGrain,
+  parseBucket,
   parseIntervalQuery,
   resolveWindowBounds,
   FIFTEEN_MIN_SECONDS,
 } from '../src/lib/intervalParams';
+import { BUCKET_LADDER_SECONDS } from '../src/lib/viz/chooseBucket';
 
 // Hand-calculated tests for the PURE interval query-param parser shared by
 // /api/interval + /api/interval/heatmap + /api/interval/profile (issue #77). The
@@ -52,6 +54,34 @@ describe('parseGrain', () => {
   });
 });
 
+// WS8: parseBucket accepts ONLY a chooseBucket-ladder width (seconds); anything else
+// (absent, off-ladder, garbage) → null = "server picks the bucket".
+describe('parseBucket', () => {
+  it('accepts each ladder width verbatim', () => {
+    for (const w of BUCKET_LADDER_SECONDS) {
+      expect(parseBucket(String(w))).toBe(w);
+    }
+    // Spot-check the two grains the widget actually sends most.
+    expect(parseBucket('900')).toBe(900); // 15-min grid path
+    expect(parseBucket('3600')).toBe(3600); // hourly
+    expect(parseBucket('604800')).toBe(604800); // 1 week (coarsest)
+  });
+
+  it('returns null for absent / off-ladder / garbage values', () => {
+    expect(parseBucket(null)).toBeNull(); // absent → server picks
+    expect(parseBucket('1800')).toBeNull(); // 30 min: not on the ladder
+    expect(parseBucket('0')).toBeNull();
+    expect(parseBucket('-3600')).toBeNull();
+    expect(parseBucket('abc')).toBeNull();
+  });
+
+  it('floors a fractional value before the ladder check (a fraction of a ladder width is on-ladder)', () => {
+    // Number('3600.9') = 3600.9 → floor 3600 → on the ladder.
+    expect(parseBucket('3600.9')).toBe(3600);
+    expect(parseBucket('3600.5')).toBe(3600);
+  });
+});
+
 describe('parseDate', () => {
   it('parses YYYY-MM-DD as a UTC start- or end-of-day instant', () => {
     expect(parseDate('2026-06-08', false)!.toISOString()).toBe('2026-06-08T00:00:00.000Z');
@@ -87,6 +117,19 @@ describe('parseIntervalQuery', () => {
     const { window } = parseIntervalQuery(new URLSearchParams('sinceDays=14'));
     expect('sinceDays' in window).toBe(true);
     expect((window as { sinceDays: number }).sinceDays).toBe(14);
+  });
+
+  it('WS8: parses an explicit ?bucket= (null when absent / off-ladder)', () => {
+    // Absent → null (server picks from the span).
+    expect(parseIntervalQuery(new URLSearchParams('fuel=ELECTRIC')).bucket).toBeNull();
+    // On-ladder → the value.
+    expect(
+      parseIntervalQuery(new URLSearchParams('fuel=ELECTRIC&from=2026-06-01&to=2026-06-07&bucket=900'))
+        .bucket,
+    ).toBe(900);
+    expect(parseIntervalQuery(new URLSearchParams('fuel=GAS&bucket=3600')).bucket).toBe(3600);
+    // Off-ladder → null (ignored; server picks).
+    expect(parseIntervalQuery(new URLSearchParams('fuel=GAS&bucket=1800')).bucket).toBeNull();
   });
 
   it('defaults grain to "all" and reads exact grain=15m / grain=1h', () => {

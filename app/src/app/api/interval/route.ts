@@ -37,8 +37,20 @@ export const runtime = 'nodejs';
 //                          dance); omitted = the default account, bad id = 400.
 //   ?grain=…             — IGNORED (back-compat: older widget builds sent it; the
 //                          server now picks the bucket itself). Harmless if present.
+//   ?bucket=<secs>       — WS8 OVERSCAN (optional): an EXPLICIT bucket width (one of
+//                          the chooseBucket ladder widths) to aggregate this [from,to]
+//                          at, SKIPPING the span→bucket choice. The overscan client
+//                          loads a window WIDER than the visible view but wants it
+//                          aggregated at the VIEW's grain (else the wider span would
+//                          make chooseBucket pick a coarser bucket and the visible
+//                          slice would render too coarse). Validated against the
+//                          ladder (parseBucket); off-ladder/garbage → ignored (server
+//                          picks, unchanged pre-WS8 behaviour). When bucket===900 the
+//                          15-min-grid path still fires, exactly as a server-chosen
+//                          900 would.
 //
-// THE TWO PATHS (chosen by chooseBucket on the window span):
+// THE TWO PATHS (chosen by chooseBucket on the window span, OR by an explicit
+// ?bucket=):
 //   • bucketSecs ≥ 3600  → SQL RECONCILE-THEN-SUM. getIntervalAggregated collapses
 //     the coexisting 15-min/hourly grains to one value per UTC hour
 //     (reconcileToHourly's rule, in SQL — 4 complete 15-min slots win, else the
@@ -66,17 +78,22 @@ export const runtime = 'nodejs';
 //
 // CACHE: interval data only changes on a scrape (every ~N minutes at most), so a
 // short private cache window is safe and cheap. The response varies by
-// ?accountId / ?fuel / ?from / ?to — all in the URL — so a URL-keyed cache stays
-// correct per account; `private` keeps it in the user's browser regardless.
+// ?accountId / ?fuel / ?from / ?to / ?bucket — all in the URL — so a URL-keyed cache
+// stays correct per account; `private` keeps it in the user's browser regardless.
 const CACHE_HEADER = 'private, max-age=120';
 
 export async function GET(req: Request) {
   const params = new URL(req.url).searchParams;
-  const { fuelType, window } = parseIntervalQuery(params);
+  const { fuelType, window, bucket } = parseIntervalQuery(params);
   // Resolve the parsed window to concrete bounds NOW (pure helper, clock injected)
   // so chooseBucket has a real span and the SQL has a real [from, to].
   const { from, to } = resolveWindowBounds(window, Date.now());
-  const bucketSecs = chooseBucket(to.getTime() - from.getTime(), MAX_POINTS);
+  // WS8 OVERSCAN: an explicit, ladder-validated ?bucket= WINS over the span→bucket
+  // choice, so an overscan superset (a window WIDER than the visible view) is
+  // aggregated at the VIEW's grain rather than the wider span's coarser grain. Absent
+  // / invalid bucket → chooseBucket from the span (unchanged behaviour). Either way
+  // `bucketSecs` drives both the path selection and the returned `grain`.
+  const bucketSecs = bucket ?? chooseBucket(to.getTime() - from.getTime(), MAX_POINTS);
 
   return withAccount(
     req.url,

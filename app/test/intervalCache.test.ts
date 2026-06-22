@@ -22,15 +22,24 @@ afterEach(() => {
 });
 
 describe('intervalCacheKey', () => {
-  it('builds a stable key from fuel|from|to|account (the params that vary the response)', () => {
+  it('builds a stable key from fuel|from|to|account|bucket (the params that vary the response)', () => {
+    // WS8: an explicit bucket joins the key (trailing segment). Absent bucket → empty.
     expect(
       intervalCacheKey({ fuel: 'ELECTRIC', from: '2026-01-01', to: '2026-02-01', accountId: 7 }),
-    ).toBe('ELECTRIC|2026-01-01|2026-02-01|7');
+    ).toBe('ELECTRIC|2026-01-01|2026-02-01|7|');
   });
 
-  it('renders absent window/account as empty segments (so a default-window call has a stable key)', () => {
-    expect(intervalCacheKey({ fuel: 'GAS' })).toBe('GAS|||');
-    expect(intervalCacheKey({ fuel: 'GAS', from: null, to: null, accountId: null })).toBe('GAS|||');
+  it('renders absent window/account/bucket as empty segments (so a default-window call has a stable key)', () => {
+    expect(intervalCacheKey({ fuel: 'GAS' })).toBe('GAS||||');
+    expect(intervalCacheKey({ fuel: 'GAS', from: null, to: null, accountId: null })).toBe('GAS||||');
+  });
+
+  it('WS8: distinguishes the same window at different explicit buckets', () => {
+    const base = { fuel: 'ELECTRIC', from: '2026-01-01', to: '2026-02-01', accountId: 7 };
+    expect(intervalCacheKey({ ...base, bucket: 3600 })).toBe('ELECTRIC|2026-01-01|2026-02-01|7|3600');
+    expect(intervalCacheKey({ ...base, bucket: 900 })).toBe('ELECTRIC|2026-01-01|2026-02-01|7|900');
+    // A null bucket keeps the legacy trailing-empty shape (server-picks path).
+    expect(intervalCacheKey({ ...base, bucket: null })).toBe('ELECTRIC|2026-01-01|2026-02-01|7|');
   });
 
   it('does NOT include grain — the client no longer sends it (server picks the bucket)', () => {

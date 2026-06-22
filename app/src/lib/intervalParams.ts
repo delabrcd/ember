@@ -4,6 +4,8 @@
 // routes take exactly the params the widgets already pass to /api/interval).
 // NO React / DOM / DB / fetch dependency → hand-calc unit-testable.
 
+import { BUCKET_LADDER_SECONDS } from './viz/chooseBucket';
+
 export const DEFAULT_SINCE_DAYS = 30;
 export const MIN_SINCE_DAYS = 1;
 export const MAX_SINCE_DAYS = 400;
@@ -41,6 +43,29 @@ export function parseGrain(raw: string | null): IntervalGrain {
   return 'all';
 }
 
+// WS8 OVERSCAN: an EXPLICIT bucket width (seconds) the caller can request so an
+// OVERSCAN fetch is aggregated at the VIEW's grain, not the (wider) overscan
+// span's grain. Background: WS8 preloads a superset wider than the visible window
+// so a pan stays over real data; but if the route ran chooseBucket on that WIDER
+// span it would pick a COARSER bucket than the view needs, and the visible slice
+// would render at the wrong (too-coarse) resolution. So the client computes the
+// bucket from the VIEW span (the same chooseBucket the server would use for the
+// view) and passes it here; the route then aggregates the overscan [from,to] AT
+// EXACTLY THAT BUCKET, keeping the visible portion grain-coherent.
+//
+// Validation: the value must be one of the chooseBucket ladder widths
+// (BUCKET_LADDER_SECONDS) — a closed allowlist, so an arbitrary / malicious
+// `?bucket=` can't drive the SQL bucket math to a junk value. Anything not on the
+// ladder (absent, garbage, off-ladder seconds) → null = "server picks the bucket"
+// (the unchanged pre-WS8 behaviour). PURE.
+export function parseBucket(raw: string | null): number | null {
+  if (raw == null) return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return null;
+  const secs = Math.floor(n);
+  return (BUCKET_LADDER_SECONDS as readonly number[]).includes(secs) ? secs : null;
+}
+
 export function parseSinceDays(raw: string | null): number {
   const n = Number(raw);
   if (!Number.isFinite(n)) return DEFAULT_SINCE_DAYS;
@@ -75,9 +100,15 @@ export function parseIntervalQuery(params: URLSearchParams): {
   fuelType: 'ELECTRIC' | 'GAS';
   window: IntervalWindow;
   grain: IntervalGrain;
+  // WS8: an EXPLICIT, ladder-validated bucket width (seconds), or null when the
+  // caller didn't request one (server picks the bucket — the pre-WS8 default). The
+  // overscan client passes the VIEW-span bucket so the wider superset is aggregated
+  // at the view's grain. See parseBucket.
+  bucket: number | null;
 } {
   const fuelType = parseFuel(params.get('fuel'));
   const grain = parseGrain(params.get('grain'));
+  const bucket = parseBucket(params.get('bucket'));
   let from = parseDate(params.get('from'), false);
   let to = parseDate(params.get('to'), true);
   // If both bounds parsed but are inverted, swap so the query window is sane.
@@ -88,7 +119,7 @@ export function parseIntervalQuery(params: URLSearchParams): {
   const window: IntervalWindow = hasWindow
     ? { from: from ?? undefined, to: to ?? undefined }
     : { sinceDays: parseSinceDays(params.get('sinceDays')) };
-  return { fuelType, window, grain };
+  return { fuelType, window, grain, bucket };
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;

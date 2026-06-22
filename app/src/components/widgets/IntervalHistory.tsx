@@ -91,7 +91,8 @@
 // 1-hour MIN_ZOOM_SPAN_MS floor). When a zoom-out reaches the full global window we
 // CLEAR the local zoom (equivalent to Reset; the "Reset zoom" affordance hides).
 // The display window (`zoom`) updates IMMEDIATELY for responsiveness; the actual
-// fetch window (`fetchZoom`) is a debounced copy so rapid ticks don't spam the route.
+// fetch window is governed by WS8's overscan reconcile (a debounced `load` superset)
+// so rapid ticks don't spam the route — see the WS8 note below.
 //
 // LIVE PAN/ZOOM + NUMERIC TIME AXIS (WS7): WS5/WS6 updated the *window* live but the
 // LINE only re-rendered after the debounced refetch — so the graph didn't track the
@@ -123,6 +124,30 @@
 // AND pan paths), and reads BOTH deltaY and deltaX (shift+wheel emits a horizontal
 // delta on many setups). Net: while focused the page never scrolls from the wheel;
 // while unfocused the wheel is untouched.
+//
+// OVERSCAN PRELOAD + NO RESIZE ANIMATION (WS8): WS7 moved the view domain live, but
+// the loaded ROWS were still only those for the (old) settled window — so a
+// horizontal PAN slid the domain over data that wasn't loaded yet (a blank LEADING
+// edge), then the debounced refetch landed and the line RESIZED/morphed into place.
+// WS8 kills both by DECOUPLING what's LOADED from what's SHOWN and preloading wide:
+//   • LOADED SUPERSET (`load`): a window WIDER than the view — `[view.from − MARGIN,
+//     view.to + MARGIN]` with MARGIN ≈ one VIEW-span per side (intervalOverscan), so
+//     the loaded rows extend a full view-width past each visible edge.
+//   • PANNING shifts the live `view` WITHIN that superset → instant, real data on
+//     both edges, NO refetch in the loop, NOTHING to resize.
+//   • A BACKGROUND extend-load fires only when the view nears a loaded edge
+//     (isViewNearLoadedEdge, ~25% of MARGIN) OR a ZOOM changes the view-span bucket
+//     (overscanBucketChanged): refetch a fresh superset RE-CENTERED on the view and
+//     swap rows in WITHOUT moving the domain — the visible slice is identical data, so
+//     the swap is invisible. The reconcile is DEBOUNCED + single-pending (`load`) and
+//     the fetch layer dedupes one in-flight request per key, so rapid panning coalesces
+//     to one fetch.
+//   • GRAIN COHERENCE: the superset is aggregated at the VIEW's grain (the
+//     view-span `chooseBucket`), passed as the route's `?bucket=` — NOT the wider
+//     overscan span's grain (which would pick a coarser bucket and render the visible
+//     slice too coarse). A zoom that changes the view bucket forces a fresh superset.
+//   • The WS6 line-morph is REMOVED for navigation: <Line isAnimationActive={false}>
+//     on every path. Smoothness is the live domain over preloaded data, not a tween.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -150,6 +175,7 @@ import {
   panWindow,
   navCursor,
   viewDomainFor,
+  msToYmd,
   type WindowMs,
 } from '@/lib/intervalZoom';
 import {
@@ -158,6 +184,14 @@ import {
   intervalCacheKey,
   type IntervalResponse,
 } from '@/lib/intervalCache';
+import {
+  overscanWindowFor,
+  isViewNearLoadedEdge,
+  viewSpanBucketSecs,
+  overscanBucketChanged,
+  type OverscanWindow,
+} from '@/lib/intervalOverscan';
+import { MAX_POINTS } from '@/lib/viz/downsampleInterval';
 import { ChartShell } from '../ChartShell';
 
 // ---- Theme constants (mirrors IntervalLoadShape) ----------------------------
@@ -198,30 +232,25 @@ const WHEEL_PAN_FRACTION = 0.12;
 // gestures settle. The route is ~15–40ms so this stays snappy.
 const NAV_REFETCH_DEBOUNCE_MS = 150;
 
-// ---- WS6 line-morph animation tuning ----------------------------------------
-// WS6 makes the data swap-in feel SMOOTH instead of a snap. A navigation gesture
-// (wheel-zoom / shift-pan / ctrl-drag / drag-zoom-select / reset) updates the live
-// display window immediately, then the DEBOUNCED refetch swaps a new point-set in;
-// historically that swap was instant (`isAnimationActive={false}`) so the line path
-// JUMPED. We now let Recharts TWEEN the <Line> path between the old and new point
-// sets for nav-driven swaps: Recharts interpolates the SVG path `d` over
-// `animationDuration` with the named easing, so the line glides to its new shape.
+// ---- WS8: the line-morph is GONE for navigation -----------------------------
+// WS6 used to TWEEN the <Line> path (`animateSwap` → isAnimationActive true) when the
+// debounced refetch swapped a new point-set in for a settled nav window. With WS7's
+// view-domain decoupled from the loaded data, that tween became exactly the jarring
+// "resize animation once the scroll finishes" the operator hates: a pan slid the view
+// over data that wasn't loaded yet (a blank leading edge), then the refetch landed and
+// the line visibly RESIZED/morphed into the new window.
 //
-// WHY THIS DOESN'T REINTRODUCE FLICKER / COLD-BLANK: the WS2 SWR layer already keeps
-// the PRIOR chart on screen during a refetch (never setState(undefined) once there's
-// data), so the morph animates the swap of an already-present line, not a blank→line
-// fade. We animate ONLY on nav-driven updates (the `animateNext` flag, set true the
-// instant a gesture fires and consumed by the next render), and explicitly DON'T
-// animate the genuine first load nor the base reloads (fuel/range/account) — those
-// keep `isAnimationActive={false}` so there's no mount-time grow-in flicker.
-//
-// DURATION is kept SHORT (one wheel notch settles fast and the debounce is 150ms) so
-// rapid ticks don't stack visibly-fighting animations: the displayed window updates
-// live per-tick, but the line only re-animates on the SETTLED (debounced) data swap,
-// so at most one morph plays per coalesced refetch. ease-out reads as a quick glide
-// that decelerates into place.
-const NAV_ANIM_DURATION_MS = 260;
-const NAV_ANIM_EASING = 'ease-out' as const;
+// WS8 removes the morph entirely and gets smoothness from PRELOADED data instead:
+//   • PAN now slides the live view domain over an OVERSCAN superset that already holds
+//     real data on both sides (intervalOverscan), so there's no blank edge and no
+//     data swap in the pan loop → nothing to morph.
+//   • ZOOM scales the live domain over the loaded data; when a finer-grain superset
+//     swaps in (a bucket change) the line just SHARPENS IN PLACE — the visible slice is
+//     the same data at a finer resolution, so an instant swap (no morph) reads as a
+//     crisp-up, not a resize.
+// So the <Line> is now `isAnimationActive={false}` on every path. The WS2 SWR layer
+// still keeps the prior chart on screen during a refetch (no cold blank), so removing
+// the animation can't reintroduce a blank→line fade.
 
 // ---- Types ------------------------------------------------------------------
 type Fuel = 'ELECTRIC' | 'GAS';
@@ -249,6 +278,16 @@ type LoadState = Loaded | { error: true } | undefined;
 // raw ms span the user selected (so the reset/label can describe it). Ephemeral
 // per-widget state — it never touches the global RangeControl.
 type Zoom = { from: string; to: string; startMs: number; endMs: number };
+
+// WS8 OVERSCAN: the LOADED SUPERSET descriptor — what /api/interval was actually
+// fetched for, DECOUPLED from the visible view. It's a window WIDER than the view
+// (`overscanWindowFor`) aggregated at the VIEW's grain (`bucketSecs`), so panning
+// within it stays over real data with no refetch (no blank edge, no resize). The
+// view-domain (`view`) is what's SHOWN; this is what's LOADED. `null` = follow the
+// global window with no explicit bucket (the initial / reset state). `bucketSecs` is
+// sent as the `?bucket=` param so the wider window keeps the view's resolution; we
+// recompute it from the view span and reload when a ZOOM changes the bucket.
+type LoadWindow = { from: string; to: string; bucketSecs: number };
 
 // An in-progress drag-select on the main chart (WS7: numeric axis). With the
 // numeric time XAxis, Recharts reports `e.activeLabel` as the `ts` VALUE (epoch-ms)
@@ -359,12 +398,14 @@ export function IntervalHistory({
   // leak through to the page. Reading this ref means preventDefault() is never
   // skipped for a focused chart due to a stale closure. Kept in sync below.
   const focusedRef = useRef(false);
-  // The DEBOUNCED copy of `zoom` that actually drives the fetch (WS5). Gestures
-  // update `zoom` immediately (responsive subtitle/reset affordance) but only push
-  // into `fetchZoom` after NAV_REFETCH_DEBOUNCE_MS so a flurry of ticks → one fetch.
-  // The drag-select commit and resetZoom set it synchronously (no debounce) so a
-  // discrete gesture refetches at once. null ⇒ follow the global window.
-  const [fetchZoom, setFetchZoom] = useState<Zoom | null>(null);
+  // WS8 OVERSCAN: the LOADED SUPERSET that actually drives the fetch (replacing WS5's
+  // `fetchZoom`). Gestures move `zoom`/`view` immediately (live, no refetch); a
+  // DEBOUNCED reconcile (`reconcileLoad`) decides — via the pure overscan helpers —
+  // whether the view has panned near a loaded edge or zoomed to a new bucket, and only
+  // THEN sets a new `load` (a window WIDER than the view, at the view's grain). A pan
+  // that stays inside the loaded superset sets nothing, so there's no refetch in the
+  // loop. `null` ⇒ follow the global window with no explicit bucket (initial/reset).
+  const [load, setLoad] = useState<LoadWindow | null>(null);
 
   // ---- WS6 navigation polish state ------------------------------------------
   // Reactive modifier/drag state, used ONLY to derive the chart cursor (the GESTURE
@@ -375,15 +416,10 @@ export function IntervalHistory({
   const [ctrlDown, setCtrlDown] = useState(false);
   const [shiftDown, setShiftDown] = useState(false);
   const [ctrlDragging, setCtrlDragging] = useState(false);
-  // WS6 line-morph flag: true for the NEXT render's <Line> so a nav-driven data swap
-  // TWEENS its path instead of snapping. A ref (not state) so setting it during a
-  // gesture doesn't itself trigger a render — it's read at the next render that the
-  // refetch/zoom already causes, then left set (harmless: base reloads clear it).
-  // `animateSwap` is the value read by <Line isAnimationActive>: true only for the
-  // render that swaps in nav-driven data (set in the fetch .then when the ref was
-  // armed), false for first loads / base reloads so they never grow-in or flicker.
-  const animateNextRef = useRef(false);
-  const [animateSwap, setAnimateSwap] = useState(false);
+  // WS8: the WS6 line-morph (`animateNextRef`/`animateSwap`) is GONE — see the WS8
+  // header note. Nav-driven swaps now happen WITHOUT animation: pan slides the view
+  // over a preloaded overscan superset (no swap in the loop), and a finer-grain zoom
+  // swap just sharpens in place. <Line isAnimationActive={false}> on every path.
 
   // The chart-body wrapper element — the focus host. We attach the native
   // non-passive wheel listener here and draw the focus ring on it.
@@ -401,17 +437,24 @@ export function IntervalHistory({
   // The debounce timer handle for the gesture refetch.
   const navTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // The window actually fetched: the DEBOUNCED zoom span when zoomed, else global.
-  const fetchFrom = fetchZoom ? fetchZoom.from : from;
-  const fetchTo = fetchZoom ? fetchZoom.to : to;
+  // The window actually fetched (WS8): the LOADED SUPERSET window when set, else the
+  // global window. The superset is WIDER than the visible view, so the rows the chart
+  // holds always extend past both view edges → panning stays over real data.
+  const fetchFrom = load ? load.from : from;
+  const fetchTo = load ? load.to : to;
+  // WS8: the explicit `?bucket=` for the fetch — the VIEW's grain, so the wider
+  // superset is aggregated at the resolution the view needs (grain coherence). Absent
+  // when no overscan load is active (the route picks the bucket from the span).
+  const fetchBucket = load ? load.bucketSecs : undefined;
 
   // Drop any active zoom (and any in-progress drag) whenever the fuel, the account,
   // or the GLOBAL range changes — a zoom into the old context would be stale. WS7:
   // also reset the live `view` to the new global bounds so the numeric axis domain
-  // snaps to the fresh context (it's reconciled again when the fetch lands).
+  // snaps to the fresh context (it's reconciled again when the fetch lands). WS8:
+  // clear the loaded superset too so the next reconcile loads a fresh one.
   useEffect(() => {
     setZoom(null);
-    setFetchZoom(null);
+    setLoad(null);
     setDrag(null);
     setZoomHint(false);
     panDragRef.current = null;
@@ -512,19 +555,94 @@ export function IntervalHistory({
   // the LineChart's `style.cursor`. Not focused → 'default' (gestures inert).
   const chartCursor = navCursor({ focused, ctrlDown, shiftDown, ctrlDragging });
 
-  // Push the current display window (`zoom`) into the DEBOUNCED fetch window after
-  // NAV_REFETCH_DEBOUNCE_MS — a flurry of wheel/pan ticks coalesces into one
-  // /api/interval request. `null` clears the fetch zoom (back to the global window).
-  const scheduleNavRefetch = useCallback((next: Zoom | null) => {
-    if (navTimerRef.current) clearTimeout(navTimerRef.current);
-    // WS6: arm the line-morph for the swap this refetch will produce. The flag is read
-    // (and reset) when the fetch actually swaps new data in, so the path TWEENS.
-    animateNextRef.current = true;
-    navTimerRef.current = setTimeout(() => {
-      navTimerRef.current = null;
-      setFetchZoom(next);
-    }, NAV_REFETCH_DEBOUNCE_MS);
-  }, []);
+  // ---- WS8: the overscan reconcile -----------------------------------------
+  // A FRESH mirror of `load` so the debounced reconcile reads the current superset
+  // without re-arming on every `load` change (the reconcile runs after a gesture, by
+  // which time React may not have committed the latest `load`). Kept in sync below.
+  const loadRef = useRef<LoadWindow | null>(null);
+  useEffect(() => {
+    loadRef.current = load;
+  }, [load]);
+
+  // Build the LOADED-SUPERSET descriptor for a given visible VIEW window: widen the
+  // view to the overscan superset (real data on both sides) and aggregate it at the
+  // VIEW's grain (grain coherence — the wider span must NOT pick a coarser bucket).
+  // Emits the route's inclusive UTC day bounds (the route widens `to` to end-of-day).
+  // PURE-derived (delegates to the pure overscan helpers); no side effects.
+  const loadWindowForView = useCallback(
+    (viewWin: OverscanWindow): LoadWindow => {
+      const superset = overscanWindowFor(viewWin, boundsFromMs, boundsToMs);
+      const bucketSecs = viewSpanBucketSecs(viewWin, MAX_POINTS);
+      return { from: msToYmd(superset.fromMs), to: msToYmd(superset.toMs), bucketSecs };
+    },
+    [boundsFromMs, boundsToMs],
+  );
+
+  // Decide whether to (re)load the overscan superset for the CURRENT view window, and
+  // if so set `load` (which drives the fetch). DECOUPLED from the live pan/zoom: a pan
+  // that stays inside the loaded superset at the same grain is a NO-OP here (no
+  // refetch → no resize). We (re)load only when:
+  //   • nothing is loaded yet (first paint after a gesture), OR
+  //   • a ZOOM changed the view-span bucket (overscanBucketChanged) → reload at the
+  //     new grain, re-centered on the view, OR
+  //   • a PAN brought the view near a loaded edge (isViewNearLoadedEdge) → top the
+  //     overscan back up by re-centering on the view (same grain).
+  // In every reload case the new superset is RE-CENTERED on the current view, so the
+  // visible slice is the SAME data — the swap is invisible (no domain move, and WS8's
+  // <Line> has no animation, so it never resizes). SINGLE-FLIGHT: the fetch effect
+  // dedupes one in-flight request per key (swrFetch), and we only ever set ONE pending
+  // `load` (the debounce coalesces a flurry of gesture ticks into one reconcile), so
+  // rapid panning can't spawn a swarm of fetches. `null` view (reset / no bounds) →
+  // clear `load` (follow the global window).
+  const reconcileLoad = useCallback(
+    (viewWin: OverscanWindow | null) => {
+      if (!viewWin || !boundsValid) {
+        setLoad(null);
+        return;
+      }
+      const cur = loadRef.current;
+      const bucketChanged = overscanBucketChanged(viewWin, cur?.bucketSecs ?? null, MAX_POINTS);
+      // The currently-loaded superset's window in ms (for the edge-proximity check).
+      const loadedWin: OverscanWindow | null = cur
+        ? {
+            fromMs: new Date(cur.from).getTime(),
+            // The route widens `to` to end-of-day; mirror that so the edge check uses
+            // the real loaded extent (not the start of the last day).
+            toMs: new Date(cur.to).getTime() + (24 * 60 * 60_000 - 1),
+          }
+        : null;
+      const nearEdge =
+        loadedWin != null &&
+        isViewNearLoadedEdge(viewWin, loadedWin, boundsFromMs, boundsToMs);
+      if (cur && !bucketChanged && !nearEdge) return; // view still inside the superset → no refetch
+      setLoad(loadWindowForView(viewWin));
+    },
+    [boundsValid, boundsFromMs, boundsToMs, loadWindowForView],
+  );
+
+  // Debounced wrapper: a flurry of wheel/pan ticks coalesces into ONE reconcile after
+  // NAV_REFETCH_DEBOUNCE_MS (so at most one extend-load per settled gesture).
+  // `immediate` runs it synchronously for discrete gestures (drag-select commit /
+  // reset) where there's no flurry to coalesce. The caller passes the NEXT view window
+  // explicitly (the one the gesture just produced) so the reconcile doesn't depend on
+  // React having committed `zoom` yet.
+  const scheduleReconcile = useCallback(
+    (viewWin: OverscanWindow | null, immediate = false) => {
+      if (navTimerRef.current) {
+        clearTimeout(navTimerRef.current);
+        navTimerRef.current = null;
+      }
+      if (immediate) {
+        reconcileLoad(viewWin);
+        return;
+      }
+      navTimerRef.current = setTimeout(() => {
+        navTimerRef.current = null;
+        reconcileLoad(viewWin);
+      }, NAV_REFETCH_DEBOUNCE_MS);
+    },
+    [reconcileLoad],
+  );
 
   // Clean up the debounce timer on unmount.
   useEffect(
@@ -546,14 +664,18 @@ export function IntervalHistory({
   useEffect(() => {
     let alive = true;
     const acctQuery = accountId != null ? `&accountId=${accountId}` : '';
-    // Follow the zoomed span when zoomed, else the GLOBAL range; otherwise let the
-    // route default to its trailing window (non-dashboard caller). The client no
-    // longer sends `grain` — WS1's server picks the bucket from the window span.
+    // Follow the loaded OVERSCAN superset window when set (WS8), else the GLOBAL range;
+    // otherwise let the route default to its trailing window (non-dashboard caller).
     const rangeQuery = fetchFrom && fetchTo ? `&from=${fetchFrom}&to=${fetchTo}` : '';
-    const url = `/api/interval?fuel=${fuel}${rangeQuery}${acctQuery}`;
-    // The cache key keys off the FETCHED window (fetchFrom/fetchTo) so a zoom and a
-    // base view are distinct cache entries — each repaints its own last-seen series.
-    const key = intervalCacheKey({ fuel, from: fetchFrom, to: fetchTo, accountId });
+    // WS8: when an overscan load is active, pin the route to the VIEW's grain via
+    // `?bucket=` so the wider superset is aggregated at the view's resolution (grain
+    // coherence). Absent → the route picks the bucket from the span (pre-WS8 path).
+    const bucketQuery = fetchBucket != null ? `&bucket=${fetchBucket}` : '';
+    const url = `/api/interval?fuel=${fuel}${rangeQuery}${bucketQuery}${acctQuery}`;
+    // The cache key keys off the FETCHED window + bucket (WS8) so an overscan superset
+    // and a base view (or two buckets over the same window) are distinct cache
+    // entries — each repaints its own last-seen series.
+    const key = intervalCacheKey({ fuel, from: fetchFrom, to: fetchTo, accountId, bucket: fetchBucket });
 
     // NEVER COLD-BLANK. The single state change that makes this true:
     //   • warm cache for THIS key → hydrate state from cache NOW (instant repaint),
@@ -575,13 +697,10 @@ export function IntervalHistory({
     swrFetch(key, url)
       .then((resp) => {
         if (!alive) return;
-        // WS6 line-morph: if this swap was armed by a nav gesture, animate the <Line>
-        // path tween (Recharts interpolates the path on the data change); otherwise
-        // this is a first/base load → swap WITHOUT animation so there's no grow-in
-        // flicker. The ref is consumed (reset) here either way.
-        const animate = animateNextRef.current;
-        animateNextRef.current = false;
-        setAnimateSwap(animate);
+        // WS8: swap the rows in WITHOUT any animation. The visible slice of the loaded
+        // superset is the SAME data (the view domain is unchanged across an overscan
+        // swap), so an instant swap is invisible for a pan and just sharpens-in-place
+        // for a finer-grain zoom — no resize/morph. (The WS6 line-morph is removed.)
         setState(toLoaded(resp));
         setRevalidating(false);
       })
@@ -597,9 +716,9 @@ export function IntervalHistory({
     };
     // `state` is read only to decide the shimmer flag at fetch START; including it in
     // deps would re-run the effect on every swap (an infinite loop). The fetch
-    // identity is fully determined by fuel/window/account.
+    // identity is fully determined by fuel/window/bucket/account (WS8 adds bucket).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fuel, fetchFrom, fetchTo, accountId]);
+  }, [fuel, fetchFrom, fetchTo, fetchBucket, accountId]);
 
   const color = fuel === 'GAS' ? GAS : ELEC;
   const unit = FUEL_UNIT[fuel];
@@ -707,37 +826,27 @@ export function IntervalHistory({
     ? [view.fromMs, view.toMs]
     : ['dataMin', 'dataMax'];
 
-  // ---- WS5: apply a gesture-produced ms window ------------------------------
+  // ---- WS5/WS8: apply a gesture-produced ms window --------------------------
   // Clamp the new [fromMs,toMs] to the global bounds + min span, then:
   //   • if it reaches/exceeds the FULL global window → CLEAR the zoom (== Reset, the
-  //     "Reset zoom" affordance hides) and refetch the global window;
-  //   • else → set the LIVE zoom immediately (responsive subtitle/affordance) and
-  //     DEBOUNCE the refetch so a flurry of ticks coalesces into one request.
-  // `fetchZoomNow` forces a synchronous fetch (used by discrete gestures like the
-  // drag-select commit / reset, where there's no flurry to coalesce).
+  //     "Reset zoom" affordance hides) and reconcile back to the global window;
+  //   • else → set the LIVE zoom immediately (the numeric domain / line move LIVE) and
+  //     DEBOUNCE the OVERSCAN reconcile (WS8): a pan that stays inside the loaded
+  //     superset triggers NO refetch; one that nears a loaded edge (or a zoom that
+  //     changes the grain) tops the superset back up. `runNow` forces a synchronous
+  //     reconcile (discrete gestures: drag-select commit / reset — no flurry).
+  // WS8: the live `zoom` always moves so the domain slides/scales over the PRELOADED
+  // overscan data; the reconcile only decides whether to fetch MORE, never blanks.
   const applyNavWindow = useCallback(
-    (next: WindowMs, fetchZoomNow = false) => {
+    (next: WindowMs, runNow = false) => {
       if (!boundsValid) return;
-      // WS6: every applyNavWindow call is a nav gesture (wheel/pan/drag-pan/reset) →
-      // arm the line-morph so the resulting data swap TWEENS. The debounced path also
-      // arms inside scheduleNavRefetch; arming here too covers the synchronous
-      // (fetchZoomNow) branches below without per-callsite repetition.
-      animateNextRef.current = true;
       const lo = next.fromMs;
       const hi = next.toMs;
       // Reached the full global window (within a 1s slop) → equivalent to Reset.
       if (lo <= boundsFromMs + 1000 && hi >= boundsToMs - 1000) {
         setDrag(null);
         setZoom(null);
-        if (fetchZoomNow) {
-          if (navTimerRef.current) {
-            clearTimeout(navTimerRef.current);
-            navTimerRef.current = null;
-          }
-          setFetchZoom(null);
-        } else {
-          scheduleNavRefetch(null);
-        }
+        scheduleReconcile(null, runNow); // null view → follow the global window
         return;
       }
       const { from: zf, to: zt } = zoomSpanToRange(lo, hi);
@@ -745,17 +854,11 @@ export function IntervalHistory({
       setZoom((prev) =>
         prev && prev.startMs === lo && prev.endMs === hi ? prev : z,
       );
-      if (fetchZoomNow) {
-        if (navTimerRef.current) {
-          clearTimeout(navTimerRef.current);
-          navTimerRef.current = null;
-        }
-        setFetchZoom(z);
-      } else {
-        scheduleNavRefetch(z);
-      }
+      // WS8: hand the reconcile the NEXT view window explicitly (the gesture's result)
+      // so it doesn't depend on React having committed `zoom`.
+      scheduleReconcile({ fromMs: lo, toMs: hi }, runNow);
     },
-    [boundsValid, boundsFromMs, boundsToMs, scheduleNavRefetch],
+    [boundsValid, boundsFromMs, boundsToMs, scheduleReconcile],
   );
 
   // ---- Drag handlers (issue #141 zoom-select + WS5 Ctrl+drag pan) -----------
@@ -844,30 +947,22 @@ export function IntervalHistory({
       const endMs = Math.max(aTs, bTs);
       const z: Zoom = { from: zf, to: zt, startMs, endMs };
       setZoom((prev) => (prev && prev.from === zf && prev.to === zt ? prev : z));
-      // WS6: a committed drag-zoom-select is a nav gesture → arm the line-morph.
-      animateNextRef.current = true;
-      // Discrete gesture → fetch synchronously (no flurry to debounce).
-      if (navTimerRef.current) {
-        clearTimeout(navTimerRef.current);
-        navTimerRef.current = null;
-      }
-      setFetchZoom(z);
+      // WS8: a committed drag-zoom-select is a discrete nav gesture → reconcile the
+      // overscan load synchronously (no flurry to debounce). overscanBucketChanged
+      // forces a fresh superset at the new (finer) grain; the line sharpens in place,
+      // no morph.
+      scheduleReconcile({ fromMs: startMs, toMs: endMs }, true);
       return null;
     });
-  }, [indexByTs, zoom, boundsFromMs, boundsToMs, applyNavWindow]);
+  }, [indexByTs, scheduleReconcile]);
 
   const resetZoom = useCallback(() => {
     setDrag(null);
     setZoom(null);
     panDragRef.current = null;
-    if (navTimerRef.current) {
-      clearTimeout(navTimerRef.current);
-      navTimerRef.current = null;
-    }
-    // WS6: Reset zoom is a nav update too → morph the line back to the full window.
-    animateNextRef.current = true;
-    setFetchZoom(null);
-  }, []);
+    // WS8: Reset → reconcile back to the global window synchronously (clears `load`).
+    scheduleReconcile(null, true);
+  }, [scheduleReconcile]);
 
   // ---- WS5/WS7: native non-passive wheel listener (zoom / shift-pan) --------
   // React's onWheel is PASSIVE — it can't preventDefault to stop page scroll. So we
@@ -1144,18 +1239,17 @@ export function IntervalHistory({
               stroke={color}
               strokeWidth={1.5}
               dot={false}
-              // WS6 line-morph: animate ONLY when the swap was nav-driven (animateSwap),
-              // so a wheel-zoom / pan / drag-zoom / reset TWEENS the path to its new
-              // shape over ~260ms ease-out instead of snapping. First loads and base
-              // reloads keep animateSwap=false → no grow-in flicker (the WS2 SWR layer
-              // still keeps the prior chart up, so this morphs an existing line, never a
-              // blank→line fade). Recharts re-runs the <Line> path animation whenever the
-              // `data` points change, so the SAME instance interpolates old→new points —
-              // we deliberately do NOT key/remount the Line (a remount would replay the
-              // left-to-right ENTRANCE reveal instead of a point-to-point morph).
-              isAnimationActive={animateSwap}
-              animationDuration={NAV_ANIM_DURATION_MS}
-              animationEasing={NAV_ANIM_EASING}
+              // WS8: NO animation on ANY path. The WS6 line-morph was the "resize once
+              // the scroll stops" the operator hated — with WS7's view-domain decoupled
+              // from the data, a pan's debounced swap visibly RESIZED the line. WS8's
+              // smoothness comes from PRELOADED overscan data: pan slides the live view
+              // domain over a wider loaded superset (no swap in the loop → nothing to
+              // resize), and a finer-grain zoom swap just sharpens in place. An instant
+              // swap is invisible because the visible slice is the SAME data (the
+              // overscan reload is re-centered on the view, the view domain never moves).
+              // The WS2 SWR layer still keeps the prior chart up during a refetch, so
+              // `false` here can't reintroduce a blank→line fade.
+              isAnimationActive={false}
               connectNulls={false}
             />
             {/* "End of 15-min data" marker (WS2): a vertical reference line at the

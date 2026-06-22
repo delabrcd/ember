@@ -56,16 +56,23 @@ const store = new Map<string, Entry>();
 // Build the canonical cache key for a request. The widget and any prefetcher MUST
 // use this so their keys match exactly (a mismatch = a cache miss = a needless
 // cold fetch). Mirrors the /api/interval query params that vary the response:
-// fuel, the resolved [from, to] window, and the account. `grain` is intentionally
-// NOT part of the key — WS1 made the server choose the bucket, so the client no
-// longer sends it; the window alone determines the grain.
+// fuel, the resolved [from, to] window, the account, AND (WS8) the explicit
+// `?bucket=` when the overscan client requests one. `grain` is still NOT part of the
+// key — WS1 made the server choose the bucket when none is sent; but WS8's overscan
+// fetches an explicit `?bucket=` (the view's grain over a wider window), so two
+// requests for the SAME [from,to] at DIFFERENT buckets MUST be distinct cache
+// entries — hence `bucket` joins the key. Omitted/null bucket keeps the legacy key
+// shape (trailing empty segment) so pre-WS8 callers are unaffected.
 export function intervalCacheKey(args: {
   fuel: string;
   from?: string | null;
   to?: string | null;
   accountId?: number | null;
+  bucket?: number | null;
 }): string {
-  return `${args.fuel}|${args.from ?? ''}|${args.to ?? ''}|${args.accountId ?? ''}`;
+  return `${args.fuel}|${args.from ?? ''}|${args.to ?? ''}|${args.accountId ?? ''}|${
+    args.bucket ?? ''
+  }`;
 }
 
 // Synchronous peek: the last successful response for this key, or undefined. The
