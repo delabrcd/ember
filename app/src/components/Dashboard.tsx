@@ -44,16 +44,16 @@ import {
 import { WidgetLayout } from './WidgetLayout';
 import { WidgetPalette, type PaletteGroup } from './WidgetPalette';
 import {
-  COLS,
   FIT_BREAKPOINT,
   STAT_ROWS,
   STRIP_COLS,
-  findFreeSlot,
   generateDefaultPlacements,
   generateStripPlacements,
   readStrip,
-  withStrip,
-  type Breakpoint,
+  addToPlacements as addToPlacementsPure,
+  removeFromPlacements as removeFromPlacementsPure,
+  addSpacer as addSpacerPure,
+  togglePin as togglePinPure,
   type Placement,
 } from '@/lib/layoutEngine';
 
@@ -337,45 +337,17 @@ export function Dashboard() {
   // Mutate the saved placements to add/remove a type across all breakpoints. When
   // no layout is saved yet, removing materializes the current default minus the
   // type (so the removal sticks); adding from that state is a no-op (all shown).
+  // The array surgery is the pure layout-lib transform (§2); this thin shell
+  // supplies the registry-derived data (the materialized default, the default size)
+  // and persists the result.
   const removeFromPlacements = (type: string) => {
-    const cur = layout?.layouts;
-    if (!cur) {
-      // No saved placements yet: materialize "everything except `type`" by
-      // letting WidgetLayout persist its default for the reduced set on next
-      // render — we trigger that by writing an empty-but-defined blob keyed lg so
-      // savedTypes becomes non-null. Simpler: write the current default lg set
-      // (all available) minus this type; the other breakpoints regenerate.
-      const base = buildCurrentLgPlacements();
-      setPlacements({ [FIT_BREAKPOINT]: base.filter((p) => p.i !== type) });
-      return;
-    }
-    const next: Record<string, Placement[]> = {};
-    for (const bp of Object.keys(cur) as Breakpoint[]) {
-      const arr = cur[bp];
-      if (Array.isArray(arr)) next[bp] = arr.filter((p) => p.i !== type);
-    }
-    setPlacements(next);
+    // No saved placements yet → materialize the current default lg set minus the
+    // type so the removal sticks (the pure fn handles the cur-undefined branch).
+    setPlacements(removeFromPlacementsPure(layout?.layouts, type, buildCurrentLgPlacements(), FIT_BREAKPOINT));
   };
   const addToPlacements = (type: string) => {
-    const cur = layout?.layouts;
-    if (!cur) return; // nothing removed yet → already shown
-    const lg = Array.isArray(cur[FIT_BREAKPOINT]) ? cur[FIT_BREAKPOINT]! : [];
-    if (lg.some((p) => p.i === type)) return; // already placed
-    const next: Record<string, Placement[]> = { ...(cur as Record<string, Placement[]>) };
-    // Drop at the widget's registry default size on the FIRST free slot of the lg
-    // grid. Under DISPLACEMENT+COMPACTION (CHANGE 2) RGL would otherwise drop a new
-    // tile at (0,0) and shove the existing tiles down; landing it on an empty patch
-    // (findFreeSlot scans reading-order for the first non-overlapping cell, always
-    // finding one below the layout at worst) keeps the add tidy, and vertical
-    // compaction then packs it into place. Other breakpoints get it appended by
-    // WidgetLayout's merge against fresh defaults.
-    const { defaultSize } = getWidget(type);
-    const slot = findFreeSlot(lg, defaultSize, COLS[FIT_BREAKPOINT]);
-    next[FIT_BREAKPOINT] = [
-      { i: type, x: slot.x, y: slot.y, w: defaultSize.w, h: defaultSize.h, minW: defaultSize.minW, minH: defaultSize.minH },
-      ...lg,
-    ];
-    setPlacements(next);
+    const next = addToPlacementsPure(layout?.layouts, type, getWidget(type).defaultSize, FIT_BREAKPOINT);
+    if (next) setPlacements(next);
   };
 
   // Add a NEW spacer instance (CHANGE 2). Spacers are multi-instance (`spacer:1`,
@@ -388,27 +360,12 @@ export function Dashboard() {
     // re-adding doesn't collide with a surviving instance.
     const nums = spacerIds.map((id) => Number(id.slice(SPACER_PREFIX.length + 1))).filter((n) => Number.isFinite(n));
     const nextId = `${SPACER_PREFIX}:${(nums.length ? Math.max(...nums) : 0) + 1}`;
-    const { defaultSize } = getWidget(nextId);
-    const lg = Array.isArray(layout?.layouts?.[FIT_BREAKPOINT])
-      ? layout!.layouts![FIT_BREAKPOINT]!
-      : buildCurrentLgPlacements();
-    const slot = findFreeSlot(lg, defaultSize, COLS[FIT_BREAKPOINT]);
-    const newTile: Placement = {
-      i: nextId,
-      x: slot.x,
-      y: slot.y,
-      w: defaultSize.w,
-      h: defaultSize.h,
-      minW: defaultSize.minW,
-      minH: defaultSize.minH,
-    };
-    // Preserve any other saved breakpoints + the strip; only the lg page grid gains
-    // the new spacer (other breakpoints pick it up via WidgetLayout's merge defaults).
-    const cur = layout?.layouts;
-    const next: Record<string, Placement[]> = cur ? { ...(cur as Record<string, Placement[]>) } : {};
-    next[FIT_BREAKPOINT] = [newTile, ...lg];
-    const strip = readStrip(cur ?? undefined);
-    setPlacements(strip ? withStrip(next as Record<Breakpoint, Placement[]>, strip) : next);
+    // The pure transform drops the new spacer at a free lg slot and carries the
+    // other breakpoints + the strip through; we supply the materialized default lg
+    // for the never-customized-yet case.
+    setPlacements(
+      addSpacerPure(layout?.layouts, nextId, getWidget(nextId).defaultSize, buildCurrentLgPlacements(), FIT_BREAKPOINT)
+    );
   };
   // The current default lg placements for the FULL available set — used to
   // materialize a saved blob the first time the user removes a widget from the
@@ -433,73 +390,30 @@ export function Dashboard() {
   // immediate and survives a reload. Idempotent + structural (setPlacements →
   // debounced PUT; placementsEqual guards the re-feed loop), so no React #185.
   const togglePin = (type: string) => {
+    const cur = layout?.layouts;
     // The effective current strip: the saved __strip if present, else today's
     // default stat band (the pre-customization strip). Materializing it here means
     // pinning the FIRST non-stat widget keeps the existing stat pins instead of
     // wiping them (the migration default becomes explicit on first edit).
-    const cur = layout?.layouts;
     const curStrip = readStrip(cur ?? undefined) ?? generateStripPlacements(statIds, widgetMins(statIds));
-    // The page breakpoints: the saved blob if present, else the freshly generated
-    // default for the full available set (so a never-customized layout still gets a
-    // complete set of page placements to move the widget between).
+    // The freshly generated default for the full available set (used by the pure
+    // transform when a breakpoint isn't saved yet).
     const fullDefault = generateDefaultPlacements({
       statIds: availableStats,
       chartIds: availableChartsAll,
       panelIds: availablePanels,
       mins: widgetMins([...availableStats, ...availableChartsAll, ...availablePanels]),
     });
-    const pageBlob: Record<string, Placement[]> = {};
-    for (const bp of Object.keys(COLS) as Breakpoint[]) {
-      const saved = cur?.[bp];
-      pageBlob[bp] = Array.isArray(saved) ? [...saved] : (fullDefault[bp] ?? []);
-    }
-
-    const isPinned = curStrip.some((p) => p.i === type);
-    let nextStrip: Placement[];
-    if (isPinned) {
-      // UNPIN: drop from the strip, then ensure it has a page placement to return
-      // to at every breakpoint (a free slot if it's missing there).
-      nextStrip = curStrip.filter((p) => p.i !== type);
-      const { defaultSize } = getWidget(type);
-      for (const bp of Object.keys(COLS) as Breakpoint[]) {
-        const arr = pageBlob[bp]!;
-        if (arr.some((p) => p.i === type)) continue; // already has a page slot
-        const slot = findFreeSlot(arr, defaultSize, COLS[bp]);
-        arr.unshift({
-          i: type,
-          x: slot.x,
-          y: slot.y,
-          w: Math.min(defaultSize.w, COLS[bp]),
-          h: defaultSize.h,
-          minW: defaultSize.minW,
-          minH: defaultSize.minH,
-        });
-      }
-    } else {
-      // PIN: add to the strip at a free slot (a COMPACT strip size so a pinned
-      // chart/panel doesn't make the bar viewport-tall — the strip is a thin band).
-      // Then drop the widget from every page breakpoint so it lives ONLY in the bar.
-      const { defaultSize } = getWidget(type);
-      const stripSize = stripSizeFor(type, defaultSize);
-      const slot = findFreeSlot(curStrip, stripSize, STRIP_COLS);
-      nextStrip = [
-        ...curStrip,
-        {
-          i: type,
-          x: slot.x,
-          y: slot.y,
-          w: stripSize.w,
-          h: stripSize.h,
-          minW: defaultSize.minW,
-          minH: defaultSize.minH,
-        },
-      ];
-      for (const bp of Object.keys(COLS) as Breakpoint[]) {
-        pageBlob[bp] = pageBlob[bp]!.filter((p) => p.i !== type);
-      }
-    }
-
-    setPlacements(withStrip(pageBlob as Record<Breakpoint, Placement[]>, nextStrip));
+    const { defaultSize } = getWidget(type);
+    setPlacements(
+      togglePinPure(cur ?? undefined, type, {
+        curStrip,
+        fullDefault,
+        defaultSize,
+        stripSize: stripSizeFor(type, defaultSize),
+        stripCols: STRIP_COLS,
+      })
+    );
   };
 
   // The palette's removable-widget groups — what the user can ADD BACK while

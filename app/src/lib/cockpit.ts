@@ -4,6 +4,11 @@
 
 import { DEFAULT_RANGE, migrateRangeMonths, type RangePref, type RangePreset } from './range';
 
+// `clampPage` moved to lib/layout/pagination.ts (issue #157) — re-exported here so
+// existing call sites (the cockpit, paginate.test.ts) that import it from cockpit
+// keep working unchanged.
+export { clampPage } from './layout/pagination';
+
 // Merge a saved chart order with the current default order. Keeps the user's
 // existing order/positions but APPENDS any chart ids that didn't exist when they
 // last saved (e.g. the weather/degree-days/normalized charts added later) and
@@ -15,15 +20,6 @@ export function mergeOrder(savedOrder: string[] | undefined, defaultOrder: strin
   const seen = new Set(saved);
   const appended = defaultOrder.filter((id) => !seen.has(id));
   return [...saved, ...appended];
-}
-
-// Wrap/clamp a desired page index to the valid range for a given page count, so
-// the cockpit's prev/next arrows can never select an out-of-range page even if
-// the visible-chart set shrinks underneath the active index. Returns 0 when there
-// are no pages. PURE — unit-tested. Exported for the cockpit and tests.
-export function clampPage(index: number, pageCount: number): number {
-  if (pageCount <= 0) return 0;
-  return Math.min(Math.max(0, Math.floor(index)), pageCount - 1);
 }
 
 // The saved blob may predate the RangePref model (issue #24): older prefs carry
