@@ -377,6 +377,41 @@ export function peakDemand(rows: IntervalProfileRow[]): PeakDemand | null {
 }
 
 // ---------------------------------------------------------------------------
+// formatPeakReadout — the peak-demand caption string (#150 consolidation)
+// ---------------------------------------------------------------------------
+// The load-shape and heatmap widgets each formatted the peak identically:
+//   "Peak 4.21 kW · Sat, Jun 7 7 PM"
+// i.e. `Peak <value> <unit> · <when>` where the value uses 2 decimals below 10 and
+// 1 at/above 10, and `<when>` is the interval start rendered in the account's local
+// clock (America/New_York, fixed — region-portability is a separate concern, #150
+// leaves the tz as-is). This is string/number SHAPING, so per standards §2 it lives
+// here as a PURE helper with a hand-calc test rather than in the components.
+//
+// Takes the structural subset the widgets actually have (the serialized
+// `PeakDemandPayload`: `value:number` + `intervalStart:string`) so it works without
+// importing the wire type. PURE — the Intl formatter is deterministic for a fixed
+// tz/locale.
+const PEAK_TZ = 'America/New_York';
+const peakInstantFmt = new Intl.DateTimeFormat('en-US', {
+  timeZone: PEAK_TZ,
+  weekday: 'short',
+  month: 'short',
+  day: 'numeric',
+  hour: 'numeric',
+  hour12: true,
+});
+
+export function formatPeakReadout(
+  peak: { value: number; intervalStart: string | Date } | null | undefined,
+  powerUnit: string,
+): string | null {
+  if (!peak) return null;
+  const value = peak.value.toFixed(peak.value < 10 ? 2 : 1);
+  const when = peakInstantFmt.format(new Date(peak.intervalStart));
+  return `Peak ${value} ${powerUnit} · ${when}`;
+}
+
+// ---------------------------------------------------------------------------
 // dayHourHeatmapRows — reshape reconciled hourly reads for the day×hour heatmap (#77)
 // ---------------------------------------------------------------------------
 // The existing pure aggregator dayHourHeatmap (lib/viz/aggregate.ts) + its

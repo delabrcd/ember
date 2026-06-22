@@ -20,10 +20,13 @@
 // scoped to host.accountId, following the GLOBAL RangeControl via from/to props,
 // with an alive-flag against stale responses and ChartShell chrome.
 
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import type { HeatmapVizSpec } from '@/lib/chartSpec';
-import type { HeatmapRow } from '@/lib/intervalProfile';
+import { formatPeakReadout, type HeatmapRow } from '@/lib/intervalProfile';
 import type { HeatmapPayload } from '@/lib/intervalAggregate';
+import { useIntervalPayload } from '@/lib/hooks/useIntervalPayload';
+import { Segmented } from './Segmented';
+import { IntervalWidgetBody } from './IntervalWidgetBody';
 import { HeatmapViz } from './VizCharts';
 import { ChartShell } from '../ChartShell';
 
@@ -34,42 +37,12 @@ const FUEL_UNIT: Record<Fuel, string> = { ELECTRIC: 'kWh', GAS: 'therms' };
 // Peak demand is average POWER over the interval: kW for electric, therms/h for gas.
 const POWER_UNIT: Record<Fuel, string> = { ELECTRIC: 'kW', GAS: 'therms/h' };
 
-// undefined = still loading; an error sentinel; else the server-computed payload.
-type LoadState = HeatmapPayload | { error: true } | undefined;
-
-// A labelled segmented control (mirrors IntervalLoadShape's LabelledSegmented).
-function LabelledSegmented<T extends string>({
-  value,
-  options,
-  onChange,
-}: {
-  value: T;
-  options: { label: string; value: T }[];
-  onChange: (v: T) => void;
-}) {
-  return (
-    <div className="inline-flex overflow-hidden rounded-lg border border-slate-700">
-      {options.map((o) => (
-        <button
-          key={o.value}
-          onClick={() => onChange(o.value)}
-          className={`px-2.5 py-1 text-xs transition ${
-            value === o.value ? 'bg-amber-500 text-slate-950' : 'bg-slate-800/50 text-slate-300 hover:bg-slate-700'
-          }`}
-        >
-          {o.label}
-        </button>
-      ))}
-    </div>
-  );
-}
-
 function HeatmapSettings({ fuel, onFuel }: { fuel: Fuel; onFuel: (f: Fuel) => void }) {
   return (
     <div className="space-y-3 text-sm">
       <div>
         <div className="mb-1 text-xs font-medium uppercase tracking-wide text-slate-500">Fuel</div>
-        <LabelledSegmented
+        <Segmented
           value={fuel}
           options={FUELS.map((f) => ({ label: FUEL_LABEL[f], value: f }))}
           onChange={onFuel}
@@ -78,18 +51,6 @@ function HeatmapSettings({ fuel, onFuel }: { fuel: Fuel; onFuel: (f: Fuel) => vo
     </div>
   );
 }
-
-// Format the peak-demand instant in the account's local clock as "Mon 6pm-ish":
-// short weekday + 12-h hour. PURE-ish (uses Intl with a fixed tz).
-const PEAK_TZ = 'America/New_York';
-const peakFmt = new Intl.DateTimeFormat('en-US', {
-  timeZone: PEAK_TZ,
-  weekday: 'short',
-  month: 'short',
-  day: 'numeric',
-  hour: 'numeric',
-  hour12: true,
-});
 
 // `from`/`to` are the GLOBAL RangeControl's resolved ISO day bounds (issue #36),
 // supplied by the WidgetHost. Omitted (a non-dashboard caller) → the route falls
@@ -104,43 +65,26 @@ export function IntervalHeatmap({
   to?: string;
 }) {
   const [fuel, setFuel] = useState<Fuel>('ELECTRIC');
-  const [state, setState] = useState<LoadState>(undefined);
 
   // Fetch on mount + whenever the fuel, the global range, or the account changes.
-  // Track an `alive` flag so a stale response can't overwrite the current one. The
+  // #150: the shared useIntervalPayload hook owns the fetch lifecycle +
+  // stale-response guard; the `validate` here keeps this widget's DISTINCT shape
+  // check + empty fallback (a well-formed payload always carries a grid; anything
+  // else → an empty grid so the widget shows its empty state, not a crash). The
   // server returns the display-ready grid + rowLabels + peak (aggregated over the
   // RAW rows) — there is NO client-side aggregation to redo.
-  useEffect(() => {
-    let alive = true;
-    setState(undefined);
-    const acctQuery = accountId != null ? `&accountId=${accountId}` : '';
-    const rangeQuery = from && to ? `&from=${from}&to=${to}` : '';
-    fetch(`/api/interval/heatmap?fuel=${fuel}${rangeQuery}${acctQuery}`)
-      .then((r) => r.json())
-      .then((j) => {
-        if (!alive) return;
-        // Defensive: a well-formed payload always carries a grid; treat anything
-        // else as an empty grid so the widget shows its empty state, not a crash.
-        if (j && j.grid && Array.isArray(j.grid.cells)) {
-          setState(j as HeatmapPayload);
-        } else {
-          setState({ grid: { xs: [], ys: [], cells: [], min: 0, max: 0 }, rowLabels: {}, peak: null });
-        }
-      })
-      .catch(() => {
-        if (alive) setState({ error: true });
-      });
-    return () => {
-      alive = false;
-    };
-  }, [fuel, from, to, accountId]);
+  const acctQuery = accountId != null ? `&accountId=${accountId}` : '';
+  const rangeQuery = from && to ? `&from=${from}&to=${to}` : '';
+  const url = `/api/interval/heatmap?fuel=${fuel}${rangeQuery}${acctQuery}`;
+  const { loading, errored, payload } = useIntervalPayload<HeatmapPayload>(url, (j) => {
+    const p = j as HeatmapPayload | null;
+    if (p && p.grid && Array.isArray(p.grid.cells)) return p;
+    return { grid: { xs: [], ys: [], cells: [], min: 0, max: 0 }, rowLabels: {}, peak: null };
+  });
 
   const unit = FUEL_UNIT[fuel];
   const powerUnit = POWER_UNIT[fuel];
 
-  const loading = state === undefined;
-  const errored = !!state && 'error' in state;
-  const payload = !loading && !errored ? (state as HeatmapPayload) : null;
   const empty = !!payload && payload.grid.cells.length === 0;
   const peak = payload?.peak ?? null;
 
@@ -161,9 +105,8 @@ export function IntervalHeatmap({
     },
   };
 
-  const peakReadout = peak
-    ? `Peak ${peak.value.toFixed(peak.value < 10 ? 2 : 1)} ${powerUnit} · ${peakFmt.format(new Date(peak.intervalStart))}`
-    : null;
+  // #150: the pure, hand-calc-tested formatPeakReadout (shaping out of the component).
+  const peakReadout = formatPeakReadout(peak, powerUnit);
 
   // The chart body (render-prop for ChartShell). `h` is a px number in the grid
   // cell (100% / 80vh come through as strings) — HeatmapViz wants a px height, so
@@ -171,22 +114,17 @@ export function IntervalHeatmap({
   const renderBody = (h: number | string) => {
     const pxHeight = typeof h === 'number' ? h : undefined;
     return (
-      <div style={{ height: h }} className="flex w-full flex-col">
-        {loading ? (
-          <div className="flex h-full w-full items-center justify-center">
-            <div className="h-full w-full animate-pulse rounded-lg bg-slate-800/40" />
-          </div>
-        ) : errored ? (
-          <div className="flex h-full w-full items-center justify-center px-4 text-center text-xs text-slate-400">
-            Couldn&apos;t load interval data — try again on the next check.
-          </div>
-        ) : empty ? (
-          <div className="flex h-full w-full items-center justify-center px-4 text-center text-sm text-slate-400">
-            <span>
-              No interval data yet{fuel === 'GAS' ? ' for gas' : ''} — it&apos;s collected on each scheduled check.
-            </span>
-          </div>
-        ) : (
+      <IntervalWidgetBody
+        height={h}
+        loading={loading}
+        errored={errored}
+        empty={empty}
+        emptyMessage={
+          <span>
+            No interval data yet{fuel === 'GAS' ? ' for gas' : ''} — it&apos;s collected on each scheduled check.
+          </span>
+        }
+      >
           <>
             {/* Peak-demand readout caption (#77): value + when. Hidden if no peak. */}
             {peakReadout && (
@@ -207,8 +145,7 @@ export function IntervalHeatmap({
               />
             </div>
           </>
-        )}
-      </div>
+      </IntervalWidgetBody>
     );
   };
 
