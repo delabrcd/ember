@@ -5,6 +5,8 @@ import {
   isZoomSelectionSignificant,
   classifyZoomSelection,
   wasDownsampled,
+  zoomWindowAroundCenter,
+  panWindow,
 } from '../src/lib/intervalZoom';
 
 // Hand-calculated tests for the PURE interval-zoom helpers (issue #141). The
@@ -126,6 +128,125 @@ describe('classifyZoomSelection (hand-calculated)', () => {
   it('treats non-finite endpoints as a silent click', () => {
     expect(classifyZoomSelection(NaN, 10, base, base + HOUR, MIN)).toBe('click');
     expect(classifyZoomSelection(0, 10, NaN, base + HOUR, MIN)).toBe('click');
+  });
+});
+
+describe('zoomWindowAroundCenter (hand-calculated, WS5)', () => {
+  // A clean 100-hour global window so fractions/spans are easy to verify by hand.
+  // bounds: [0, 100h]; an interior window [20h, 60h] (span 40h).
+  const B_LO = 0;
+  const B_HI = 100 * HOUR;
+  const LO = 20 * HOUR;
+  const HI = 60 * HOUR;
+  const MIN = HOUR; // 1h floor (matches the component MIN_ZOOM_SPAN_MS)
+
+  it('zoom-IN keeps the center at the same fractional position', () => {
+    // center at 30h is 10h into a 40h window → frac = 0.25.
+    // factor 0.5 → newSpan 20h; newLo = 30h - 0.25*20h = 30h - 5h = 25h; newHi = 45h.
+    // Verify 30h is still 0.25 of the way through [25h, 45h]: (30-25)/20 = 0.25. ✓
+    const r = zoomWindowAroundCenter(LO, HI, 30 * HOUR, 0.5, B_LO, B_HI, MIN);
+    expect(r.fromMs).toBe(25 * HOUR);
+    expect(r.toMs).toBe(45 * HOUR);
+    expect((30 * HOUR - r.fromMs) / (r.toMs - r.fromMs)).toBeCloseTo(0.25, 10);
+  });
+
+  it('zoom-OUT clamps to the global bounds and stops growing (no overshoot)', () => {
+    // window [20h,60h] span 40h; factor 4 → desired 160h > 100h bound span → capped
+    // to 100h, which IS the full bounds → collapses to exactly [0, 100h].
+    const r = zoomWindowAroundCenter(LO, HI, 40 * HOUR, 4, B_LO, B_HI, MIN);
+    expect(r.fromMs).toBe(B_LO);
+    expect(r.toMs).toBe(B_HI);
+  });
+
+  it('zoom-OUT that hits ONE wall slides inward keeping the new span', () => {
+    // window [10h,30h] span 20h, center 12h (frac 0.1). factor 2 → newSpan 40h.
+    // newLo = 12h - 0.1*40h = 12h - 4h = 8h; newHi = 48h. 8h ≥ 0 and 48h ≤ 100h,
+    // so no wall hit — span preserved at 40h.
+    const r = zoomWindowAroundCenter(10 * HOUR, 30 * HOUR, 12 * HOUR, 2, B_LO, B_HI, MIN);
+    expect(r.toMs - r.fromMs).toBe(40 * HOUR);
+    expect(r.fromMs).toBe(8 * HOUR);
+    expect(r.toMs).toBe(48 * HOUR);
+  });
+
+  it('zoom-OUT near the left wall pins the low edge to the bound (slides, keeps span)', () => {
+    // window [5h,15h] span 10h, center 6h (frac 0.1). factor 3 → newSpan 30h.
+    // newLo = 6h - 0.1*30h = 6h - 3h = 3h; newHi = 33h. 3h ≥ 0 so still inside —
+    // no clamp. Tighten: use center 5h (frac 0) → newLo = 5h - 0 = 5h… so instead
+    // push the window against the wall: window [2h,12h] span 10h, center 3h frac 0.1,
+    // factor 4 → newSpan 40h; newLo = 3h - 0.1*40h = 3h - 4h = -1h < 0 → clamp low
+    // to 0, slide hi to 0 + 40h = 40h (span preserved).
+    const r = zoomWindowAroundCenter(2 * HOUR, 12 * HOUR, 3 * HOUR, 4, B_LO, B_HI, MIN);
+    expect(r.fromMs).toBe(B_LO);
+    expect(r.toMs - r.fromMs).toBe(40 * HOUR);
+    expect(r.toMs).toBe(40 * HOUR);
+  });
+
+  it('respects the min-span floor on a deep zoom-in', () => {
+    // window [20h,60h] span 40h; factor 0.01 → desired 0.4h < 1h floor → floored to 1h.
+    // center 40h frac 0.5 → newLo = 40h - 0.5*1h = 39.5h; newHi = 40.5h (span 1h).
+    const r = zoomWindowAroundCenter(LO, HI, 40 * HOUR, 0.01, B_LO, B_HI, MIN);
+    expect(r.toMs - r.fromMs).toBe(MIN);
+    expect(r.fromMs).toBe(40 * HOUR - 0.5 * HOUR);
+    expect(r.toMs).toBe(40 * HOUR + 0.5 * HOUR);
+  });
+
+  it('returns the ordered input window unchanged on malformed input', () => {
+    expect(zoomWindowAroundCenter(60 * HOUR, 20 * HOUR, NaN, 0.5, B_LO, B_HI, MIN)).toEqual({
+      fromMs: 20 * HOUR,
+      toMs: 60 * HOUR,
+    });
+  });
+});
+
+describe('panWindow (hand-calculated, WS5)', () => {
+  const B_LO = 0;
+  const B_HI = 100 * HOUR;
+
+  it('shifts the window right by the full delta when it fits', () => {
+    // [20h,40h] + 10h → [30h,50h]; both inside [0,100h].
+    expect(panWindow(20 * HOUR, 40 * HOUR, 10 * HOUR, B_LO, B_HI)).toEqual({
+      fromMs: 30 * HOUR,
+      toMs: 50 * HOUR,
+    });
+  });
+
+  it('shifts left by the full delta when it fits', () => {
+    expect(panWindow(40 * HOUR, 60 * HOUR, -10 * HOUR, B_LO, B_HI)).toEqual({
+      fromMs: 30 * HOUR,
+      toMs: 50 * HOUR,
+    });
+  });
+
+  it('reduces the shift at the RIGHT wall (clamps, preserves span)', () => {
+    // [80h,95h] span 15h; +20h would push hi to 115h > 100h → max right travel is
+    // (100-95)=5h → window slides to [85h,100h].
+    expect(panWindow(80 * HOUR, 95 * HOUR, 20 * HOUR, B_LO, B_HI)).toEqual({
+      fromMs: 85 * HOUR,
+      toMs: 100 * HOUR,
+    });
+  });
+
+  it('reduces the shift at the LEFT wall (clamps, preserves span)', () => {
+    // [5h,25h] span 20h; -30h would push lo to -25h → max left travel is (0-5)=-5h →
+    // window slides to [0h,20h].
+    expect(panWindow(5 * HOUR, 25 * HOUR, -30 * HOUR, B_LO, B_HI)).toEqual({
+      fromMs: 0,
+      toMs: 20 * HOUR,
+    });
+  });
+
+  it('cannot pan a window that already spans the bounds (pins to bounds)', () => {
+    expect(panWindow(0, 100 * HOUR, 10 * HOUR, B_LO, B_HI)).toEqual({
+      fromMs: 0,
+      toMs: 100 * HOUR,
+    });
+  });
+
+  it('returns the ordered input window on malformed input', () => {
+    expect(panWindow(40 * HOUR, 20 * HOUR, NaN, B_LO, B_HI)).toEqual({
+      fromMs: 20 * HOUR,
+      toMs: 40 * HOUR,
+    });
   });
 });
 

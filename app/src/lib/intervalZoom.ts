@@ -93,6 +93,136 @@ export function classifyZoomSelection(
   return Math.abs(endMs - startMs) >= minSpanMs ? 'zoom' : 'too-small';
 }
 
+// ---- WS5: mouse-navigation window math --------------------------------------
+// On TOP of the drag-select zoom above, WS5 adds focused mouse navigation: wheel
+// to zoom on the cursor, Shift+wheel / Ctrl+drag to pan. The window MATH for those
+// gestures lives here as PURE helpers so it can be hand-calc unit-tested in
+// isolation — the widget owns only the impure shell (focus, native wheel listener,
+// debounced refetch). Both helpers operate on epoch-ms instants and are clamped to
+// the global `[boundsFromMs, boundsToMs]` window (the dashboard RangeControl span)
+// and a `minSpanMs` floor; they never widen past the bounds nor below the floor.
+
+// A window expressed as epoch-ms bounds (the in-memory representation the gestures
+// manipulate before it's mapped to /api/interval day strings via zoomSpanToRange).
+export type WindowMs = { fromMs: number; toMs: number };
+
+// Zoom the window [fromMs, toMs] around a fixed center instant `centerMs`,
+// contracting (factor < 1) or expanding (factor > 1) the span while keeping
+// centerMs at the SAME FRACTIONAL position within the window — so the time under
+// the cursor stays under the cursor as the user wheels. The result is clamped:
+//   • the span never drops below `minSpanMs` (zoom-in floor: at the floor we keep
+//     centerMs's fractional position and just stop shrinking);
+//   • neither edge ever leaves [boundsFromMs, boundsToMs]; if the new (wider) span
+//     would exceed the full bounds, it collapses to exactly the bounds.
+// When an edge clamps, the OTHER edge is NOT pushed past its bound — the span is
+// pinned to the bound rather than sliding (a zoom-out that hits the left wall stops
+// growing leftward but keeps growing rightward until it too hits the wall, at which
+// point the whole window equals the bounds). PURE — no React/DOM.
+//
+// `factor` is the multiplier applied to the CURRENT span (e.g. 0.85 = zoom in one
+// ~15% notch, 1/0.85 ≈ 1.176 = zoom out). The caller derives it from the wheel
+// delta sign; this helper is direction-agnostic.
+export function zoomWindowAroundCenter(
+  fromMs: number,
+  toMs: number,
+  centerMs: number,
+  factor: number,
+  boundsFromMs: number,
+  boundsToMs: number,
+  minSpanMs: number,
+): WindowMs {
+  // Guard: malformed inputs → return the (ordered) input window unchanged.
+  if (
+    !Number.isFinite(fromMs) ||
+    !Number.isFinite(toMs) ||
+    !Number.isFinite(centerMs) ||
+    !Number.isFinite(factor) ||
+    factor <= 0 ||
+    !Number.isFinite(boundsFromMs) ||
+    !Number.isFinite(boundsToMs)
+  ) {
+    return { fromMs: Math.min(fromMs, toMs), toMs: Math.max(fromMs, toMs) };
+  }
+  const lo = Math.min(fromMs, toMs);
+  const hi = Math.max(fromMs, toMs);
+  const bLo = Math.min(boundsFromMs, boundsToMs);
+  const bHi = Math.max(boundsFromMs, boundsToMs);
+  const boundSpan = bHi - bLo;
+
+  const curSpan = hi - lo;
+  // The new span: scaled, floored at minSpanMs, and capped at the full bounds span
+  // (can't be wider than the global window).
+  const floor = Math.min(minSpanMs, boundSpan); // a tiny global window can't demand a bigger floor
+  let newSpan = curSpan * factor;
+  if (newSpan < floor) newSpan = floor;
+  if (newSpan > boundSpan) newSpan = boundSpan;
+
+  // Keep centerMs at the same fractional position `frac` within the window. Clamp
+  // the center into the window first so a center outside [lo,hi] (cursor off the
+  // plot) degrades to the nearest edge rather than throwing the math off.
+  const clampedCenter = Math.min(Math.max(centerMs, lo), hi);
+  const frac = curSpan > 0 ? (clampedCenter - lo) / curSpan : 0.5;
+
+  // newLo so that clampedCenter sits at the same fraction of the new span.
+  let newLo = clampedCenter - frac * newSpan;
+  let newHi = newLo + newSpan;
+
+  // Clamp into bounds WITHOUT changing the span (slide the window back inside).
+  if (newLo < bLo) {
+    newLo = bLo;
+    newHi = bLo + newSpan;
+  }
+  if (newHi > bHi) {
+    newHi = bHi;
+    newLo = bHi - newSpan;
+  }
+  // After sliding, the low edge may still dip below bLo only if newSpan === boundSpan;
+  // pin it exactly to the bounds in that case.
+  if (newLo < bLo) newLo = bLo;
+  return { fromMs: newLo, toMs: newHi };
+}
+
+// Shift (pan) the window [fromMs, toMs] by `deltaMs` (positive = later/right,
+// negative = earlier/left) WITHOUT changing its span, clamped so it never leaves
+// [boundsFromMs, boundsToMs]. At an edge the SHIFT is reduced (not the span): a pan
+// that would push the window past the wall stops at the wall. If the window already
+// equals/exceeds the bounds it can't pan at all (returns it pinned to the bounds).
+// PURE — no React/DOM.
+export function panWindow(
+  fromMs: number,
+  toMs: number,
+  deltaMs: number,
+  boundsFromMs: number,
+  boundsToMs: number,
+): WindowMs {
+  if (
+    !Number.isFinite(fromMs) ||
+    !Number.isFinite(toMs) ||
+    !Number.isFinite(deltaMs) ||
+    !Number.isFinite(boundsFromMs) ||
+    !Number.isFinite(boundsToMs)
+  ) {
+    return { fromMs: Math.min(fromMs, toMs), toMs: Math.max(fromMs, toMs) };
+  }
+  const lo = Math.min(fromMs, toMs);
+  const hi = Math.max(fromMs, toMs);
+  const bLo = Math.min(boundsFromMs, boundsToMs);
+  const bHi = Math.max(boundsFromMs, boundsToMs);
+  const span = hi - lo;
+
+  // Window already spans (or exceeds) the bounds → pin to the bounds, no pan room.
+  if (span >= bHi - bLo) return { fromMs: bLo, toMs: bLo + (bHi - bLo) };
+
+  // Reduce the shift at the walls: the max we can move right is (bHi - hi), the max
+  // left is (bLo - lo) (a negative number). Clamp delta into that travel range.
+  const maxRight = bHi - hi; // ≥ 0
+  const maxLeft = bLo - lo; // ≤ 0
+  let d = deltaMs;
+  if (d > maxRight) d = maxRight;
+  if (d < maxLeft) d = maxLeft;
+  return { fromMs: lo + d, toMs: hi + d };
+}
+
 // Decide whether the /api/interval downsampler actually reduced a result set —
 // i.e. whether FINER detail exists than what was returned (issue #141, the
 // "finest detail / max zoom" badge). It mirrors downsampleByTime's own gate

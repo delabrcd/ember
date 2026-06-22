@@ -66,6 +66,32 @@
 // GAPS: connectNulls={false} is load-bearing — missing intervals (the API omits
 // them) render as line BREAKS, NEVER as fabricated zeros. The server returns gaps
 // as absent rows; toHistoryPoints keeps them absent.
+//
+// MOUSE NAVIGATION (WS5): on TOP of the drag-select zoom, the chart supports
+// FOCUSED mouse navigation — gestures that engage ONLY while the chart is focused:
+//   • Click the chart body → focus it (a subtle amber focus ring appears). Click
+//     OUTSIDE, or press Esc, releases focus. The wheel/pan gestures below are live
+//     ONLY while focused.
+//   • Wheel up/down → zoom IN/OUT centered on the time under the cursor (the window
+//     contracts/expands around the cursor's data point; ~12% per notch). The wheel
+//     is captured (page-scroll prevented) ONLY while focused, so scrolling past an
+//     UNfocused chart never gets trapped.
+//   • Shift+wheel → pan the window left/right (~12% of the span per notch).
+//   • Ctrl+drag → grab-and-pan the viewport horizontally (the window moves OPPOSITE
+//     the drag, like grabbing the plot). A PLAIN drag (no Ctrl) stays the existing
+//     zoom-SELECT band — WS5 does not touch that path.
+// All the WINDOW MATH is the PURE zoomWindowAroundCenter / panWindow in
+// lib/intervalZoom.ts (hand-calc unit-tested); this component is only the impure
+// shell: focus tracking, the native non-passive wheel listener (React onWheel is
+// passive and can't preventDefault), Ctrl/hover tracking via refs, and a DEBOUNCED
+// refetch so a flurry of wheel ticks coalesces into ONE /api/interval request.
+//
+// The gesture window is expressed in epoch-MS and clamped to the global
+// [from, to] window (never zoom out past it, never pan outside it, never below the
+// 1-hour MIN_ZOOM_SPAN_MS floor). When a zoom-out reaches the full global window we
+// CLEAR the local zoom (equivalent to Reset; the "Reset zoom" affordance hides).
+// The display window (`zoom`) updates IMMEDIATELY for responsiveness; the actual
+// fetch window (`fetchZoom`) is a debounced copy so rapid ticks don't spam the route.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -81,7 +107,13 @@ import {
 } from 'recharts';
 import { type IntervalProfileRow } from '@/lib/intervalProfile';
 import { toHistoryPoints, formatGrain, type HistoryPoint } from '@/lib/intervalHistory';
-import { classifyZoomSelection, zoomSpanToRange } from '@/lib/intervalZoom';
+import {
+  classifyZoomSelection,
+  zoomSpanToRange,
+  zoomWindowAroundCenter,
+  panWindow,
+  type WindowMs,
+} from '@/lib/intervalZoom';
 import {
   getCached,
   swrFetch,
@@ -113,6 +145,20 @@ const MIN_ZOOM_SPAN_MS = 60 * 60_000;
 
 // How long the transient "Max zoom reached" hint stays up before auto-clearing.
 const ZOOM_HINT_MS = 2_000;
+
+// ---- WS5 mouse-navigation tuning --------------------------------------------
+// Wheel zoom step: the multiplier applied to the current span PER notch. Zoom-in
+// contracts the span to 88% (factor 0.88 ≈ a 12% tighter window); zoom-out is the
+// reciprocal (≈1.136). ~10–18% is a good feel; 12% is the middle.
+const WHEEL_ZOOM_IN_FACTOR = 0.88;
+const WHEEL_ZOOM_OUT_FACTOR = 1 / WHEEL_ZOOM_IN_FACTOR;
+// Shift+wheel pan step: shift the window by this fraction of its CURRENT span per
+// notch (~10–15%). Sign comes from the wheel deltaY direction.
+const WHEEL_PAN_FRACTION = 0.12;
+// Debounce for the gesture-driven refetch: update the display window instantly,
+// but coalesce a flurry of wheel/pan ticks into ONE /api/interval request after the
+// gestures settle. The route is ~15–40ms so this stays snappy.
+const NAV_REFETCH_DEBOUNCE_MS = 150;
 
 // ---- Types ------------------------------------------------------------------
 type Fuel = 'ELECTRIC' | 'GAS';
@@ -238,17 +284,64 @@ export function IntervalHistory({
   // deliberate drag is refused for being tighter than MIN_ZOOM_SPAN_MS.
   const [zoomHint, setZoomHint] = useState(false);
 
-  // The window actually fetched: the zoomed span when zoomed, else the global one.
-  const fetchFrom = zoom ? zoom.from : from;
-  const fetchTo = zoom ? zoom.to : to;
+  // ---- WS5 navigation state -------------------------------------------------
+  // Whether the chart is FOCUSED (clicked). The wheel/pan gestures engage ONLY
+  // while focused, and the native wheel listener captures page-scroll ONLY while
+  // focused — so scrolling past an unfocused chart is never trapped.
+  const [focused, setFocused] = useState(false);
+  // The DEBOUNCED copy of `zoom` that actually drives the fetch (WS5). Gestures
+  // update `zoom` immediately (responsive subtitle/reset affordance) but only push
+  // into `fetchZoom` after NAV_REFETCH_DEBOUNCE_MS so a flurry of ticks → one fetch.
+  // The drag-select commit and resetZoom set it synchronously (no debounce) so a
+  // discrete gesture refetches at once. null ⇒ follow the global window.
+  const [fetchZoom, setFetchZoom] = useState<Zoom | null>(null);
+
+  // The chart-body wrapper element — the focus host. We attach the native
+  // non-passive wheel listener here and draw the focus ring on it.
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+  // The time (epoch-ms) under the cursor, tracked from the Recharts onMouseMove via
+  // pointByLabel. The wheel handler uses it as the zoom center (fallback: midpoint).
+  const hoverTsRef = useRef<number | null>(null);
+  // Whether Ctrl is currently held — tracked from document keydown/keyup AND from the
+  // native mouse/wheel events, because Recharts' synthetic mouse-state object doesn't
+  // reliably expose modifier keys. Drives the Ctrl+drag pan branch.
+  const ctrlDownRef = useRef(false);
+  // The in-flight Ctrl+drag pan, if any: the hover ts + window captured at mouse-down.
+  // While set, plain drag-select is suppressed and moves pan the window instead.
+  const panDragRef = useRef<{ startTs: number; fromMs: number; toMs: number } | null>(null);
+  // The debounce timer handle for the gesture refetch.
+  const navTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // The window actually fetched: the DEBOUNCED zoom span when zoomed, else global.
+  const fetchFrom = fetchZoom ? fetchZoom.from : from;
+  const fetchTo = fetchZoom ? fetchZoom.to : to;
 
   // Drop any active zoom (and any in-progress drag) whenever the fuel, the account,
   // or the GLOBAL range changes — a zoom into the old context would be stale.
   useEffect(() => {
     setZoom(null);
+    setFetchZoom(null);
     setDrag(null);
     setZoomHint(false);
+    panDragRef.current = null;
+    if (navTimerRef.current) {
+      clearTimeout(navTimerRef.current);
+      navTimerRef.current = null;
+    }
   }, [fuel, from, to, accountId]);
+
+  // The GLOBAL window bounds in epoch-ms (the outer clamp for every WS5 gesture).
+  // Parsed from the day-string props; null when either bound is absent (a
+  // non-dashboard caller using the route default) → gestures no-op (can't clamp).
+  const boundsFromMs = useMemo(() => (from ? new Date(from).getTime() : NaN), [from]);
+  const boundsToMs = useMemo(() => {
+    if (!to) return NaN;
+    // The route widens `to` to END-of-day (23:59:59.999Z), so the real right bound is
+    // the last instant of the `to` day — match that so a zoom-out can reach it.
+    const t = new Date(to).getTime();
+    return Number.isFinite(t) ? t + (24 * 60 * 60_000 - 1) : NaN;
+  }, [to]);
+  const boundsValid = Number.isFinite(boundsFromMs) && Number.isFinite(boundsToMs);
 
   // Auto-dismiss the "Max zoom reached" hint ~2s after it's shown (issue #141).
   useEffect(() => {
@@ -256,6 +349,64 @@ export function IntervalHistory({
     const id = setTimeout(() => setZoomHint(false), ZOOM_HINT_MS);
     return () => clearTimeout(id);
   }, [zoomHint]);
+
+  // ---- WS5 focus management: Esc + click-away release -----------------------
+  // While focused, listen on the document for: (1) Esc → blur; (2) a pointer-down
+  // OUTSIDE the chart body → blur (click-away). Listening on the document (not the
+  // wrapper's onBlur) is robust: the SVG/Recharts internals steal focus and a real
+  // <div> blur never fires reliably here, so we drive focus explicitly. Only wired
+  // up while focused, so it adds no global listeners at rest.
+  useEffect(() => {
+    if (!focused) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setFocused(false);
+    };
+    const onDocPointer = (e: PointerEvent) => {
+      const el = bodyRef.current;
+      if (el && e.target instanceof Node && !el.contains(e.target)) setFocused(false);
+    };
+    document.addEventListener('keydown', onKey);
+    // Capture phase so we see the click-away before any stopPropagation inside it.
+    document.addEventListener('pointerdown', onDocPointer, true);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('pointerdown', onDocPointer, true);
+    };
+  }, [focused]);
+
+  // Track Ctrl globally so the Ctrl+drag pan can detect the modifier even though the
+  // Recharts synthetic mouse-state object doesn't expose it. Cheap, always-on (a
+  // boolean flip); the gesture only reads ctrlDownRef while focused + dragging.
+  useEffect(() => {
+    const sync = (e: KeyboardEvent) => {
+      ctrlDownRef.current = e.ctrlKey || e.metaKey;
+    };
+    window.addEventListener('keydown', sync);
+    window.addEventListener('keyup', sync);
+    return () => {
+      window.removeEventListener('keydown', sync);
+      window.removeEventListener('keyup', sync);
+    };
+  }, []);
+
+  // Push the current display window (`zoom`) into the DEBOUNCED fetch window after
+  // NAV_REFETCH_DEBOUNCE_MS — a flurry of wheel/pan ticks coalesces into one
+  // /api/interval request. `null` clears the fetch zoom (back to the global window).
+  const scheduleNavRefetch = useCallback((next: Zoom | null) => {
+    if (navTimerRef.current) clearTimeout(navTimerRef.current);
+    navTimerRef.current = setTimeout(() => {
+      navTimerRef.current = null;
+      setFetchZoom(next);
+    }, NAV_REFETCH_DEBOUNCE_MS);
+  }, []);
+
+  // Clean up the debounce timer on unmount.
+  useEffect(
+    () => () => {
+      if (navTimerRef.current) clearTimeout(navTimerRef.current);
+    },
+    [],
+  );
 
   // The "base" reload key (fuel/global-range/account) is kept only so the fetch
   // effect can record what it last fetched. WS2's no-cold-blank rule no longer needs
@@ -380,25 +531,122 @@ export function IntervalHistory({
     return m;
   }, [data]);
 
-  // ---- Drag-to-select-zoom handlers (issue #141) ----------------------------
-  const onChartMouseDown = useCallback((e: { activeLabel?: string | number } | null) => {
-    const label = e?.activeLabel;
-    if (label == null) return;
-    setDrag({ refX1: String(label), refX2: null });
-  }, []);
+  // The CURRENT window in epoch-ms: the live zoom span when zoomed, else the global
+  // bounds. This is the window every WS5 gesture transforms (zoom/pan) before
+  // re-clamping to the bounds. (`zoom` carries startMs/endMs; the global window is
+  // boundsFromMs..boundsToMs.)
+  const curFromMs = zoom ? zoom.startMs : boundsFromMs;
+  const curToMs = zoom ? zoom.endMs : boundsToMs;
+
+  // ---- WS5: apply a gesture-produced ms window ------------------------------
+  // Clamp the new [fromMs,toMs] to the global bounds + min span, then:
+  //   • if it reaches/exceeds the FULL global window → CLEAR the zoom (== Reset, the
+  //     "Reset zoom" affordance hides) and refetch the global window;
+  //   • else → set the LIVE zoom immediately (responsive subtitle/affordance) and
+  //     DEBOUNCE the refetch so a flurry of ticks coalesces into one request.
+  // `fetchZoomNow` forces a synchronous fetch (used by discrete gestures like the
+  // drag-select commit / reset, where there's no flurry to coalesce).
+  const applyNavWindow = useCallback(
+    (next: WindowMs, fetchZoomNow = false) => {
+      if (!boundsValid) return;
+      const lo = next.fromMs;
+      const hi = next.toMs;
+      // Reached the full global window (within a 1s slop) → equivalent to Reset.
+      if (lo <= boundsFromMs + 1000 && hi >= boundsToMs - 1000) {
+        setDrag(null);
+        setZoom(null);
+        if (fetchZoomNow) {
+          if (navTimerRef.current) {
+            clearTimeout(navTimerRef.current);
+            navTimerRef.current = null;
+          }
+          setFetchZoom(null);
+        } else {
+          scheduleNavRefetch(null);
+        }
+        return;
+      }
+      const { from: zf, to: zt } = zoomSpanToRange(lo, hi);
+      const z: Zoom = { from: zf, to: zt, startMs: lo, endMs: hi };
+      setZoom((prev) =>
+        prev && prev.startMs === lo && prev.endMs === hi ? prev : z,
+      );
+      if (fetchZoomNow) {
+        if (navTimerRef.current) {
+          clearTimeout(navTimerRef.current);
+          navTimerRef.current = null;
+        }
+        setFetchZoom(z);
+      } else {
+        scheduleNavRefetch(z);
+      }
+    },
+    [boundsValid, boundsFromMs, boundsToMs, scheduleNavRefetch],
+  );
+
+  // ---- Drag handlers (issue #141 zoom-select + WS5 Ctrl+drag pan) -----------
+  // Mouse-down focuses the chart (WS5) and starts either a Ctrl+drag PAN (record the
+  // start hover ts + the current window) or the existing zoom-SELECT band (no Ctrl).
+  const onChartMouseDown = useCallback(
+    (e: { activeLabel?: string | number } | null) => {
+      setFocused(true);
+      const label = e?.activeLabel;
+      if (label == null) return;
+      if (ctrlDownRef.current && boundsValid) {
+        // Ctrl+drag PAN: capture the start point's ts + the window we're panning.
+        const a = pointByLabel.get(String(label));
+        const startTs = a ? a.ts : hoverTsRef.current;
+        if (startTs != null && Number.isFinite(startTs)) {
+          panDragRef.current = { startTs, fromMs: curFromMs, toMs: curToMs };
+          return; // suppress the zoom-select band while panning
+        }
+      }
+      // Plain drag → the existing zoom-select band (UNCHANGED).
+      setDrag({ refX1: String(label), refX2: null });
+    },
+    [boundsValid, pointByLabel, curFromMs, curToMs],
+  );
 
   const onChartMouseMove = useCallback(
     (e: { activeLabel?: string | number } | null) => {
-      if (!drag) return;
       const label = e?.activeLabel;
+      // Always track the time under the cursor for the wheel-zoom center (WS5).
+      if (label != null) {
+        const pt = pointByLabel.get(String(label));
+        if (pt) hoverTsRef.current = pt.ts;
+      }
+      // Ctrl+drag PAN in progress (WS5): pan the captured window by the TIME delta
+      // between the start point and the current point (the window moves OPPOSITE the
+      // cursor — grabbing the plot drags the data, so dragging right reveals EARLIER
+      // time → shift the window left).
+      const pan = panDragRef.current;
+      if (pan) {
+        if (label == null) return;
+        const cur = pointByLabel.get(String(label));
+        if (!cur) return;
+        const cursorDelta = cur.ts - pan.startTs;
+        const next = panWindow(pan.fromMs, pan.toMs, -cursorDelta, boundsFromMs, boundsToMs);
+        applyNavWindow(next); // debounced refetch; live window updates immediately
+        return;
+      }
+      // Plain zoom-SELECT band (issue #141, UNCHANGED).
+      if (!drag) return;
       if (label == null) return;
       const next = String(label);
       setDrag((prev) => (prev && prev.refX2 !== next ? { ...prev, refX2: next } : prev));
     },
-    [drag],
+    [drag, pointByLabel, boundsFromMs, boundsToMs, applyNavWindow],
   );
 
   const commitDrag = useCallback(() => {
+    // End a Ctrl+drag pan first (WS5): the live window already tracked the drag; just
+    // force a synchronous refetch of the final window and clear the pan state.
+    if (panDragRef.current) {
+      panDragRef.current = null;
+      if (zoom) applyNavWindow({ fromMs: zoom.startMs, toMs: zoom.endMs }, true);
+      else applyNavWindow({ fromMs: boundsFromMs, toMs: boundsToMs }, true);
+      return;
+    }
     setDrag((sel) => {
       // Three cases (issue #141), decided by the PURE classifyZoomSelection:
       //   • 'click'     — silent no-op (no zoom, no hint).
@@ -417,17 +665,81 @@ export function IntervalHistory({
       const { from: zf, to: zt } = zoomSpanToRange(a.ts, b.ts);
       const startMs = Math.min(a.ts, b.ts);
       const endMs = Math.max(a.ts, b.ts);
-      setZoom((prev) =>
-        prev && prev.from === zf && prev.to === zt ? prev : { from: zf, to: zt, startMs, endMs },
-      );
+      const z: Zoom = { from: zf, to: zt, startMs, endMs };
+      setZoom((prev) => (prev && prev.from === zf && prev.to === zt ? prev : z));
+      // Discrete gesture → fetch synchronously (no flurry to debounce).
+      if (navTimerRef.current) {
+        clearTimeout(navTimerRef.current);
+        navTimerRef.current = null;
+      }
+      setFetchZoom(z);
       return null;
     });
-  }, [pointByLabel]);
+  }, [pointByLabel, zoom, boundsFromMs, boundsToMs, applyNavWindow]);
 
   const resetZoom = useCallback(() => {
     setDrag(null);
     setZoom(null);
+    panDragRef.current = null;
+    if (navTimerRef.current) {
+      clearTimeout(navTimerRef.current);
+      navTimerRef.current = null;
+    }
+    setFetchZoom(null);
   }, []);
+
+  // ---- WS5: native non-passive wheel listener (zoom / shift-pan) ------------
+  // React's onWheel is PASSIVE — it can't preventDefault to stop page scroll. So we
+  // attach a native listener with { passive: false } on the chart body, gated on
+  // `focused`: it's only present (and only captures scroll) while the chart is
+  // focused, so scrolling past an UNfocused chart is never trapped. Wheel up = zoom
+  // IN, down = zoom OUT, centered on hoverTsRef (fallback: window midpoint);
+  // Shift+wheel = pan. The window update is immediate; the refetch is debounced.
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (!el || !focused) return;
+    const onWheel = (e: WheelEvent) => {
+      // No-op (and let the page scroll) when we can't compute a window.
+      if (!boundsValid || data.length === 0) return;
+      e.preventDefault(); // capture: don't scroll the page while navigating
+      ctrlDownRef.current = e.ctrlKey || e.metaKey; // keep Ctrl tracking fresh
+      const fromMs = zoom ? zoom.startMs : boundsFromMs;
+      const toMs = zoom ? zoom.endMs : boundsToMs;
+      if (e.shiftKey) {
+        // Shift+wheel → pan. deltaY > 0 (wheel down) pans RIGHT (later); < 0 LEFT.
+        const span = toMs - fromMs;
+        const dir = e.deltaY > 0 ? 1 : -1;
+        const next = panWindow(
+          fromMs,
+          toMs,
+          dir * WHEEL_PAN_FRACTION * span,
+          boundsFromMs,
+          boundsToMs,
+        );
+        applyNavWindow(next);
+      } else {
+        // Wheel up (deltaY < 0) → zoom IN; wheel down → zoom OUT. Center on the
+        // hovered ts, falling back to the window midpoint when no hover is tracked.
+        const center =
+          hoverTsRef.current != null && Number.isFinite(hoverTsRef.current)
+            ? hoverTsRef.current
+            : (fromMs + toMs) / 2;
+        const factor = e.deltaY < 0 ? WHEEL_ZOOM_IN_FACTOR : WHEEL_ZOOM_OUT_FACTOR;
+        const next = zoomWindowAroundCenter(
+          fromMs,
+          toMs,
+          center,
+          factor,
+          boundsFromMs,
+          boundsToMs,
+          MIN_ZOOM_SPAN_MS,
+        );
+        applyNavWindow(next);
+      }
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [focused, boundsValid, boundsFromMs, boundsToMs, zoom, data.length, applyNavWindow]);
 
   // Subtitle: e.g. "Electric · kWh · hourly" (the global time window is in the
   // dashboard header). The grain segment is human-formatted from the numeric
@@ -452,7 +764,20 @@ export function IntervalHistory({
   // The chart body (render-prop for ChartShell): the loading/empty/errored states,
   // the revalidate shimmer, the overlay badges, and the Recharts tree.
   const renderBody = (h: number | string) => (
-    <div style={{ height: h }} className="relative w-full">
+    <div
+      ref={bodyRef}
+      style={{ height: h }}
+      // WS5 focus host: a click anywhere on the body focuses it (the document
+      // pointerdown/Esc listeners release it); the native wheel listener is bound to
+      // this element. The amber focus RING (rounded to match the card) signals that
+      // wheel-zoom / shift-pan / ctrl-drag are live. The wrapper itself is just a
+      // positioned container — it does NOT block the SVG's pointer events, so the
+      // drag-zoom select still works (the ring is a box-shadow, not an overlay).
+      className={`relative w-full rounded-lg transition-shadow ${
+        focused ? 'ring-2 ring-amber-500/40' : ''
+      }`}
+      onMouseDown={() => setFocused(true)}
+    >
       {/* Subtle "updating" shimmer (WS2): a thin top progress bar shown whenever a
           revalidation is in flight AND there's already a chart up — so a reload
           NEVER cold-blanks. Pointer-events-none so it can't intercept the drag. */}
