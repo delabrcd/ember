@@ -19,7 +19,6 @@ import {
   Area,
   CartesianGrid,
   ComposedChart,
-  Legend,
   Line,
   ResponsiveContainer,
   Scatter,
@@ -48,7 +47,6 @@ const tooltipStyle = {
 const axisStyle = { stroke: '#475569', fontSize: 11 } as const;
 
 const AMBER = '#f59e0b';
-const SKY = '#38bdf8';
 
 // A wrapper giving each viz a definite-height box so Recharts'
 // ResponsiveContainer always measures a non-zero plot (the same reason

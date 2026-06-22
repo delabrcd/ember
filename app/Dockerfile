@@ -3,7 +3,7 @@
 FROM mcr.microsoft.com/playwright:v1.60.0-noble AS deps
 WORKDIR /app
 COPY package.json package-lock.json* ./
-RUN npm install
+RUN npm ci
 
 # Test stage: source + deps, no build. `docker build --target test -t ng-test ./app`
 # then `docker run --rm ng-test` runs the hand-calculated unit tests.

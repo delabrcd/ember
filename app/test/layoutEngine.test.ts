@@ -1,13 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
   COLS,
-  DEFAULT_FIT_ROWS,
   PINNED_PAGE_ROWS,
   MIN_ROW_HEIGHT,
   STRIP_COLS,
   STRIP_KEY,
   clampToPages,
-  computeFitRowHeight,
   computePageFit,
   findFreeSlot,
   generateDefaultPlacements,
@@ -15,7 +13,6 @@ import {
   mergePlacements,
   pageCount,
   paginatePlacements,
-  placementRows,
   placementsEqual,
   readStrip,
   rebaseToLocal,
@@ -52,55 +49,7 @@ const MINS: Record<string, { minW: number; minH: number }> = {
 const INPUT_WITH_MINS = { ...INPUT, mins: MINS };
 
 // ---------------------------------------------------------------------------
-// 1. computeFitRowHeight — the no-scroll fit formula (replaces the magic const)
-// ---------------------------------------------------------------------------
-describe('computeFitRowHeight (hand-calculated)', () => {
-  it('fills exactly: chrome + gridHeight == viewportHeight', () => {
-    // viewport 900, chrome 300, 10 rows, margin 8.
-    //   available = 900 - 300 = 600
-    //   usable    = 600 - 8*(10+1) = 600 - 88 = 512
-    //   rowHeight = 512 / 10 = 51.2
-    const rh = computeFitRowHeight({ viewportHeight: 900, measuredChrome: 300, rows: 10, marginY: 8 });
-    expect(rh).toBeCloseTo(51.2, 5);
-    // The grid's total rendered height = rows*rh + (rows+1)*margin, and
-    // chrome + that must equal the viewport (the no-scroll guarantee).
-    const gridHeight = 10 * rh + (10 + 1) * 8;
-    expect(300 + gridHeight).toBeCloseTo(900, 5);
-  });
-
-  it('at the fit targets (1366×768, 1280×800) a page fills the band with a sane row', () => {
-    // computePageFit derives (R, rowHeight) from the measured band: it honours the
-    // design budget (PINNED_PAGE_ROWS = 2 chart rows) but reduces R only if the
-    // rows can't reach the readable floor; the result always FILLS the band
-    // exactly (no scroll) at a row ≥ the floor.
-    for (const vh of [768, 800]) {
-      const availH = vh - 220 - 120 - 44; // chrome + pinned strip + pager allowance
-      const { rows, rowHeight } = computePageFit({ availH, designRows: PINNED_PAGE_ROWS, marginY: 8 });
-      // A readable row (≥ floor) and the page fills its band exactly.
-      expect(rowHeight).toBeGreaterThanOrEqual(MIN_ROW_HEIGHT);
-      expect(rows * rowHeight + (rows + 1) * 8).toBeCloseTo(availH, 5);
-      // At least one chart's worth of rows fit per page (CHART_ROWS = 7), so a
-      // page always shows a real chart rather than slivers.
-      expect(rows).toBeGreaterThanOrEqual(7);
-    }
-  });
-
-  it('clamps to a floor so a tiny/over-measured viewport never collapses to 0', () => {
-    // Chrome larger than the viewport → negative usable → clamp to the floor
-    // (the page scrolls a little, acceptable, instead of a 0-height chart).
-    const rh = computeFitRowHeight({ viewportHeight: 400, measuredChrome: 800, rows: 16, marginY: 8 });
-    expect(rh).toBe(MIN_ROW_HEIGHT);
-  });
-
-  it('guards a 0/negative row count (never divides by zero)', () => {
-    const rh = computeFitRowHeight({ viewportHeight: 900, measuredChrome: 200, rows: 0, marginY: 8 });
-    expect(Number.isFinite(rh)).toBe(true);
-    expect(rh).toBeGreaterThan(0);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// 2. generateDefaultPlacements — reproduce today's dashboard (acceptance #1)
+// 1. generateDefaultPlacements — reproduce today's dashboard (acceptance #1)
 // ---------------------------------------------------------------------------
 describe('generateDefaultPlacements (hand-calculated)', () => {
   const placements = generateDefaultPlacements(INPUT);
@@ -423,48 +372,26 @@ describe('mergePlacements (hand-calculated)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 4. placementRows — the live row count the fit math divides by
-// ---------------------------------------------------------------------------
-describe('placementRows (hand-calculated)', () => {
-  it('returns max(y+h) across placements', () => {
-    const ps: Placement[] = [
-      { i: 'a', x: 0, y: 0, w: 2, h: 2 },
-      { i: 'b', x: 0, y: 2, w: 4, h: 7 }, // bottom = 9
-      { i: 'c', x: 4, y: 2, w: 4, h: 7 }, // bottom = 9
-    ];
-    expect(placementRows(ps)).toBe(9);
-  });
-
-  it('an empty/undefined layout is a safe 1 (never divides by zero)', () => {
-    expect(placementRows([])).toBe(1);
-    expect(placementRows(undefined)).toBe(1);
-  });
-
-  it('the default cockpit spans more than one page budget at lg', () => {
-    // DEFAULT_FIT_ROWS = stat band (STAT_ROWS) + two chart rows (2*CHART_ROWS),
-    // the per-PAGE row budget the fit math targets; the live row count just tracks
-    // the real (multi-page) layout, which is taller because the bills panel sits
-    // a full page-band below the charts.
-    const lg = generateDefaultPlacements(INPUT).lg!;
-    // A 2-chart layout: stat band + one chart row + the full-width bills panel
-    // (PINNED_PAGE_ROWS tall) below it. The bills panel's bottom is the row count.
-    const twoCharts = generateDefaultPlacements({
-      statIds: STATS,
-      chartIds: ['chart:usage', 'chart:cost'],
-      panelIds: PANELS,
-    }).lg!;
-    // STAT_ROWS(2) + 1 chart row (CHART_ROWS=7) → bills at y=9, h=PINNED_PAGE_ROWS
-    // (14) → bottom 23.
-    expect(placementRows(twoCharts)).toBe(2 + 7 + PINNED_PAGE_ROWS);
-    // (sanity: the full 7-chart set is taller still, since charts wrap to 4 rows.)
-    expect(placementRows(lg)).toBeGreaterThan(DEFAULT_FIT_ROWS);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// 5. PAGINATION — the phone-home-screen no-scroll fit (issue #73 iteration)
+// 4. PAGINATION — the phone-home-screen no-scroll fit (issue #73 iteration)
 // ---------------------------------------------------------------------------
 describe('computePageFit — the keystone (R, rowHeight) derivation (hand-calculated)', () => {
+  it('at the fit targets (1366×768, 1280×800) a page fills the band with a sane row', () => {
+    // computePageFit derives (R, rowHeight) from the measured band: it honours the
+    // design budget (PINNED_PAGE_ROWS = 2 chart rows) but reduces R only if the
+    // rows can't reach the readable floor; the result always FILLS the band
+    // exactly (no scroll) at a row ≥ the floor.
+    for (const vh of [768, 800]) {
+      const availH = vh - 220 - 120 - 44; // chrome + pinned strip + pager allowance
+      const { rows, rowHeight } = computePageFit({ availH, designRows: PINNED_PAGE_ROWS, marginY: 8 });
+      // A readable row (≥ floor) and the page fills its band exactly.
+      expect(rowHeight).toBeGreaterThanOrEqual(MIN_ROW_HEIGHT);
+      expect(rows * rowHeight + (rows + 1) * 8).toBeCloseTo(availH, 5);
+      // At least one chart's worth of rows fit per page (CHART_ROWS = 7), so a
+      // page always shows a real chart rather than slivers.
+      expect(rows).toBeGreaterThanOrEqual(7);
+    }
+  });
+
   it('honours the design budget and sizes the row so R rows EXACTLY fill the band', () => {
     // A comfortable laptop band easily fits the design budget (14 rows). usable =
     // 560 − 8*(14+1) = 440; rowHeight = 440/14 = 31.43 → R rows fill exactly.

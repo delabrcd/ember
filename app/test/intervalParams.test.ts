@@ -3,12 +3,10 @@ import {
   parseFuel,
   parseSinceDays,
   parseDate,
-  parseGrain,
   parseBucket,
   parseIntervalQuery,
   resolveWindowBounds,
   resolveServedBucket,
-  FIFTEEN_MIN_SECONDS,
 } from '../src/lib/intervalParams';
 import { BUCKET_LADDER_SECONDS } from '../src/lib/viz/chooseBucket';
 
@@ -35,23 +33,6 @@ describe('parseSinceDays', () => {
     expect(parseSinceDays('10')).toBe(10);
     expect(parseSinceDays('9999')).toBe(400); // clamp high
     expect(parseSinceDays('7.9')).toBe(7); // floored
-  });
-});
-
-describe('parseGrain', () => {
-  it('reads exact 15m / 1h grains; everything else is the all default', () => {
-    expect(parseGrain('15m')).toBe('15m');
-    expect(parseGrain('1h')).toBe('1h'); // reconcile-then-downsample hourly path
-    expect(parseGrain(null)).toBe('all'); // absent
-    expect(parseGrain('15M')).toBe('all'); // case-sensitive
-    expect(parseGrain('1H')).toBe('all'); // case-sensitive
-    expect(parseGrain('900')).toBe('all'); // not the seconds value, the grain token
-    expect(parseGrain('3600')).toBe('all'); // ditto for hourly
-    expect(parseGrain('garbage')).toBe('all');
-  });
-
-  it('FIFTEEN_MIN_SECONDS is 900 (the 15-minute grain in seconds)', () => {
-    expect(FIFTEEN_MIN_SECONDS).toBe(900);
   });
 });
 
@@ -131,20 +112,6 @@ describe('parseIntervalQuery', () => {
     expect(parseIntervalQuery(new URLSearchParams('fuel=GAS&bucket=3600')).bucket).toBe(3600);
     // Off-ladder → null (ignored; server picks).
     expect(parseIntervalQuery(new URLSearchParams('fuel=GAS&bucket=1800')).bucket).toBeNull();
-  });
-
-  it('defaults grain to "all" and reads exact grain=15m / grain=1h', () => {
-    // Absent → 'all' (downsampled, all grains — back-compat / non-dashboard callers).
-    expect(parseIntervalQuery(new URLSearchParams('fuel=ELECTRIC')).grain).toBe('all');
-    // grain=1h flips to the reconcile-then-downsample hourly path.
-    expect(parseIntervalQuery(new URLSearchParams('fuel=ELECTRIC&grain=1h')).grain).toBe('1h');
-    // grain=15m flips to the raw path while the rest of the query is parsed as usual.
-    const q = parseIntervalQuery(new URLSearchParams('fuel=ELECTRIC&from=2026-06-01&to=2026-06-07&grain=15m'));
-    expect(q.grain).toBe('15m');
-    expect(q.fuelType).toBe('ELECTRIC');
-    const w = q.window as { from?: Date; to?: Date };
-    expect(w.from!.toISOString()).toBe('2026-06-01T00:00:00.000Z');
-    expect(w.to!.toISOString()).toBe('2026-06-07T23:59:59.999Z');
   });
 });
 

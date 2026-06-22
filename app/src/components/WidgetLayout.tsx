@@ -53,7 +53,6 @@ import {
   PINNED_PAGE_ROWS,
   FIT_BREAKPOINT,
   STRIP_COLS,
-  STRIP_KEY,
   computePageFit,
   findFreeSlot,
   generateDefaultPlacements,
