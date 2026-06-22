@@ -1004,7 +1004,7 @@ export function IntervalHistory({
   // whenever the cursor is over the chart, focused or not; the zoom gesture (plain
   // wheel) STAYS focus-gated so plain page-scrolling past an unfocused chart still
   // works (we don't trap it). Ctrl-without-shift while unfocused is left alone too:
-  //   const isPan = e.shiftKey;                         // shift+wheel = the pan
+  //   const isPan = e.shiftKey || horizontalWheel;      // shift OR horizontal wheel = pan
   //   if (!focusedRef.current && !isPan) return;        // unfocused, non-pan → leave
   //   e.preventDefault();                               // pan (any focus) / focused
   // The pan branch computes purely from `zoom`/bounds, so it works regardless of
@@ -1032,7 +1032,12 @@ export function IntervalHistory({
       // event for the page (normal scroll). Otherwise we own it → preventDefault. Read
       // focus from the always-fresh ref (not the stale closure). Ctrl-without-shift on
       // an unfocused chart falls into the "leave it" branch — the browser handles it.
-      const isPan = e.shiftKey;
+      // macOS and many trackpads convert shift+scroll into a HORIZONTAL wheel — deltaX
+      // set, shiftKey=FALSE — so a `e.shiftKey`-only gate misses it and the page scrolls
+      // (the leak the operator hit on their setup, even though shiftKey+deltaY works).
+      // Recognise a pan by EITHER the shift key OR a predominantly-horizontal delta.
+      const horizontalWheel = Math.abs(e.deltaX) > Math.abs(e.deltaY);
+      const isPan = e.shiftKey || horizontalWheel;
       if (!focusedRef.current && !isPan) return;
       e.preventDefault();
       // Past here the page is already prevented; the gesture math no-ops (returns)
@@ -1041,8 +1046,9 @@ export function IntervalHistory({
       ctrlDownRef.current = e.ctrlKey || e.metaKey; // keep Ctrl tracking fresh
       const fromMs = zoom ? zoom.startMs : boundsFromMs;
       const toMs = zoom ? zoom.endMs : boundsToMs;
-      if (e.shiftKey) {
-        // Shift+wheel → pan. WS7: use whichever wheel axis carries the delta. Many
+      if (isPan) {
+        // Shift+wheel (or a horizontal wheel) → pan. Use whichever wheel axis carries
+        // the delta. Many
         // setups report shift+wheel as deltaX; some still report deltaY — pick the
         // axis with the larger magnitude so a single source drives the pan. A positive
         // delta pans RIGHT (later time); negative pans LEFT.
