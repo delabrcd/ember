@@ -223,6 +223,39 @@ export function panWindow(
   return { fromMs: lo + d, toMs: hi + d };
 }
 
+// ---- WS6: modifier → cursor resolver ----------------------------------------
+// WS6 gives the focused chart MODAL cursor feedback so the held modifier signals
+// which navigation gesture is armed. The mapping is a tiny pure function so it can
+// be hand-tested in isolation (don't bury this decision table in JSX): given the
+// current focus + modifier state it returns the exact CSS `cursor` keyword to apply
+// to the chart's `style.cursor`. PURE — no React/DOM.
+//
+// The precedence is deliberate and matches the gesture-handler precedence in the
+// widget (the Ctrl branch is checked FIRST in onChartMouseDown / the wheel handler):
+//   • NOT focused                  → 'default'    (gestures are inert; normal page)
+//   • Ctrl held + actively dragging → 'grabbing'  (the viewport is being grabbed)
+//   • Ctrl held (not yet dragging)  → 'grab'      ("you can grab to move the viewport")
+//   • Shift held                    → 'ew-resize' (shift+wheel pans left/right)
+//   • focused, no modifier          → 'crosshair' (plain drag still zoom-SELECTs)
+// Ctrl wins over Shift if (improbably) both are held, mirroring the handlers where
+// the Ctrl+drag pan is checked before anything else. `ctrlDragging` only matters
+// while Ctrl is down, so we read it under the Ctrl branch.
+export type NavCursorState = {
+  focused: boolean;
+  ctrlDown: boolean;
+  shiftDown: boolean;
+  ctrlDragging: boolean;
+};
+
+export type NavCursor = 'default' | 'crosshair' | 'grab' | 'grabbing' | 'ew-resize';
+
+export function navCursor(state: NavCursorState): NavCursor {
+  if (!state.focused) return 'default';
+  if (state.ctrlDown) return state.ctrlDragging ? 'grabbing' : 'grab';
+  if (state.shiftDown) return 'ew-resize';
+  return 'crosshair';
+}
+
 // Decide whether the /api/interval downsampler actually reduced a result set —
 // i.e. whether FINER detail exists than what was returned (issue #141, the
 // "finest detail / max zoom" badge). It mirrors downsampleByTime's own gate

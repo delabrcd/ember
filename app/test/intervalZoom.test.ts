@@ -7,6 +7,7 @@ import {
   wasDownsampled,
   zoomWindowAroundCenter,
   panWindow,
+  navCursor,
 } from '../src/lib/intervalZoom';
 
 // Hand-calculated tests for the PURE interval-zoom helpers (issue #141). The
@@ -271,5 +272,44 @@ describe('wasDownsampled (hand-calculated)', () => {
   it('is false for non-finite inputs', () => {
     expect(wasDownsampled(NaN, 600)).toBe(false);
     expect(wasDownsampled(1000, NaN)).toBe(false);
+  });
+});
+
+describe('navCursor (WS6 modifier → cursor, hand-enumerated)', () => {
+  // The full decision table. Precedence: not-focused wins (default); then Ctrl
+  // (grabbing while dragging, else grab); then Shift (ew-resize); else crosshair.
+  it('is default whenever the chart is NOT focused, regardless of modifiers', () => {
+    expect(navCursor({ focused: false, ctrlDown: false, shiftDown: false, ctrlDragging: false })).toBe('default');
+    expect(navCursor({ focused: false, ctrlDown: true, shiftDown: false, ctrlDragging: false })).toBe('default');
+    expect(navCursor({ focused: false, ctrlDown: false, shiftDown: true, ctrlDragging: false })).toBe('default');
+    // Even a (stale) ctrlDragging flag can't override an unfocused chart.
+    expect(navCursor({ focused: false, ctrlDown: true, shiftDown: true, ctrlDragging: true })).toBe('default');
+  });
+
+  it('is crosshair when focused with no modifier (plain drag still zoom-selects)', () => {
+    expect(navCursor({ focused: true, ctrlDown: false, shiftDown: false, ctrlDragging: false })).toBe('crosshair');
+  });
+
+  it('is grab when focused + Ctrl held but not yet dragging', () => {
+    expect(navCursor({ focused: true, ctrlDown: true, shiftDown: false, ctrlDragging: false })).toBe('grab');
+  });
+
+  it('is grabbing when focused + Ctrl held AND actively dragging the viewport', () => {
+    expect(navCursor({ focused: true, ctrlDown: true, shiftDown: false, ctrlDragging: true })).toBe('grabbing');
+  });
+
+  it('is ew-resize when focused + Shift held (the shift+wheel pan)', () => {
+    expect(navCursor({ focused: true, ctrlDown: false, shiftDown: true, ctrlDragging: false })).toBe('ew-resize');
+  });
+
+  it('lets Ctrl win over Shift when both are held (mirrors handler precedence)', () => {
+    expect(navCursor({ focused: true, ctrlDown: true, shiftDown: true, ctrlDragging: false })).toBe('grab');
+    expect(navCursor({ focused: true, ctrlDown: true, shiftDown: true, ctrlDragging: true })).toBe('grabbing');
+  });
+
+  it('ignores ctrlDragging when Ctrl is not held (can only grab/grabbing under Ctrl)', () => {
+    // A dangling ctrlDragging=true with ctrlDown=false should NOT yield grab/grabbing.
+    expect(navCursor({ focused: true, ctrlDown: false, shiftDown: false, ctrlDragging: true })).toBe('crosshair');
+    expect(navCursor({ focused: true, ctrlDown: false, shiftDown: true, ctrlDragging: true })).toBe('ew-resize');
   });
 });

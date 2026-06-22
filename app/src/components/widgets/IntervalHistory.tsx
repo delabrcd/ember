@@ -112,6 +112,7 @@ import {
   zoomSpanToRange,
   zoomWindowAroundCenter,
   panWindow,
+  navCursor,
   type WindowMs,
 } from '@/lib/intervalZoom';
 import {
@@ -159,6 +160,31 @@ const WHEEL_PAN_FRACTION = 0.12;
 // but coalesce a flurry of wheel/pan ticks into ONE /api/interval request after the
 // gestures settle. The route is ~15–40ms so this stays snappy.
 const NAV_REFETCH_DEBOUNCE_MS = 150;
+
+// ---- WS6 line-morph animation tuning ----------------------------------------
+// WS6 makes the data swap-in feel SMOOTH instead of a snap. A navigation gesture
+// (wheel-zoom / shift-pan / ctrl-drag / drag-zoom-select / reset) updates the live
+// display window immediately, then the DEBOUNCED refetch swaps a new point-set in;
+// historically that swap was instant (`isAnimationActive={false}`) so the line path
+// JUMPED. We now let Recharts TWEEN the <Line> path between the old and new point
+// sets for nav-driven swaps: Recharts interpolates the SVG path `d` over
+// `animationDuration` with the named easing, so the line glides to its new shape.
+//
+// WHY THIS DOESN'T REINTRODUCE FLICKER / COLD-BLANK: the WS2 SWR layer already keeps
+// the PRIOR chart on screen during a refetch (never setState(undefined) once there's
+// data), so the morph animates the swap of an already-present line, not a blank→line
+// fade. We animate ONLY on nav-driven updates (the `animateNext` flag, set true the
+// instant a gesture fires and consumed by the next render), and explicitly DON'T
+// animate the genuine first load nor the base reloads (fuel/range/account) — those
+// keep `isAnimationActive={false}` so there's no mount-time grow-in flicker.
+//
+// DURATION is kept SHORT (one wheel notch settles fast and the debounce is 150ms) so
+// rapid ticks don't stack visibly-fighting animations: the displayed window updates
+// live per-tick, but the line only re-animates on the SETTLED (debounced) data swap,
+// so at most one morph plays per coalesced refetch. ease-out reads as a quick glide
+// that decelerates into place.
+const NAV_ANIM_DURATION_MS = 260;
+const NAV_ANIM_EASING = 'ease-out' as const;
 
 // ---- Types ------------------------------------------------------------------
 type Fuel = 'ELECTRIC' | 'GAS';
@@ -296,6 +322,25 @@ export function IntervalHistory({
   // discrete gesture refetches at once. null ⇒ follow the global window.
   const [fetchZoom, setFetchZoom] = useState<Zoom | null>(null);
 
+  // ---- WS6 navigation polish state ------------------------------------------
+  // Reactive modifier/drag state, used ONLY to derive the chart cursor (the GESTURE
+  // logic still reads the always-fresh refs below). `ctrlDown`/`shiftDown` mirror the
+  // held modifiers; `ctrlDragging` is true while a Ctrl+drag pan is actually in
+  // flight. We keep these as state (not refs) because the cursor must RE-RENDER when a
+  // key is pressed/released. navCursor({focused,…}) maps them to the CSS cursor.
+  const [ctrlDown, setCtrlDown] = useState(false);
+  const [shiftDown, setShiftDown] = useState(false);
+  const [ctrlDragging, setCtrlDragging] = useState(false);
+  // WS6 line-morph flag: true for the NEXT render's <Line> so a nav-driven data swap
+  // TWEENS its path instead of snapping. A ref (not state) so setting it during a
+  // gesture doesn't itself trigger a render — it's read at the next render that the
+  // refetch/zoom already causes, then left set (harmless: base reloads clear it).
+  // `animateSwap` is the value read by <Line isAnimationActive>: true only for the
+  // render that swaps in nav-driven data (set in the fetch .then when the ref was
+  // armed), false for first loads / base reloads so they never grow-in or flicker.
+  const animateNextRef = useRef(false);
+  const [animateSwap, setAnimateSwap] = useState(false);
+
   // The chart-body wrapper element — the focus host. We attach the native
   // non-passive wheel listener here and draw the focus ring on it.
   const bodyRef = useRef<HTMLDivElement | null>(null);
@@ -377,23 +422,51 @@ export function IntervalHistory({
   // Track Ctrl globally so the Ctrl+drag pan can detect the modifier even though the
   // Recharts synthetic mouse-state object doesn't expose it. Cheap, always-on (a
   // boolean flip); the gesture only reads ctrlDownRef while focused + dragging.
+  //
+  // WS6 EXTENSION: the same handler now also mirrors Ctrl AND Shift into the reactive
+  // `ctrlDown`/`shiftDown` STATE that drives the modifier→cursor feedback (navCursor).
+  // The gesture handlers keep reading ctrlDownRef (always fresh, no render needed);
+  // the state copies exist purely so a press/release RE-RENDERS the cursor. Updated on
+  // BOTH keydown and keyup so releasing a key restores the cursor. setState is a no-op
+  // when the value is unchanged, so the held-key key-repeat doesn't thrash renders.
   useEffect(() => {
     const sync = (e: KeyboardEvent) => {
-      ctrlDownRef.current = e.ctrlKey || e.metaKey;
+      const ctrl = e.ctrlKey || e.metaKey;
+      const shift = e.shiftKey;
+      ctrlDownRef.current = ctrl;
+      setCtrlDown(ctrl);
+      setShiftDown(shift);
+    };
+    // A window blur (alt-tab, focus loss) can swallow the keyup → the modifier would
+    // appear stuck-down. Clear the reactive cursor state on blur to self-heal.
+    const onBlur = () => {
+      ctrlDownRef.current = false;
+      setCtrlDown(false);
+      setShiftDown(false);
     };
     window.addEventListener('keydown', sync);
     window.addEventListener('keyup', sync);
+    window.addEventListener('blur', onBlur);
     return () => {
       window.removeEventListener('keydown', sync);
       window.removeEventListener('keyup', sync);
+      window.removeEventListener('blur', onBlur);
     };
   }, []);
+
+  // Derive the chart cursor (WS6) from the focus + modifier + active-drag state via
+  // the PURE navCursor resolver. Recomputed on every relevant state change; applied to
+  // the LineChart's `style.cursor`. Not focused → 'default' (gestures inert).
+  const chartCursor = navCursor({ focused, ctrlDown, shiftDown, ctrlDragging });
 
   // Push the current display window (`zoom`) into the DEBOUNCED fetch window after
   // NAV_REFETCH_DEBOUNCE_MS — a flurry of wheel/pan ticks coalesces into one
   // /api/interval request. `null` clears the fetch zoom (back to the global window).
   const scheduleNavRefetch = useCallback((next: Zoom | null) => {
     if (navTimerRef.current) clearTimeout(navTimerRef.current);
+    // WS6: arm the line-morph for the swap this refetch will produce. The flag is read
+    // (and reset) when the fetch actually swaps new data in, so the path TWEENS.
+    animateNextRef.current = true;
     navTimerRef.current = setTimeout(() => {
       navTimerRef.current = null;
       setFetchZoom(next);
@@ -449,6 +522,13 @@ export function IntervalHistory({
     swrFetch(key, url)
       .then((resp) => {
         if (!alive) return;
+        // WS6 line-morph: if this swap was armed by a nav gesture, animate the <Line>
+        // path tween (Recharts interpolates the path on the data change); otherwise
+        // this is a first/base load → swap WITHOUT animation so there's no grow-in
+        // flicker. The ref is consumed (reset) here either way.
+        const animate = animateNextRef.current;
+        animateNextRef.current = false;
+        setAnimateSwap(animate);
         setState(toLoaded(resp));
         setRevalidating(false);
       })
@@ -549,6 +629,11 @@ export function IntervalHistory({
   const applyNavWindow = useCallback(
     (next: WindowMs, fetchZoomNow = false) => {
       if (!boundsValid) return;
+      // WS6: every applyNavWindow call is a nav gesture (wheel/pan/drag-pan/reset) →
+      // arm the line-morph so the resulting data swap TWEENS. The debounced path also
+      // arms inside scheduleNavRefetch; arming here too covers the synchronous
+      // (fetchZoomNow) branches below without per-callsite repetition.
+      animateNextRef.current = true;
       const lo = next.fromMs;
       const hi = next.toMs;
       // Reached the full global window (within a 1s slop) → equivalent to Reset.
@@ -598,6 +683,7 @@ export function IntervalHistory({
         const startTs = a ? a.ts : hoverTsRef.current;
         if (startTs != null && Number.isFinite(startTs)) {
           panDragRef.current = { startTs, fromMs: curFromMs, toMs: curToMs };
+          setCtrlDragging(true); // WS6: cursor → 'grabbing' while the pan is live
           return; // suppress the zoom-select band while panning
         }
       }
@@ -643,6 +729,7 @@ export function IntervalHistory({
     // force a synchronous refetch of the final window and clear the pan state.
     if (panDragRef.current) {
       panDragRef.current = null;
+      setCtrlDragging(false); // WS6: pan ended → cursor back to 'grab' (Ctrl still held)
       if (zoom) applyNavWindow({ fromMs: zoom.startMs, toMs: zoom.endMs }, true);
       else applyNavWindow({ fromMs: boundsFromMs, toMs: boundsToMs }, true);
       return;
@@ -667,6 +754,8 @@ export function IntervalHistory({
       const endMs = Math.max(a.ts, b.ts);
       const z: Zoom = { from: zf, to: zt, startMs, endMs };
       setZoom((prev) => (prev && prev.from === zf && prev.to === zt ? prev : z));
+      // WS6: a committed drag-zoom-select is a nav gesture → arm the line-morph.
+      animateNextRef.current = true;
       // Discrete gesture → fetch synchronously (no flurry to debounce).
       if (navTimerRef.current) {
         clearTimeout(navTimerRef.current);
@@ -685,6 +774,8 @@ export function IntervalHistory({
       clearTimeout(navTimerRef.current);
       navTimerRef.current = null;
     }
+    // WS6: Reset zoom is a nav update too → morph the line back to the full window.
+    animateNextRef.current = true;
     setFetchZoom(null);
   }, []);
 
@@ -862,7 +953,12 @@ export function IntervalHistory({
             onMouseMove={onChartMouseMove}
             onMouseUp={commitDrag}
             onMouseLeave={commitDrag}
-            style={{ cursor: 'crosshair', userSelect: 'none' }}
+            // WS6: the cursor is now MODAL — it reflects the held modifier while the
+            // chart is focused (grab/grabbing for Ctrl, ew-resize for Shift, crosshair
+            // for a plain focused drag, default when unfocused). navCursor() resolves
+            // it from {focused, ctrlDown, shiftDown, ctrlDragging}; userSelect:none
+            // still prevents text-selection during a drag.
+            style={{ cursor: chartCursor, userSelect: 'none' }}
           >
             <CartesianGrid stroke="#1e293b" vertical={false} />
             <XAxis
@@ -893,7 +989,18 @@ export function IntervalHistory({
               stroke={color}
               strokeWidth={1.5}
               dot={false}
-              isAnimationActive={false}
+              // WS6 line-morph: animate ONLY when the swap was nav-driven (animateSwap),
+              // so a wheel-zoom / pan / drag-zoom / reset TWEENS the path to its new
+              // shape over ~260ms ease-out instead of snapping. First loads and base
+              // reloads keep animateSwap=false → no grow-in flicker (the WS2 SWR layer
+              // still keeps the prior chart up, so this morphs an existing line, never a
+              // blank→line fade). Recharts re-runs the <Line> path animation whenever the
+              // `data` points change, so the SAME instance interpolates old→new points —
+              // we deliberately do NOT key/remount the Line (a remount would replay the
+              // left-to-right ENTRANCE reveal instead of a point-to-point morph).
+              isAnimationActive={animateSwap}
+              animationDuration={NAV_ANIM_DURATION_MS}
+              animationEasing={NAV_ANIM_EASING}
               connectNulls={false}
             />
             {/* "End of 15-min data" marker (WS2): a vertical reference line at the
