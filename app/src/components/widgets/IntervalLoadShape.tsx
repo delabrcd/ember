@@ -26,29 +26,23 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import type { ProfileBucket } from '@/lib/intervalProfile';
+import { formatPeakReadout, type ProfileBucket } from '@/lib/intervalProfile';
 import type { ProfilePayload } from '@/lib/intervalAggregate';
+import { TOOLTIP_STYLE, AXIS_STYLE, FUEL_COLORS } from '@/lib/chartTheme';
+import { useIntervalPayload } from '@/lib/hooks/useIntervalPayload';
+import { Segmented } from './Segmented';
+import { IntervalWidgetBody } from './IntervalWidgetBody';
 import { ChartShell } from '../ChartShell';
 
-// The dashboard's dark-slate theme + the elec amber / gas blue tokens (mirrors
-// chartSpec.ts and ConfigurableChart so the widget matches the surrounding charts).
-const ELEC = '#f59e0b';
-const GAS = '#38bdf8';
+// The dashboard's dark-slate theme + the elec amber / gas blue tokens, shared via
+// lib/chartTheme so the widget matches the surrounding charts.
+const ELEC = FUEL_COLORS.ELECTRIC;
+const GAS = FUEL_COLORS.GAS;
 // (The unsettled-tail exclusion — AMI meters lag ~1–2 days, reporting the freshest
 // hours as provisional 0s — now happens SERVER-SIDE in /api/interval/profile, so
 // the widget no longer needs its own SETTLE_HOURS cutoff.)
-const tooltipStyle = { backgroundColor: '#0f172a', border: '1px solid #1e293b', borderRadius: 12, fontSize: 12 } as const;
-const axisStyle = { stroke: '#475569', fontSize: 11 } as const;
-
-// Format the peak-demand instant in the account's local clock as "Mon, Jun 8 6 PM".
-const peakFmt = new Intl.DateTimeFormat('en-US', {
-  timeZone: 'America/New_York',
-  weekday: 'short',
-  month: 'short',
-  day: 'numeric',
-  hour: 'numeric',
-  hour12: true,
-});
+const tooltipStyle = TOOLTIP_STYLE;
+const axisStyle = AXIS_STYLE;
 
 type Fuel = 'ELECTRIC' | 'GAS';
 const FUELS: readonly Fuel[] = ['ELECTRIC', 'GAS'];
@@ -69,48 +63,6 @@ const SPLIT_LABEL: Record<Split, string> = { COMBINED: 'Combined', WEEKDAY: 'Wee
 type Gran = '60' | '15';
 const GRANS: readonly Gran[] = ['60', '15'];
 const GRAN_LABEL: Record<Gran, string> = { '60': '1h', '15': '15m' };
-
-// A loaded fetch state: undefined = still loading; an error sentinel; else the
-// server-computed payload carrying every split × granularity variant + the peak.
-type LoadState = ProfilePayload | { error: true } | undefined;
-
-// A labelled segmented control matching ConfigurableChart's Segmented, but with
-// distinct option value/label (the fuel enum is uppercase, the label is not).
-function LabelledSegmented<T extends string>({
-  value,
-  options,
-  onChange,
-  disabledValues,
-}: {
-  value: T;
-  options: { label: string; value: T }[];
-  onChange: (v: T) => void;
-  disabledValues?: Set<T>;
-}) {
-  return (
-    <div className="inline-flex overflow-hidden rounded-lg border border-slate-700">
-      {options.map((o) => {
-        const disabled = disabledValues?.has(o.value) ?? false;
-        return (
-          <button
-            key={o.value}
-            onClick={() => !disabled && onChange(o.value)}
-            disabled={disabled}
-            className={`px-2.5 py-1 text-xs transition ${
-              value === o.value
-                ? 'bg-amber-500 text-slate-950'
-                : disabled
-                  ? 'cursor-not-allowed bg-slate-800/50 text-slate-600'
-                  : 'bg-slate-800/50 text-slate-300 hover:bg-slate-700'
-            }`}
-          >
-            {o.label}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
 
 // The settings panel rendered inside ChartShell's Customize popover / expand side.
 // Mirrors ChartConfigMenu's row layout (uppercase label + a segmented control):
@@ -137,7 +89,7 @@ function LoadShapeSettings({
     <div className="space-y-3 text-sm">
       <div>
         <div className="mb-1 text-xs font-medium uppercase tracking-wide text-slate-500">Fuel</div>
-        <LabelledSegmented
+        <Segmented
           value={fuel}
           options={FUELS.map((f) => ({ label: FUEL_LABEL[f], value: f }))}
           onChange={onFuel}
@@ -145,7 +97,7 @@ function LoadShapeSettings({
       </div>
       <div>
         <div className="mb-1 text-xs font-medium uppercase tracking-wide text-slate-500">Days</div>
-        <LabelledSegmented
+        <Segmented
           value={split}
           options={SPLITS.map((s) => ({ label: SPLIT_LABEL[s], value: s }))}
           onChange={onSplit}
@@ -153,7 +105,7 @@ function LoadShapeSettings({
       </div>
       <div>
         <div className="mb-1 text-xs font-medium uppercase tracking-wide text-slate-500">Granularity</div>
-        <LabelledSegmented
+        <Segmented
           value={gran}
           options={GRANS.map((g) => ({ label: GRAN_LABEL[g], value: g }))}
           onChange={onGran}
@@ -180,7 +132,6 @@ export function IntervalLoadShape({
   const [fuel, setFuel] = useState<Fuel>('ELECTRIC');
   const [split, setSplit] = useState<Split>('COMBINED');
   const [gran, setGran] = useState<Gran>('60');
-  const [state, setState] = useState<LoadState>(undefined);
 
   // Gas is hourly at source → no 15-min detail; disable the 15m granularity for
   // gas and fall the SHAPING back to 1h (the control snaps back below too).
@@ -195,40 +146,27 @@ export function IntervalLoadShape({
 
   // Fetch on mount + whenever the FUEL, the global RANGE, or the selected ACCOUNT
   // changes — NOT on the split/granularity toggles (the payload carries every
-  // variant, so those switch instantly client-side). We track an `alive` flag so a
-  // stale response (the user flicked the fuel mid-flight) can't overwrite the
-  // current one. The server returns the display-ready profiles (aggregated over
-  // the RAW rows); there is no client-side shaping to redo.
-  useEffect(() => {
-    let alive = true;
-    setState(undefined);
-    const acctQuery = accountId != null ? `&accountId=${accountId}` : '';
-    const rangeQuery = from && to ? `&from=${from}&to=${to}` : '';
-    fetch(`/api/interval/profile?fuel=${fuel}${rangeQuery}${acctQuery}`)
-      .then((r) => r.json())
-      .then((j) => {
-        if (!alive) return;
-        // Defensive: a well-formed payload always carries the variants map; treat
-        // anything else as empty so the widget shows its empty state, not a crash.
-        if (j && j.variants && j.variants['60'] && j.variants['15']) {
-          setState(j as ProfilePayload);
-        } else {
-          setState({
-            variants: {
-              '60': { combined: [], weekday: [], weekend: [] },
-              '15': { combined: [], weekday: [], weekend: [] },
-            },
-            peak: null,
-          });
-        }
-      })
-      .catch(() => {
-        if (alive) setState({ error: true });
-      });
-    return () => {
-      alive = false;
+  // variant, so those switch instantly client-side). #150: the shared
+  // useIntervalPayload hook owns the fetch lifecycle + stale-response guard; the
+  // `validate` here keeps this widget's DISTINCT shape check + empty fallback (a
+  // well-formed payload always carries the variants map; anything else → an empty
+  // payload so the widget shows its empty state, not a crash). The server returns
+  // the display-ready profiles (aggregated over the RAW rows); there is no
+  // client-side shaping to redo.
+  const acctQuery = accountId != null ? `&accountId=${accountId}` : '';
+  const rangeQuery = from && to ? `&from=${from}&to=${to}` : '';
+  const url = `/api/interval/profile?fuel=${fuel}${rangeQuery}${acctQuery}`;
+  const { state, loading, errored } = useIntervalPayload<ProfilePayload>(url, (j) => {
+    const p = j as ProfilePayload | null;
+    if (p && p.variants && p.variants['60'] && p.variants['15']) return p;
+    return {
+      variants: {
+        '60': { combined: [], weekday: [], weekend: [] },
+        '15': { combined: [], weekday: [], weekend: [] },
+      },
+      peak: null,
     };
-  }, [fuel, from, to, accountId]);
+  });
 
   const color = fuel === 'GAS' ? GAS : ELEC;
   const unit = FUEL_UNIT[fuel];
@@ -262,39 +200,28 @@ export function IntervalLoadShape({
   // unsettled tail excluded). Independent of the day-split/granularity toggles.
   const peak = !state || 'error' in state ? null : state.peak;
 
-  const loading = state === undefined;
-  const errored = !!state && 'error' in state;
   const empty = !loading && !errored && data.length === 0;
 
   // Peak-demand caption (#77): value + when, e.g. "Peak 4.21 kW · Sat, Jun 7 7 PM".
-  const peakReadout = peak
-    ? `Peak ${peak.value.toFixed(peak.value < 10 ? 2 : 1)} ${powerUnit} · ${peakFmt.format(new Date(peak.intervalStart))}`
-    : null;
+  // #150: the pure, hand-calc-tested formatPeakReadout (shaping out of the component).
+  const peakReadout = formatPeakReadout(peak, powerUnit);
 
   // The chart body (render-prop for ChartShell): keeps the loading/empty/errored
   // states and the Recharts tree, just drawn into the height ChartShell supplies
   // (the grid cell at "100%" in the card, or "80vh" in the Expand modal). When
   // populated, a small peak-demand caption sits above the curve.
   const renderBody = (h: number | string) => (
-    <div style={{ height: h }} className="flex w-full flex-col">
-      {loading ? (
-        // Loading: a muted skeleton bar (the chart area's height is the grid
-        // cell's, via the flex-1 min-h-0 chain).
-        <div className="flex h-full w-full items-center justify-center">
-          <div className="h-full w-full animate-pulse rounded-lg bg-slate-800/40" />
-        </div>
-      ) : errored ? (
-        <div className="flex h-full w-full items-center justify-center px-4 text-center text-xs text-slate-400">
-          Couldn&apos;t load interval data — try again on the next check.
-        </div>
-      ) : empty ? (
-        // Empty: a friendly muted message, NOT a broken blank chart.
-        <div className="flex h-full w-full items-center justify-center px-4 text-center text-sm text-slate-400">
-          <span>
-            No interval data yet{fuel === 'GAS' ? ' for gas' : ''} — it&apos;s collected on each scheduled check.
-          </span>
-        </div>
-      ) : (
+    <IntervalWidgetBody
+      height={h}
+      loading={loading}
+      errored={errored}
+      empty={empty}
+      emptyMessage={
+        <span>
+          No interval data yet{fuel === 'GAS' ? ' for gas' : ''} — it&apos;s collected on each scheduled check.
+        </span>
+      }
+    >
         <>
         {peakReadout && (
           <div className="mb-1 shrink-0 text-xs text-slate-400">
@@ -356,9 +283,8 @@ export function IntervalLoadShape({
           </ResponsiveContainer>
         </div>
         </>
-      )}
-      </div>
-    );
+    </IntervalWidgetBody>
+  );
 
   return (
     <ChartShell

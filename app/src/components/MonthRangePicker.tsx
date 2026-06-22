@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useId, useRef, useState } from 'react';
+import { useDismissable } from '@/lib/hooks/useDismissable';
 import {
   clampYm,
   isMonthDisabled,
@@ -151,24 +152,19 @@ export function MonthRangePicker({ fromYm, toYm, minYm, maxYm, active, onChange 
   const triggerRef = useRef<HTMLButtonElement>(null);
   const popoverId = useId();
 
-  // Close on Escape (returning focus to the trigger) and on outside-click.
+  // Close on Escape and on outside-click (#150: the shared useDismissable hook,
+  // default mousedown listener).
+  useDismissable(rootRef, open, () => setOpen(false));
+  // Escape ALSO returns focus to the trigger (outside-click does NOT — the user
+  // clicked elsewhere). useDismissable owns the close; this small listener adds only
+  // the Esc-only focus-restore, so the close-on-Esc/outside logic stays consolidated.
   useEffect(() => {
     if (!open) return;
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        setOpen(false);
-        triggerRef.current?.focus();
-      }
-    };
-    const onDown = (e: MouseEvent) => {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
+      if (e.key === 'Escape') triggerRef.current?.focus();
     };
     document.addEventListener('keydown', onKey);
-    document.addEventListener('mousedown', onDown);
-    return () => {
-      document.removeEventListener('keydown', onKey);
-      document.removeEventListener('mousedown', onDown);
-    };
+    return () => document.removeEventListener('keydown', onKey);
   }, [open]);
 
   const pickFrom = (ym: number) => {

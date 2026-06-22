@@ -19,6 +19,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
+import { useDismissable } from '@/lib/hooks/useDismissable';
 import { describeAnomaly, type AnomalyDetail } from '@/lib/notifications';
 import type { AnomalyFlag } from '@/lib/anomaly';
 import type { Bill } from './useDashboardData';
@@ -144,20 +145,9 @@ export function NotificationsBell({
     if (!n.readAt) void markRead(n.key);
   };
 
-  // Close on Esc and on a click/tap outside the wrapper, but only while open.
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setOpen(false);
-    const onPointer = (e: MouseEvent) => {
-      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener('keydown', onKey);
-    document.addEventListener('mousedown', onPointer);
-    return () => {
-      document.removeEventListener('keydown', onKey);
-      document.removeEventListener('mousedown', onPointer);
-    };
-  }, [open]);
+  // Close on Esc and on a click/tap outside the wrapper, but only while open (#150:
+  // the shared useDismissable hook — default mousedown listener).
+  useDismissable(wrapRef, open, () => setOpen(false));
 
   const showRead = prefs.showReadNotifications;
   // Default view hides read; with the toggle on we show everything (read muted).

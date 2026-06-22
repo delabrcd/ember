@@ -14,10 +14,9 @@ import {
 } from 'recharts';
 import { chartCaps, type ChartSpec, type MonthRow, type SeriesDef } from '@/lib/chartSpec';
 import { usePrefs, type ChartConfig } from '@/lib/prefs';
+import { TOOLTIP_STYLE, AXIS_STYLE } from '@/lib/chartTheme';
+import { Segmented } from './widgets/Segmented';
 import { ChartShell } from './ChartShell';
-
-const tooltipStyle = { backgroundColor: '#0f172a', border: '1px solid #1e293b', borderRadius: 12, fontSize: 12 } as const;
-const axisStyle = { stroke: '#475569', fontSize: 11 } as const;
 
 function yProps(scale: 'linear' | 'log') {
   return scale === 'log' ? { scale: 'log' as const, domain: ['auto', 'auto'] as [string, string], allowDataOverflow: true } : {};
@@ -51,31 +50,18 @@ function ChartBody({ spec, config, rows, height }: { spec: ChartSpec; config: Ch
       <ResponsiveContainer width="100%" height="100%">
         <ComposedChart data={data} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
           <CartesianGrid stroke="#1e293b" vertical={false} />
-          <XAxis dataKey="label" {...axisStyle} minTickGap={24} />
-          <YAxis yAxisId="left" {...axisStyle} {...yProps(config.leftScale)}
+          <XAxis dataKey="label" {...AXIS_STYLE} minTickGap={24} />
+          <YAxis yAxisId="left" {...AXIS_STYLE} {...yProps(config.leftScale)}
             tickFormatter={spec.leftFmt ? (v) => spec.leftFmt!(Number(v)) : undefined} />
           {hasRight && (
-            <YAxis yAxisId="right" orientation="right" {...axisStyle} {...yProps(config.rightScale)}
+            <YAxis yAxisId="right" orientation="right" {...AXIS_STYLE} {...yProps(config.rightScale)}
               tickFormatter={spec.rightFmt ? (v) => spec.rightFmt!(Number(v)) : undefined} />
           )}
-          <Tooltip contentStyle={tooltipStyle} />
+          <Tooltip contentStyle={TOOLTIP_STYLE} />
           <Legend wrapperStyle={{ fontSize: 12 }} />
           {visible.map(renderSeries)}
         </ComposedChart>
       </ResponsiveContainer>
-    </div>
-  );
-}
-
-export function Segmented<T extends string>({ value, options, onChange }: { value: T; options: readonly T[]; onChange: (v: T) => void }) {
-  return (
-    <div className="inline-flex overflow-hidden rounded-lg border border-slate-700">
-      {options.map((o) => (
-        <button key={o} onClick={() => onChange(o)}
-          className={`px-2.5 py-1 text-xs capitalize transition ${value === o ? 'bg-amber-500 text-slate-950' : 'bg-slate-800/50 text-slate-300 hover:bg-slate-700'}`}>
-          {o}
-        </button>
-      ))}
     </div>
   );
 }
@@ -101,7 +87,7 @@ export function ChartConfigMenu({ spec, config, onChange }: { spec: ChartSpec; c
       {caps.canType && (
         <div>
           <div className="mb-1 text-xs font-medium uppercase tracking-wide text-slate-500">Chart type</div>
-          <Segmented value={config.type} options={['bar', 'line', 'area'] as const} onChange={(t) => onChange({ type: t })} />
+          <Segmented value={config.type} options={['bar', 'line', 'area'] as const} onChange={(t) => onChange({ type: t })} capitalize />
         </div>
       )}
       {caps.canStack && config.type !== 'line' && (
@@ -112,12 +98,12 @@ export function ChartConfigMenu({ spec, config, onChange }: { spec: ChartSpec; c
       <div className="flex flex-wrap gap-4">
         <div>
           <div className="mb-1 text-xs font-medium uppercase tracking-wide text-slate-500">Left axis</div>
-          <Segmented value={config.leftScale} options={['linear', 'log'] as const} onChange={(v) => onChange({ leftScale: v })} />
+          <Segmented value={config.leftScale} options={['linear', 'log'] as const} onChange={(v) => onChange({ leftScale: v })} capitalize />
         </div>
         {caps.hasRight && (
           <div>
             <div className="mb-1 text-xs font-medium uppercase tracking-wide text-slate-500">Right axis</div>
-            <Segmented value={config.rightScale} options={['linear', 'log'] as const} onChange={(v) => onChange({ rightScale: v })} />
+            <Segmented value={config.rightScale} options={['linear', 'log'] as const} onChange={(v) => onChange({ rightScale: v })} capitalize />
           </div>
         )}
       </div>

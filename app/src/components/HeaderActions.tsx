@@ -25,7 +25,8 @@
 // relatively-positioned wrapper with an absolutely-positioned panel, dark
 // slate/amber theme, closing on Escape / outside-click / item-select.
 
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
+import { useDismissable } from '@/lib/hooks/useDismissable';
 import Link from 'next/link';
 import { RefreshButton } from './RefreshButton';
 import { NotificationsBell } from './NotificationsBell';
@@ -162,19 +163,8 @@ export function HeaderActions(props: HeaderActionsProps) {
   // Escape + outside-click/tap close it, only while open.
   const [menuOpen, setMenuOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!menuOpen) return;
-    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setMenuOpen(false);
-    const onPointer = (e: MouseEvent) => {
-      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setMenuOpen(false);
-    };
-    document.addEventListener('keydown', onKey);
-    document.addEventListener('mousedown', onPointer);
-    return () => {
-      document.removeEventListener('keydown', onKey);
-      document.removeEventListener('mousedown', onPointer);
-    };
-  }, [menuOpen]);
+  // #150: the shared useDismissable hook (Escape + outside-click/tap, while open).
+  useDismissable(wrapRef, menuOpen, () => setMenuOpen(false));
 
   const close = () => setMenuOpen(false);
 
