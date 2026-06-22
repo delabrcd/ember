@@ -14,6 +14,7 @@ import {
   SCRAPE_CLAIM_ADVISORY_KEY,
   SCRAPE_STALE_AFTER_MS,
 } from '@/lib/scheduler/scrapeLock';
+import { errMessage } from '@/lib/ngrid/errMessage';
 import type { ProgressFn } from '@/lib/ngrid/types';
 
 export class ScrapeBusyError extends Error {}
@@ -138,12 +139,12 @@ export async function runWithScrapeRun(
         },
       });
       return run.id;
-    } catch (err: any) {
+    } catch (err: unknown) {
       finalized = true;
       if (flushTimer) clearTimeout(flushTimer);
       await prisma.scrapeRun.update({
         where: { id: run.id },
-        data: { status: 'ERROR', finishedAt: new Date(), message: String(err?.message || err).slice(0, 500) },
+        data: { status: 'ERROR', finishedAt: new Date(), message: errMessage(err, 500) },
       });
       throw err;
     } finally {

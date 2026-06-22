@@ -22,6 +22,18 @@ import { captureAuthHeaders } from './session';
 import type { PortalSession } from './session';
 import { downloadBillPdfs, fetchAmiIntervals } from './portalFetch';
 import { type IntervalReadRow } from './interval';
+import { yyyymm } from './dates';
+import {
+  GQL_URL_RE,
+  type RawBillNode,
+  type RawBillEnergyUsage,
+  type RawBillingAccount,
+  type RawEnergyUsageNode,
+  type RawFuelType,
+  type RawGqlData,
+  type RawGqlResponse,
+  type RawWeatherNode,
+} from './collectRaw';
 import type {
   AccountInfo,
   BillRow,
@@ -52,13 +64,14 @@ export interface CollectOptions {
 
 const BASE = 'https://myaccount.nationalgrid.com';
 
-const asArray = (x: any): any[] => (Array.isArray(x?.nodes) ? x.nodes : Array.isArray(x) ? x : []);
-const ymd = (d?: string): string | undefined => (d ? d.slice(0, 10) : undefined);
-const yyyymm = (d?: string): number => {
-  if (!d) return 0;
-  const m = d.match(/^(\d{4})-(\d{2})/);
-  return m ? parseInt(m[1], 10) * 100 + parseInt(m[2], 10) : 0;
+// Unwrap a gql connection (`{ nodes: [...] }`) or a bare array into a plain array.
+// Anything else → []. The element type is unknown (the caller narrows per shape).
+// `yyyymm` is the shared pure helper from `./dates`.
+const asArray = (x: unknown): unknown[] => {
+  const nodes = (x as { nodes?: unknown } | null | undefined)?.nodes;
+  return Array.isArray(nodes) ? nodes : Array.isArray(x) ? x : [];
 };
+const ymd = (d?: string): string | undefined => (d ? d.slice(0, 10) : undefined);
 const unitFor = (usageType: string): string =>
   /KWH/i.test(usageType) ? 'kWh' : /THERM/i.test(usageType) ? 'therms' : '';
 
@@ -87,12 +100,12 @@ export async function collect(
     // billing account. Capture those payloads on a dashboard visit, then parse
     // out the link slugs. If introspection/enumeration ever stops working we
     // still have `defaultLink`, so the scrape degrades to single-account.
-    const discoveryPayloads: any[] = [];
+    const discoveryPayloads: unknown[] = [];
     const onDiscovery = async (resp: import('playwright').Response) => {
       const url = resp.url();
-      if (!/\/api\/[a-z-]+-gql/.test(url)) return;
+      if (!GQL_URL_RE.test(url)) return;
       try {
-        const json = await resp.json();
+        const json = (await resp.json()) as RawGqlResponse;
         if (json?.data) discoveryPayloads.push(json.data);
       } catch {
         /* not JSON / not interesting */
@@ -143,8 +156,19 @@ async function collectOneAccount(
   loginId: number | undefined,
   hasIntervalData?: (accountNumber: string) => Promise<boolean>
 ): Promise<CollectResult> {
-  // Capture buckets (per-account).
-  const cap: Record<string, any> = {};
+  // Capture buckets (per-account). One field per gql data key collect() reads;
+  // arrays hold the unwrapped `nodes` (narrowed per-row by the mappers below),
+  // `account` holds the raw `billingAccount` payload, `user` is unused downstream.
+  interface Cap {
+    bills?: unknown[];
+    usages?: unknown[];
+    costs?: unknown[];
+    billAmounts?: unknown[];
+    weather?: unknown[];
+    account?: RawBillingAccount;
+    user?: unknown;
+  }
+  const cap: Cap = {};
   const authHeaders: Record<string, string> = {};
   let haveAuth = false;
   let accountNumber: string | undefined;
@@ -176,11 +200,15 @@ async function collectOneAccount(
       }
     }
     try {
-      const j = JSON.parse(post);
-      const v = j.variables || {};
-      if (v.accountNumber) accountNumber = v.accountNumber;
-      if (v.companyCode) companyCode = v.companyCode;
-      if (v.region) weatherRegion = v.region;
+      // The SPA's gql request body: `{ variables: {...}, query, ... }`. We read a
+      // few identifiers off `variables` and widen its paging filters in place — the
+      // values stay whatever the SPA sent (cast to string only where we record an
+      // identifier we know is a string), so the widening is byte-identical to before.
+      const j = JSON.parse(post) as { variables?: Record<string, unknown> };
+      const v: Record<string, unknown> = j.variables || {};
+      if (v.accountNumber) accountNumber = v.accountNumber as string;
+      if (v.companyCode) companyCode = v.companyCode as string;
+      if (v.region) weatherRegion = v.region as string;
       // Widen only the filters we've verified are safe. The bills query takes a
       // floor date; the energy-usage query pages by numeric YYYYMM `from` + `first`.
       // Do NOT touch the weather query's string `from` / `last` — widening those
@@ -208,21 +236,22 @@ async function collectOneAccount(
   // Capture responses by their data keys.
   const onResponse = async (resp: import('playwright').Response) => {
     const url = resp.url();
-    if (!/\/api\/[a-z-]+-gql/.test(url)) return;
-    let json: any;
+    if (!GQL_URL_RE.test(url)) return;
+    let json: RawGqlResponse;
     try {
-      json = await resp.json();
+      json = (await resp.json()) as RawGqlResponse;
     } catch {
       return;
     }
-    const data = json?.data;
+    const data: RawGqlData | null | undefined = json?.data;
     if (!data) return;
     if (process.env.SCRAPE_DEBUG) {
-      console.log('[collect] gql keys:', Object.keys(data).join('+'));
+      const dataRec = data as Record<string, unknown>;
+      console.log('[collect] gql keys:', Object.keys(dataRec).join('+'));
       // Record EVERY gql response (not just the known cap.* keys) so the spike
       // can surface the MySmartEnergy interval payload alongside the rest.
       try {
-        debugLog.push({ kind: 'response', entry: summarizeGqlResponse(url, data) });
+        debugLog.push({ kind: 'response', entry: summarizeGqlResponse(url, dataRec) });
       } catch {
         /* debug capture must never affect the scrape */
       }
@@ -232,7 +261,7 @@ async function collectOneAccount(
     if (data.energyUsageCosts) cap.costs = asArray(data.energyUsageCosts);
     if (data.energyUsageBillAmounts) cap.billAmounts = asArray(data.energyUsageBillAmounts);
     if (data.weather) cap.weather = asArray(data.weather);
-    if (data.billingAccount) cap.account = data.billingAccount;
+    if (data.billingAccount) cap.account = data.billingAccount as RawBillingAccount;
     if (data.user) cap.user = data.user;
   };
 
@@ -351,16 +380,20 @@ async function collectOneAccount(
   if (!accountNumber) throw new Error('Could not determine the account number from the portal.');
 
   // ---- normalize ---------------------------------------------------------
+  // The serviceAddress may arrive as a plain string, a `{ serviceAddressCompressed
+  // | compressed }` object, or something else (→ JSON.stringify fallback). Narrow
+  // the `unknown` shape exactly as before.
   const rawAddr = cap.account?.serviceAddress;
+  const addrObj = rawAddr as { serviceAddressCompressed?: string; compressed?: string } | null | undefined;
   const serviceAddress =
     typeof rawAddr === 'string'
       ? rawAddr
-      : rawAddr?.serviceAddressCompressed ||
-        rawAddr?.compressed ||
+      : addrObj?.serviceAddressCompressed ||
+        addrObj?.compressed ||
         (rawAddr ? JSON.stringify(rawAddr) : undefined);
-  const fuelTypes = (Array.isArray(cap.account?.fuelTypes) ? cap.account.fuelTypes : [])
-    .map((f: any) => (typeof f === 'string' ? f : f?.type))
-    .filter(Boolean);
+  const fuelTypes = (Array.isArray(cap.account?.fuelTypes) ? (cap.account!.fuelTypes as RawFuelType[]) : [])
+    .map((f) => (typeof f === 'string' ? f : f?.type))
+    .filter(Boolean) as string[];
 
   const acct: AccountInfo = {
     accountNumber,
@@ -373,23 +406,31 @@ async function collectOneAccount(
     customerNumber: cap.account?.customerNumber ? String(cap.account.customerNumber) : undefined,
   };
 
-  const bills: BillRow[] = (cap.bills || []).map((b: any) => ({
-    statementDate: ymd(b.statementDate)!,
-    periodFrom: ymd(b.billDuration?.fromDate),
-    periodTo: ymd(b.billDuration?.toDate),
-    totalDueAmount: typeof b.totalDueAmount === 'number' ? b.totalDueAmount : undefined,
-    status: b.status,
-    usageTypes: asArray(b.energyUsages).map((n: any) => n.usageType).filter(Boolean),
-  }));
+  const bills: BillRow[] = (cap.bills || []).map((raw) => {
+    const b = raw as RawBillNode;
+    return {
+      statementDate: ymd(b.statementDate)!,
+      periodFrom: ymd(b.billDuration?.fromDate),
+      periodTo: ymd(b.billDuration?.toDate),
+      totalDueAmount: typeof b.totalDueAmount === 'number' ? b.totalDueAmount : undefined,
+      status: b.status,
+      usageTypes: asArray(b.energyUsages)
+        .map((n) => (n as RawBillEnergyUsage).usageType)
+        .filter(Boolean) as string[],
+    };
+  });
 
-  const usage: UsageRow[] = (cap.usages || []).map((u: any) => ({
-    usageType: u.usageType,
-    periodYearMonth: typeof u.usageYearMonth === 'number' ? u.usageYearMonth : yyyymm(u.dateFrom),
-    dateFrom: ymd(u.dateFrom),
-    dateTo: ymd(u.dateTo),
-    quantity: Number(u.usage) || 0,
-    unit: unitFor(u.usageType),
-  }));
+  const usage: UsageRow[] = (cap.usages || []).map((raw) => {
+    const u = raw as RawEnergyUsageNode;
+    return {
+      usageType: u.usageType as string,
+      periodYearMonth: typeof u.usageYearMonth === 'number' ? u.usageYearMonth : yyyymm(u.dateFrom),
+      dateFrom: ymd(u.dateFrom),
+      dateTo: ymd(u.dateTo),
+      quantity: Number(u.usage) || 0,
+      unit: unitFor(u.usageType as string),
+    };
+  });
 
   // Per-fuel supply/delivery costs come from the bill PDFs (full history) — the
   // API's energyUsageCosts/energyUsageBillAmounts only cover ~24 months. Built
@@ -398,7 +439,8 @@ async function collectOneAccount(
 
   // Weather has one row per fuelType per month; collapse to one temp per month.
   const weatherByMonth = new Map<string, WeatherRow>();
-  for (const w of cap.weather || []) {
+  for (const raw of cap.weather || []) {
+    const w = raw as RawWeatherNode;
     const monthYear = ymd(w.applicableMonthYear);
     if (!monthYear) continue;
     if (!weatherByMonth.has(monthYear))
