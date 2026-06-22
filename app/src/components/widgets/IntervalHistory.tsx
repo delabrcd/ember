@@ -161,7 +161,6 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { type IntervalProfileRow } from '@/lib/intervalProfile';
 import {
   toHistoryPoints,
   formatGrain,
@@ -171,30 +170,19 @@ import {
 import {
   classifyZoomSelection,
   zoomSpanToRange,
-  zoomWindowAroundCenter,
-  panWindow,
-  pixelPanDeltaMs,
-  navCursor,
   viewDomainFor,
-  msToYmd,
   type WindowMs,
 } from '@/lib/intervalZoom';
-import {
-  getCached,
-  swrFetch,
-  intervalCacheKey,
-  type IntervalResponse,
-} from '@/lib/intervalCache';
-import {
-  overscanWindowFor,
-  isViewNearLoadedEdge,
-  viewSpanBucketSecs,
-  overscanBucketChanged,
-  type OverscanWindow,
-} from '@/lib/intervalOverscan';
-import { MAX_POINTS } from '@/lib/viz/downsampleInterval';
+import { intervalCacheKey } from '@/lib/intervalCache';
 import { TOOLTIP_STYLE, AXIS_STYLE, FUEL_COLORS } from '@/lib/chartTheme';
-import { useDismissable } from '@/lib/hooks/useDismissable';
+import { useIntervalFetch } from '@/lib/hooks/useIntervalFetch';
+import { useOverscanLoad } from '@/lib/hooks/useOverscanLoad';
+import {
+  useChartNavigation,
+  CHART_MARGIN_LEFT,
+  CHART_MARGIN_RIGHT,
+  Y_AXIS_WIDTH,
+} from '@/lib/hooks/useChartNavigation';
 import { Segmented } from './Segmented';
 import { ChartShell } from '../ChartShell';
 
@@ -204,20 +192,6 @@ const GAS = FUEL_COLORS.GAS;
 const tooltipStyle = TOOLTIP_STYLE;
 const axisStyle = AXIS_STYLE;
 
-// ---- WS10: plot pixel geometry ----------------------------------------------
-// The Ctrl+drag pan (WS10) converts a raw pixel delta into a window shift, so it
-// needs the PLOT's pixel width (the drawable area inside the axes). We derive it
-// from the chart body's measured width minus the horizontal insets that aren't
-// plot: the LineChart `margin.left`/`margin.right` plus the YAxis `width`. These
-// MUST mirror the values on the <LineChart margin> and <YAxis width> below — they
-// only scale pan sensitivity, so an exact match isn't critical, but keep them in
-// sync. (The X axis sits at the bottom, so it doesn't eat horizontal plot width.)
-const CHART_MARGIN_LEFT = 0;
-const CHART_MARGIN_RIGHT = 10;
-const Y_AXIS_WIDTH = 42;
-// Total horizontal pixels reserved for chrome (everything that isn't plot width).
-const PLOT_X_INSET = CHART_MARGIN_LEFT + CHART_MARGIN_RIGHT + Y_AXIS_WIDTH;
-
 // ---- Zoom tuning ------------------------------------------------------------
 // Hard minimum zoom window (issue #141). A deliberate drag whose span is below this
 // floor is REFUSED (no zoom) and surfaces the "Max zoom reached" hint instead of
@@ -226,24 +200,12 @@ const PLOT_X_INSET = CHART_MARGIN_LEFT + CHART_MARGIN_RIGHT + Y_AXIS_WIDTH;
 // data the chart can hold (~4 points at 15-min), so a tighter band can't reveal
 // anything new — it's the natural "you've hit max zoom" boundary. (A pure click is
 // handled separately by classifyZoomSelection and stays silent.)
+// NOTE: the wheel-zoom MIN_ZOOM_SPAN_MS lives in useChartNavigation; this copy gates
+// the drag-select commit (commitDrag → classifyZoomSelection). Both are 1 hour.
 const MIN_ZOOM_SPAN_MS = 60 * 60_000;
 
 // How long the transient "Max zoom reached" hint stays up before auto-clearing.
 const ZOOM_HINT_MS = 2_000;
-
-// ---- WS5 mouse-navigation tuning --------------------------------------------
-// Wheel zoom step: the multiplier applied to the current span PER notch. Zoom-in
-// contracts the span to 88% (factor 0.88 ≈ a 12% tighter window); zoom-out is the
-// reciprocal (≈1.136). ~10–18% is a good feel; 12% is the middle.
-const WHEEL_ZOOM_IN_FACTOR = 0.88;
-const WHEEL_ZOOM_OUT_FACTOR = 1 / WHEEL_ZOOM_IN_FACTOR;
-// Shift+wheel pan step: shift the window by this fraction of its CURRENT span per
-// notch (~10–15%). Sign comes from the wheel deltaY direction.
-const WHEEL_PAN_FRACTION = 0.12;
-// Debounce for the gesture-driven refetch: update the display window instantly,
-// but coalesce a flurry of wheel/pan ticks into ONE /api/interval request after the
-// gestures settle. The route is ~15–40ms so this stays snappy.
-const NAV_REFETCH_DEBOUNCE_MS = 150;
 
 // ---- WS8: the line-morph is GONE for navigation -----------------------------
 // WS6 used to TWEEN the <Line> path (`animateSwap` → isAnimationActive true) when the
@@ -272,35 +234,15 @@ const FUELS: readonly Fuel[] = ['ELECTRIC', 'GAS'];
 const FUEL_LABEL: Record<Fuel, string> = { ELECTRIC: 'Electric', GAS: 'Gas' };
 const FUEL_UNIT: Record<Fuel, string> = { ELECTRIC: 'kWh', GAS: 'therms' };
 
-// The /api/interval payload rows (fuelType + unit from the API, plus the
-// IntervalProfileRow fields toHistoryPoints needs).
-type IntervalApiRow = IntervalProfileRow & { fuelType?: string; unit?: string };
-
-// What the widget keeps in component state once it has a response. We normalize the
-// SWR-cache payload (IntervalResponse, whose `rows` are `unknown[]`) into the typed
-// rows + the WS1 metadata the UI reads. `error: true` is a distinct terminal state.
-type Loaded = {
-  rows: IntervalApiRow[];
-  grain: number | undefined; // chosen bucket width in seconds (WS1); undefined if absent
-  fifteenMinFrom: string | null; // earliest 15-min timestamp, or null
-  downsampled: boolean; // finer detail exists than what's shown
-};
-type LoadState = Loaded | { error: true } | undefined;
+// The SWR fetch lifecycle (warm-cache hydrate, no-cold-blank revalidate, alive-guard)
+// + its types (IntervalApiRow / Loaded / LoadState / toLoaded) live in the colocated
+// useIntervalFetch hook (issue #156). The WS8 overscan LoadWindow type + its reconcile
+// trio live in useOverscanLoad.
 
 // A locally-zoomed window: the day bounds we refetched for finer detail, plus the
 // raw ms span the user selected (so the reset/label can describe it). Ephemeral
 // per-widget state — it never touches the global RangeControl.
 type Zoom = { from: string; to: string; startMs: number; endMs: number };
-
-// WS8 OVERSCAN: the LOADED SUPERSET descriptor — what /api/interval was actually
-// fetched for, DECOUPLED from the visible view. It's a window WIDER than the view
-// (`overscanWindowFor`) aggregated at the VIEW's grain (`bucketSecs`), so panning
-// within it stays over real data with no refetch (no blank edge, no resize). The
-// view-domain (`view`) is what's SHOWN; this is what's LOADED. `null` = follow the
-// global window with no explicit bucket (the initial / reset state). `bucketSecs` is
-// sent as the `?bucket=` param so the wider window keeps the view's resolution; we
-// recompute it from the view span and reload when a ZOOM changes the bucket.
-type LoadWindow = { from: string; to: string; bucketSecs: number };
 
 // An in-progress drag-select on the main chart (WS7: numeric axis). With the
 // numeric time XAxis, Recharts reports `e.activeLabel` as the `ts` VALUE (epoch-ms)
@@ -308,19 +250,6 @@ type LoadWindow = { from: string; to: string; bucketSecs: number };
 // band endpoints are now NUMBERS (ts). While this is non-null and `refX2` differs
 // from `refX1`, we draw the selection <ReferenceArea x1/x2={ts}>.
 type DragSel = { refX1: number; refX2: number | null };
-
-// Narrow a cached/fetched IntervalResponse into the typed Loaded the UI reads.
-// Centralized so the cache-hydrate path and the revalidate path agree.
-function toLoaded(resp: IntervalResponse): Loaded {
-  return {
-    rows: Array.isArray(resp.rows) ? (resp.rows as IntervalApiRow[]) : [],
-    grain: typeof resp.grain === 'number' ? resp.grain : undefined,
-    fifteenMinFrom: resp.fifteenMinFrom ?? null,
-    // Absent flag → treat as native resolution (badge shown). Matches WS1's intent:
-    // a missing `downsampled` means nothing was reported reduced.
-    downsampled: resp.downsampled === true,
-  };
-}
 
 // ---- Settings panel ---------------------------------------------------------
 // Rendered inside ChartShell's Customize popover / expand side. Just the Fuel
@@ -356,10 +285,6 @@ export function IntervalHistory({
   to?: string;
 }) {
   const [fuel, setFuel] = useState<Fuel>('ELECTRIC');
-  const [state, setState] = useState<LoadState>(undefined);
-  // `revalidating` (WS2): true while a fetch is in flight AND we already have data
-  // on screen — drives the subtle "updating" shimmer instead of a cold skeleton.
-  const [revalidating, setRevalidating] = useState(false);
   // The locally-zoomed window (issue #141). When set, the widget has refetched
   // /api/interval for [zoom.from, zoom.to] (finer detail) and renders that span.
   const [zoom, setZoom] = useState<Zoom | null>(null);
@@ -370,107 +295,9 @@ export function IntervalHistory({
   // deliberate drag is refused for being tighter than MIN_ZOOM_SPAN_MS.
   const [zoomHint, setZoomHint] = useState(false);
 
-  // ---- WS5 navigation state -------------------------------------------------
-  // Whether the chart is FOCUSED (clicked). The wheel/pan gestures engage ONLY
-  // while focused, and the native wheel listener captures page-scroll ONLY while
-  // focused — so scrolling past an unfocused chart is never trapped.
-  const [focused, setFocused] = useState(false);
-  // WS7: a FRESH mirror of `focused` for the native wheel listener. The listener's
-  // closure can be stale right after a click focuses the chart (the effect that
-  // re-binds it on `focused` hasn't run yet), which let the very first shift+wheel
-  // leak through to the page. Reading this ref means preventDefault() is never
-  // skipped for a focused chart due to a stale closure. Kept in sync below.
-  const focusedRef = useRef(false);
-  // WS8 OVERSCAN: the LOADED SUPERSET that actually drives the fetch (replacing WS5's
-  // `fetchZoom`). Gestures move `zoom`/`view` immediately (live, no refetch); a
-  // DEBOUNCED reconcile (`reconcileLoad`) decides — via the pure overscan helpers —
-  // whether the view has panned near a loaded edge or zoomed to a new bucket, and only
-  // THEN sets a new `load` (a window WIDER than the view, at the view's grain). A pan
-  // that stays inside the loaded superset sets nothing, so there's no refetch in the
-  // loop. `null` ⇒ follow the global window with no explicit bucket (initial/reset).
-  const [load, setLoad] = useState<LoadWindow | null>(null);
-
-  // ---- WS6 navigation polish state ------------------------------------------
-  // Reactive modifier/drag state, used ONLY to derive the chart cursor (the GESTURE
-  // logic still reads the always-fresh refs below). `ctrlDown`/`shiftDown` mirror the
-  // held modifiers; `ctrlDragging` is true while a Ctrl+drag pan is actually in
-  // flight. We keep these as state (not refs) because the cursor must RE-RENDER when a
-  // key is pressed/released. navCursor({focused,…}) maps them to the CSS cursor.
-  const [ctrlDown, setCtrlDown] = useState(false);
-  const [shiftDown, setShiftDown] = useState(false);
-  const [ctrlDragging, setCtrlDragging] = useState(false);
-  // WS9 (Fix 1): whether the cursor is currently OVER the chart body. Drives the
-  // modifier-cursor hint on hover (navCursor's `hovering`). The native wheel listener
-  // captures the shift+wheel PAN on hover regardless of focus simply because the
-  // listener only fires for wheel events delivered to the body — so the cursor must be
-  // over it — which is why no separate hover ref is needed there; this state is purely
-  // for the discoverable modifier cursor (the operator naturally shift+scrolls on
-  // hover, and the old `!focusedRef.current → return` gate leaked that to the page).
-  const [hovering, setHovering] = useState(false);
-  // WS8: the WS6 line-morph (`animateNextRef`/`animateSwap`) is GONE — see the WS8
-  // header note. Nav-driven swaps now happen WITHOUT animation: pan slides the view
-  // over a preloaded overscan superset (no swap in the loop), and a finer-grain zoom
-  // swap just sharpens in place. <Line isAnimationActive={false}> on every path.
-
-  // The chart-body wrapper element — the focus host. We attach the native
-  // non-passive wheel listener here and draw the focus ring on it.
+  // The chart-body wrapper element — the focus host. The navigation hook attaches the
+  // native non-passive wheel + Ctrl+drag listeners here and we draw the focus ring on it.
   const bodyRef = useRef<HTMLDivElement | null>(null);
-  // The time (epoch-ms) under the cursor, tracked from the Recharts onMouseMove via
-  // pointFromActive. The wheel handler uses it as the zoom center (fallback: midpoint).
-  const hoverTsRef = useRef<number | null>(null);
-  // Whether Ctrl is currently held — tracked from document keydown/keyup AND from the
-  // native mouse/wheel events, because Recharts' synthetic mouse-state object doesn't
-  // reliably expose modifier keys. Drives the Ctrl+drag pan branch.
-  const ctrlDownRef = useRef(false);
-  // The in-flight Ctrl+drag pan, if any (WS10: PIXEL-ANCHORED). Captured at native
-  // mousedown: the START window (`fromMs`/`toMs`), the START cursor `clientX`, and the
-  // plot's pixel width. Every move computes `deltaPx = e.clientX - startClientX`,
-  // converts it to ms via the START span (pixelPanDeltaMs), and shifts the START
-  // window — so there's NO feedback loop (the old version derived the delta from the
-  // nearest data point's ts against the LIVE-moving domain, which oscillated and
-  // snapped back). While set, the Recharts plain drag-select is suppressed.
-  const panDragRef = useRef<{
-    startClientX: number;
-    fromMs: number;
-    toMs: number;
-    plotWidthPx: number;
-  } | null>(null);
-  // The debounce timer handle for the gesture refetch.
-  const navTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // The window actually fetched (WS8): the LOADED SUPERSET window when set, else the
-  // global window. The superset is WIDER than the visible view, so the rows the chart
-  // holds always extend past both view edges → panning stays over real data.
-  const fetchFrom = load ? load.from : from;
-  const fetchTo = load ? load.to : to;
-  // WS8: the explicit `?bucket=` for the fetch — the VIEW's grain, so the wider
-  // superset is aggregated at the resolution the view needs (grain coherence). Absent
-  // when no overscan load is active (the route picks the bucket from the span).
-  const fetchBucket = load ? load.bucketSecs : undefined;
-
-  // Drop any active zoom (and any in-progress drag) whenever the fuel, the account,
-  // or the GLOBAL range changes — a zoom into the old context would be stale. WS7:
-  // also reset the live `view` to the new global bounds so the numeric axis domain
-  // snaps to the fresh context (it's reconciled again when the fetch lands). WS8:
-  // clear the loaded superset too so the next reconcile loads a fresh one.
-  useEffect(() => {
-    setZoom(null);
-    setLoad(null);
-    setDrag(null);
-    setZoomHint(false);
-    panDragRef.current = null;
-    if (navTimerRef.current) {
-      clearTimeout(navTimerRef.current);
-      navTimerRef.current = null;
-    }
-  }, [fuel, from, to, accountId]);
-
-  // WS7: keep the wheel listener's fresh-focus ref in lockstep with `focused`, so a
-  // shift+wheel fired the instant the chart is clicked still preventDefault()s (the
-  // stale closure that caused the page-scroll leak can't win against a ref read).
-  useEffect(() => {
-    focusedRef.current = focused;
-  }, [focused]);
 
   // The GLOBAL window bounds in epoch-ms (the outer clamp for every WS5 gesture).
   // Parsed from the day-string props; null when either bound is absent (a
@@ -485,230 +312,64 @@ export function IntervalHistory({
   }, [to]);
   const boundsValid = Number.isFinite(boundsFromMs) && Number.isFinite(boundsToMs);
 
+  // ---- WS8: the overscan reconcile (colocated useOverscanLoad hook) ----------
+  // Gestures move `zoom`/`view` immediately (live, no refetch); the hook's debounced
+  // reconcile decides — via the pure overscan helpers — whether the view has panned
+  // near a loaded edge or zoomed to a new bucket, and only THEN sets a new `load` (a
+  // window WIDER than the view, at the view's grain). `load === null` ⇒ follow the
+  // global window with no explicit bucket (initial/reset). `resetLoad` clears `load`
+  // and the pending debounce synchronously for the context-change effect below.
+  const { load, scheduleReconcile, resetLoad } = useOverscanLoad({
+    boundsFromMs,
+    boundsToMs,
+    boundsValid,
+  });
+
+  // The window actually fetched (WS8): the LOADED SUPERSET window when set, else the
+  // global window. The superset is WIDER than the visible view, so the rows the chart
+  // holds always extend past both view edges → panning stays over real data.
+  const fetchFrom = load ? load.from : from;
+  const fetchTo = load ? load.to : to;
+  // WS8: the explicit `?bucket=` for the fetch — the VIEW's grain, so the wider
+  // superset is aggregated at the resolution the view needs (grain coherence). Absent
+  // when no overscan load is active (the route picks the bucket from the span).
+  const fetchBucket = load ? load.bucketSecs : undefined;
+
+  // Build the /api/interval request (url + cache key). Follow the loaded OVERSCAN
+  // superset window when set (WS8), else the GLOBAL range; otherwise let the route
+  // default to its trailing window (non-dashboard caller). The cache key keys off the
+  // FETCHED window + bucket (WS8) so an overscan superset and a base view (or two
+  // buckets over the same window) are distinct cache entries.
+  const acctQuery = accountId != null ? `&accountId=${accountId}` : '';
+  const rangeQuery = fetchFrom && fetchTo ? `&from=${fetchFrom}&to=${fetchTo}` : '';
+  const bucketQuery = fetchBucket != null ? `&bucket=${fetchBucket}` : '';
+  const url = `/api/interval?fuel=${fuel}${rangeQuery}${bucketQuery}${acctQuery}`;
+  const key = intervalCacheKey({ fuel, from: fetchFrom, to: fetchTo, accountId, bucket: fetchBucket });
+
+  // ---- WS2 SWR fetch lifecycle (colocated useIntervalFetch hook) -------------
+  // Warm-cache hydrate, no-cold-blank revalidate, alive-guard. `state` is the LoadState
+  // the render tree narrows; `revalidating` drives the "updating" shimmer.
+  const { state, revalidating } = useIntervalFetch(key, url);
+
+  // Drop any active zoom (and any in-progress drag) whenever the fuel, the account,
+  // or the GLOBAL range changes — a zoom into the old context would be stale. WS7:
+  // also reset the live `view` to the new global bounds so the numeric axis domain
+  // snaps to the fresh context (it's reconciled again when the fetch lands). WS8:
+  // clear the loaded superset too (resetLoad) so the next reconcile loads a fresh one.
+  // (panDragRef lives in the navigation hook now; resetLoad clears its debounce timer.)
+  useEffect(() => {
+    setZoom(null);
+    setDrag(null);
+    setZoomHint(false);
+    resetLoad();
+  }, [fuel, from, to, accountId, resetLoad]);
+
   // Auto-dismiss the "Max zoom reached" hint ~2s after it's shown (issue #141).
   useEffect(() => {
     if (!zoomHint) return;
     const id = setTimeout(() => setZoomHint(false), ZOOM_HINT_MS);
     return () => clearTimeout(id);
   }, [zoomHint]);
-
-  // ---- WS5 focus management: Esc + click-away release -----------------------
-  // While focused, listen on the document for: (1) Esc → blur; (2) a pointer-down
-  // OUTSIDE the chart body → blur (click-away). Listening on the document (not the
-  // wrapper's onBlur) is robust: the SVG/Recharts internals steal focus and a real
-  // <div> blur never fires reliably here, so we drive focus explicitly. Only wired
-  // up while focused, so it adds no global listeners at rest. (#150: the shared
-  // useDismissable hook, with the DELIBERATE capture-phase + pointerdown options so
-  // we see the click-away before any stopPropagation inside the chart.)
-  useDismissable(bodyRef, focused, () => setFocused(false), {
-    event: 'pointerdown',
-    capture: true,
-  });
-
-  // Track Ctrl globally so the Ctrl+drag pan can detect the modifier even though the
-  // Recharts synthetic mouse-state object doesn't expose it. Cheap, always-on (a
-  // boolean flip); the gesture only reads ctrlDownRef while focused + dragging.
-  //
-  // WS6 EXTENSION: the same handler now also mirrors Ctrl AND Shift into the reactive
-  // `ctrlDown`/`shiftDown` STATE that drives the modifier→cursor feedback (navCursor).
-  // The gesture handlers keep reading ctrlDownRef (always fresh, no render needed);
-  // the state copies exist purely so a press/release RE-RENDERS the cursor. Updated on
-  // BOTH keydown and keyup so releasing a key restores the cursor. setState is a no-op
-  // when the value is unchanged, so the held-key key-repeat doesn't thrash renders.
-  useEffect(() => {
-    const sync = (e: KeyboardEvent) => {
-      const ctrl = e.ctrlKey || e.metaKey;
-      const shift = e.shiftKey;
-      ctrlDownRef.current = ctrl;
-      setCtrlDown(ctrl);
-      setShiftDown(shift);
-    };
-    // A window blur (alt-tab, focus loss) can swallow the keyup → the modifier would
-    // appear stuck-down. Clear the reactive cursor state on blur to self-heal.
-    const onBlur = () => {
-      ctrlDownRef.current = false;
-      setCtrlDown(false);
-      setShiftDown(false);
-    };
-    window.addEventListener('keydown', sync);
-    window.addEventListener('keyup', sync);
-    window.addEventListener('blur', onBlur);
-    return () => {
-      window.removeEventListener('keydown', sync);
-      window.removeEventListener('keyup', sync);
-      window.removeEventListener('blur', onBlur);
-    };
-  }, []);
-
-  // Derive the chart cursor (WS6) from the focus + modifier + active-drag state via
-  // the PURE navCursor resolver. Recomputed on every relevant state change; applied to
-  // the LineChart's `style.cursor`. Not focused → 'default' (gestures inert).
-  const chartCursor = navCursor({ focused, ctrlDown, shiftDown, ctrlDragging, hovering });
-
-  // ---- WS8: the overscan reconcile -----------------------------------------
-  // A FRESH mirror of `load` so the debounced reconcile reads the current superset
-  // without re-arming on every `load` change (the reconcile runs after a gesture, by
-  // which time React may not have committed the latest `load`). Kept in sync below.
-  const loadRef = useRef<LoadWindow | null>(null);
-  useEffect(() => {
-    loadRef.current = load;
-  }, [load]);
-
-  // Build the LOADED-SUPERSET descriptor for a given visible VIEW window: widen the
-  // view to the overscan superset (real data on both sides) and aggregate it at the
-  // VIEW's grain (grain coherence — the wider span must NOT pick a coarser bucket).
-  // Emits the route's inclusive UTC day bounds (the route widens `to` to end-of-day).
-  // PURE-derived (delegates to the pure overscan helpers); no side effects.
-  const loadWindowForView = useCallback(
-    (viewWin: OverscanWindow): LoadWindow => {
-      const superset = overscanWindowFor(viewWin, boundsFromMs, boundsToMs);
-      const bucketSecs = viewSpanBucketSecs(viewWin, MAX_POINTS);
-      return { from: msToYmd(superset.fromMs), to: msToYmd(superset.toMs), bucketSecs };
-    },
-    [boundsFromMs, boundsToMs],
-  );
-
-  // Decide whether to (re)load the overscan superset for the CURRENT view window, and
-  // if so set `load` (which drives the fetch). DECOUPLED from the live pan/zoom: a pan
-  // that stays inside the loaded superset at the same grain is a NO-OP here (no
-  // refetch → no resize). We (re)load only when:
-  //   • nothing is loaded yet (first paint after a gesture), OR
-  //   • a ZOOM changed the view-span bucket (overscanBucketChanged) → reload at the
-  //     new grain, re-centered on the view, OR
-  //   • a PAN brought the view near a loaded edge (isViewNearLoadedEdge) → top the
-  //     overscan back up by re-centering on the view (same grain).
-  // In every reload case the new superset is RE-CENTERED on the current view, so the
-  // visible slice is the SAME data — the swap is invisible (no domain move, and WS8's
-  // <Line> has no animation, so it never resizes). SINGLE-FLIGHT: the fetch effect
-  // dedupes one in-flight request per key (swrFetch), and we only ever set ONE pending
-  // `load` (the debounce coalesces a flurry of gesture ticks into one reconcile), so
-  // rapid panning can't spawn a swarm of fetches. `null` view (reset / no bounds) →
-  // clear `load` (follow the global window).
-  const reconcileLoad = useCallback(
-    (viewWin: OverscanWindow | null) => {
-      if (!viewWin || !boundsValid) {
-        setLoad(null);
-        return;
-      }
-      const cur = loadRef.current;
-      const bucketChanged = overscanBucketChanged(viewWin, cur?.bucketSecs ?? null, MAX_POINTS);
-      // The currently-loaded superset's window in ms (for the edge-proximity check).
-      const loadedWin: OverscanWindow | null = cur
-        ? {
-            fromMs: new Date(cur.from).getTime(),
-            // The route widens `to` to end-of-day; mirror that so the edge check uses
-            // the real loaded extent (not the start of the last day).
-            toMs: new Date(cur.to).getTime() + (24 * 60 * 60_000 - 1),
-          }
-        : null;
-      const nearEdge =
-        loadedWin != null &&
-        isViewNearLoadedEdge(viewWin, loadedWin, boundsFromMs, boundsToMs);
-      if (cur && !bucketChanged && !nearEdge) return; // view still inside the superset → no refetch
-      setLoad(loadWindowForView(viewWin));
-    },
-    [boundsValid, boundsFromMs, boundsToMs, loadWindowForView],
-  );
-
-  // Debounced wrapper: a flurry of wheel/pan ticks coalesces into ONE reconcile after
-  // NAV_REFETCH_DEBOUNCE_MS (so at most one extend-load per settled gesture).
-  // `immediate` runs it synchronously for discrete gestures (drag-select commit /
-  // reset) where there's no flurry to coalesce. The caller passes the NEXT view window
-  // explicitly (the one the gesture just produced) so the reconcile doesn't depend on
-  // React having committed `zoom` yet.
-  const scheduleReconcile = useCallback(
-    (viewWin: OverscanWindow | null, immediate = false) => {
-      if (navTimerRef.current) {
-        clearTimeout(navTimerRef.current);
-        navTimerRef.current = null;
-      }
-      if (immediate) {
-        reconcileLoad(viewWin);
-        return;
-      }
-      navTimerRef.current = setTimeout(() => {
-        navTimerRef.current = null;
-        reconcileLoad(viewWin);
-      }, NAV_REFETCH_DEBOUNCE_MS);
-    },
-    [reconcileLoad],
-  );
-
-  // Clean up the debounce timer on unmount.
-  useEffect(
-    () => () => {
-      if (navTimerRef.current) clearTimeout(navTimerRef.current);
-    },
-    [],
-  );
-
-  // The "base" reload key (fuel/global-range/account) is kept only so the fetch
-  // effect can record what it last fetched. WS2's no-cold-blank rule no longer needs
-  // a base-vs-zoom branch: we NEVER setState(undefined) once there's data on screen.
-  const baseKeyRef = useRef<string | null>(null);
-
-  // Fetch on mount + whenever the fuel, account, or the (possibly zoomed) window
-  // changes. STALE-WHILE-REVALIDATE: paint the cached series for this exact key
-  // instantly (if warm), then revalidate and swap in place. `alive` guards against
-  // an out-of-order response overwriting a newer one.
-  useEffect(() => {
-    let alive = true;
-    const acctQuery = accountId != null ? `&accountId=${accountId}` : '';
-    // Follow the loaded OVERSCAN superset window when set (WS8), else the GLOBAL range;
-    // otherwise let the route default to its trailing window (non-dashboard caller).
-    const rangeQuery = fetchFrom && fetchTo ? `&from=${fetchFrom}&to=${fetchTo}` : '';
-    // WS8: when an overscan load is active, pin the route to the VIEW's grain via
-    // `?bucket=` so the wider superset is aggregated at the view's resolution (grain
-    // coherence). Absent → the route picks the bucket from the span (pre-WS8 path).
-    const bucketQuery = fetchBucket != null ? `&bucket=${fetchBucket}` : '';
-    const url = `/api/interval?fuel=${fuel}${rangeQuery}${bucketQuery}${acctQuery}`;
-    // The cache key keys off the FETCHED window + bucket (WS8) so an overscan superset
-    // and a base view (or two buckets over the same window) are distinct cache
-    // entries — each repaints its own last-seen series.
-    const key = intervalCacheKey({ fuel, from: fetchFrom, to: fetchTo, accountId, bucket: fetchBucket });
-
-    // NEVER COLD-BLANK. The single state change that makes this true:
-    //   • warm cache for THIS key → hydrate state from cache NOW (instant repaint),
-    //   • else if we ALREADY have data on screen (any prior Loaded) → keep it up,
-    //   • else (genuine first load, nothing to show) → skeleton (state=undefined).
-    // Then revalidate in the background and swap in place. We do NOT
-    // setState(undefined) for a base reload anymore — that was the old cold-blank.
-    const cached = getCached(key);
-    setState((prev) => {
-      if (cached) return toLoaded(cached); // warm → instant repaint of last-seen series
-      if (prev && !('error' in prev)) return prev; // have data → keep it, shimmer over it
-      return undefined; // genuine first load → the only cold (skeleton) state left
-    });
-    // Shimmer whenever we already have something to show (cache hit or prior data);
-    // only the true first load (no cache, no prior data) suppresses it for the skeleton.
-    setRevalidating(!!cached || (!!state && !('error' in state)));
-    baseKeyRef.current = key;
-
-    swrFetch(key, url)
-      .then((resp) => {
-        if (!alive) return;
-        // WS8: swap the rows in WITHOUT any animation. The visible slice of the loaded
-        // superset is the SAME data (the view domain is unchanged across an overscan
-        // swap), so an instant swap is invisible for a pan and just sharpens-in-place
-        // for a finer-grain zoom — no resize/morph. (The WS6 line-morph is removed.)
-        setState(toLoaded(resp));
-        setRevalidating(false);
-      })
-      .catch(() => {
-        if (!alive) return;
-        // On a hard failure keep any stale data we were showing (stale beats blank);
-        // only show the error card if we have nothing at all.
-        setRevalidating(false);
-        setState((prev) => (prev && !('error' in prev) ? prev : { error: true }));
-      });
-    return () => {
-      alive = false;
-    };
-    // `state` is read only to decide the shimmer flag at fetch START; including it in
-    // deps would re-run the effect on every swap (an infinite loop). The fetch
-    // identity is fully determined by fuel/window/bucket/account (WS8 adds bucket).
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fuel, fetchFrom, fetchTo, fetchBucket, accountId]);
 
   const color = fuel === 'GAS' ? GAS : ELEC;
   const unit = FUEL_UNIT[fuel];
@@ -870,6 +531,31 @@ export function IntervalHistory({
     [boundsValid, boundsFromMs, boundsToMs, scheduleReconcile],
   );
 
+  // ---- WS5–WS11 mouse navigation (colocated useChartNavigation hook) ---------
+  // The two native non-passive listeners (wheel zoom/shift-pan + Ctrl+drag pan) and the
+  // focus/modifier tracking live in the hook. It reads the FRESH `curWindowRef` (never a
+  // stale `zoom` closure) for the constant-span slide, reads focus from a fresh ref so
+  // the first shift+wheel after a click still preventDefault()s, treats a horizontal
+  // wheel (macOS shift+scroll, shiftKey=false) as a pan, and stopPropagation()s so the
+  // cockpit paginator can't steal the horizontal wheel. It returns the focus state +
+  // setter, the chart cursor, and the refs the drag-select handlers below also read.
+  const {
+    focused,
+    setFocused,
+    chartCursor,
+    hoverTsRef,
+    panDragRef,
+    ctrlDownRef,
+    onBodyMouseEnter,
+    onBodyMouseLeave,
+  } = useChartNavigation(
+    bodyRef,
+    curWindowRef,
+    applyNavWindow,
+    { boundsFromMs, boundsToMs, boundsValid },
+    data.length,
+  );
+
   // ---- Drag handlers (issue #141 zoom-select; WS10 Ctrl+drag pan is native) --
   // Mouse-down focuses the chart (WS5). The Ctrl+drag PAN is NO LONGER handled here —
   // WS10 moved it to a NATIVE mousedown/move/up listener on the chart body, because
@@ -957,217 +643,6 @@ export function IntervalHistory({
     scheduleReconcile(null, true);
   }, [scheduleReconcile]);
 
-  // ---- WS5/WS7/WS9: native non-passive wheel listener (zoom / shift-pan) -----
-  // React's onWheel is PASSIVE — it can't preventDefault to stop page scroll. So we
-  // attach a native listener with { passive: false } on the chart body. Wheel up =
-  // zoom IN, down = zoom OUT, centered on hoverTsRef (fallback: window midpoint);
-  // Shift+wheel = pan. The window update is immediate (and so, via the derived `view`,
-  // the line slides/scales LIVE); the refetch is debounced.
-  //
-  // WS9 GATING (capture the PAN on HOVER, keep ZOOM focus-gated). WS7 gated ALL
-  // handling — including preventDefault — on `focusedRef.current`, so shift+scrolling
-  // over the chart WITHOUT first clicking it leaked to the page (the operator
-  // naturally shift+scrolls on hover). The pan gesture (shift+wheel) is now captured
-  // whenever the cursor is over the chart, focused or not; the zoom gesture (plain
-  // wheel) STAYS focus-gated so plain page-scrolling past an unfocused chart still
-  // works (we don't trap it). Ctrl-without-shift while unfocused is left alone too:
-  //   const isPan = e.shiftKey || horizontalWheel;      // shift OR horizontal wheel = pan
-  //   if (!focusedRef.current && !isPan) return;        // unfocused, non-pan → leave
-  //   e.preventDefault();                               // pan (any focus) / focused
-  // The pan branch computes purely from `zoom`/bounds, so it works regardless of
-  // focus. WS7's other guarantees stand: preventDefault fires BEFORE the no-data
-  // early return (so the page can't scroll from a captured gesture even with no
-  // rows), and focus is read from the always-fresh `focusedRef` (no stale-closure
-  // race on the very first wheel after a click).
-  //
-  // We read BOTH deltaY AND deltaX: shift+wheel emits a HORIZONTAL delta on many
-  // setups (the OS/browser maps shift+vertical-wheel to deltaX), so we pan by whichever
-  // axis is non-zero (preferring the larger magnitude) and derive direction from its
-  // sign — preventDefault covers both axes (it's the unconditional `e.preventDefault()`
-  // on the captured path, not an axis-specific guard).
-  //
-  // The listener is bound for the lifetime of the chart body. It only fires for wheel
-  // events delivered TO the body (i.e. the cursor is over it), so the hover condition
-  // for the pan is implicit in the listener's target; we still gate the ZOOM on focus
-  // explicitly so an unfocused hover-scroll passes through.
-  useEffect(() => {
-    const el = bodyRef.current;
-    if (!el) return;
-    const onWheel = (e: WheelEvent) => {
-      // WS9: the PAN (shift+wheel) is captured on hover, focused or not; the ZOOM
-      // (plain wheel) needs focus. So: when unfocused AND this isn't a pan, leave the
-      // event for the page (normal scroll). Otherwise we own it → preventDefault. Read
-      // focus from the always-fresh ref (not the stale closure). Ctrl-without-shift on
-      // an unfocused chart falls into the "leave it" branch — the browser handles it.
-      // macOS and many trackpads convert shift+scroll into a HORIZONTAL wheel — deltaX
-      // set, shiftKey=FALSE — so a `e.shiftKey`-only gate misses it and the page scrolls
-      // (the leak the operator hit on their setup, even though shiftKey+deltaY works).
-      // Recognise a pan by EITHER the shift key OR a predominantly-horizontal delta.
-      const horizontalWheel = Math.abs(e.deltaX) > Math.abs(e.deltaY);
-      const isPan = e.shiftKey || horizontalWheel;
-      if (!focusedRef.current && !isPan) return;
-      e.preventDefault();
-      // STOP the event from bubbling to the cockpit paginator's ancestor wheel
-      // listener (WidgetLayout's trackpad horizontal-scroll paging), which would
-      // otherwise also act on this horizontal wheel and FLIP THE PAGE — sliding the
-      // chart off-screen so a pan "works once then stops". preventDefault only
-      // suppresses the browser's default scroll, NOT ancestor JS listeners; we own
-      // this gesture, so stop propagation too.
-      e.stopPropagation();
-      // Past here the page is already prevented; the gesture math no-ops (returns)
-      // when we can't compute a window — but the page stays put either way.
-      if (!boundsValid || data.length === 0) return;
-      ctrlDownRef.current = e.ctrlKey || e.metaKey; // keep Ctrl tracking fresh
-      // WS11: read the CURRENT window from the FRESH committed mirror (`curWindowRef`),
-      // NOT the captured `zoom` closure — the SAME ref WS10's Ctrl+drag uses. A burst of
-      // wheel notches fires faster than React commits `setZoom` + re-binds this listener,
-      // so the closure's `zoom` was STALE: each notch then panned from the SAME old
-      // window, and a stale read that momentarily fell back to the full `boundsFromMs..
-      // boundsToMs` made the span JUMP to the whole range — so repeated horizontal pans
-      // DISTORTED the window (the right edge pinned ~now while the left ran far back: a
-      // widen, not a clean slide). Reading the ref means each notch ACCUMULATES from where
-      // the last one committed, with a CONSTANT span (panWindow preserves the span and
-      // only clamps the SHIFT at the global edge). Mirrors WS10's curWindowRef fix.
-      const cur = curWindowRef.current;
-      const fromMs = cur.fromMs;
-      const toMs = cur.toMs;
-      if (isPan) {
-        // Shift+wheel (or a horizontal wheel) → pan. Use whichever wheel axis carries
-        // the delta. Many
-        // setups report shift+wheel as deltaX; some still report deltaY — pick the
-        // axis with the larger magnitude so a single source drives the pan. A positive
-        // delta pans RIGHT (later time); negative pans LEFT.
-        const raw = Math.abs(e.deltaX) >= Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
-        if (raw === 0) return; // nothing to pan (page already prevented)
-        const span = toMs - fromMs;
-        const dir = raw > 0 ? 1 : -1;
-        const next = panWindow(
-          fromMs,
-          toMs,
-          dir * WHEEL_PAN_FRACTION * span,
-          boundsFromMs,
-          boundsToMs,
-        );
-        applyNavWindow(next);
-      } else {
-        // Wheel up (deltaY < 0) → zoom IN; wheel down → zoom OUT. Center on the
-        // hovered ts, falling back to the window midpoint when no hover is tracked.
-        // WS7: fall back to deltaX when a setup reports the plain wheel horizontally.
-        const raw = e.deltaY !== 0 ? e.deltaY : e.deltaX;
-        if (raw === 0) return; // no scroll magnitude → nothing to zoom
-        const center =
-          hoverTsRef.current != null && Number.isFinite(hoverTsRef.current)
-            ? hoverTsRef.current
-            : (fromMs + toMs) / 2;
-        const factor = raw < 0 ? WHEEL_ZOOM_IN_FACTOR : WHEEL_ZOOM_OUT_FACTOR;
-        const next = zoomWindowAroundCenter(
-          fromMs,
-          toMs,
-          center,
-          factor,
-          boundsFromMs,
-          boundsToMs,
-          MIN_ZOOM_SPAN_MS,
-        );
-        applyNavWindow(next);
-      }
-    };
-    el.addEventListener('wheel', onWheel, { passive: false });
-    return () => el.removeEventListener('wheel', onWheel);
-    // WS11: `zoom` is no longer a dep — the handler reads the CURRENT window from the
-    // fresh `curWindowRef.current` (a stable ref), so the listener no longer needs to
-    // re-bind on every wheel-notch's `setZoom`. That removal is also what makes the pan
-    // accumulate correctly: a stable handler reading a fresh ref can't read a stale
-    // closure mid-burst. The remaining deps fully determine the gesture math.
-  }, [boundsValid, boundsFromMs, boundsToMs, data.length, applyNavWindow]);
-
-  // ---- WS10: native Ctrl+drag PAN (pixel-anchored) --------------------------
-  // The Ctrl+drag pan is driven by the RAW PIXEL delta from the drag START — NOT the
-  // nearest data point's ts under the (live-moving) numeric domain. The old version
-  // computed `cursorDelta = pt.ts - pan.startTs` against the domain the pan itself was
-  // moving, so the same screen pixel mapped to a different ts each move → the delta fed
-  // back, the window oscillated/quantized (glitchy) and netted back toward the start
-  // ("snapped back"). WS10 anchors everything to fixed START values, so there is NO
-  // feedback loop: the same `deltaPx` always yields the same window, and the window
-  // tracks the cursor 1:1 and STAYS on release.
-  //
-  // We need `e.clientX` + the plot pixel width, neither of which Recharts' synthetic
-  // mouse-state exposes — so this is a NATIVE listener on the chart body (like the
-  // wheel listener). On Ctrl+mousedown we capture the START window (from the fresh
-  // `curWindowRef`), the START clientX, and the plot width (the body's measured width
-  // minus the chart's non-plot horizontal insets). Each move: `deltaPx = clientX −
-  // startClientX`; `deltaMs = -pixelPanDeltaMs(deltaPx, plotWidthPx, startSpanMs)` (the
-  // NEGATION is the "grab the plot" direction — drag RIGHT → reveal EARLIER time →
-  // window moves LEFT); then `panWindow(startFrom, startTo, deltaMs, …)` clamps to the
-  // global bounds and `applyNavWindow` pushes it into the live `zoom` domain. mouseup
-  // forces a synchronous overscan reconcile of the final window. The non-Ctrl path is
-  // left entirely to Recharts (the plain zoom-SELECT band), so the two never conflict.
-  useEffect(() => {
-    const el = bodyRef.current;
-    if (!el) return;
-
-    const endPan = () => {
-      const pan = panDragRef.current;
-      if (!pan) return;
-      panDragRef.current = null;
-      setCtrlDragging(false); // WS6: pan ended → cursor back to 'grab' (Ctrl still held)
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup', onUp);
-      // Force a synchronous overscan reconcile of the FINAL window (the live `zoom`
-      // already tracked the drag; this tops up the loaded superset for the rest spot).
-      const w = curWindowRef.current;
-      applyNavWindow({ fromMs: w.fromMs, toMs: w.toMs }, true);
-    };
-
-    const onMove = (e: MouseEvent) => {
-      const pan = panDragRef.current;
-      if (!pan) return;
-      const deltaPx = e.clientX - pan.startClientX;
-      const startSpan = pan.toMs - pan.fromMs;
-      // "Grab the plot": drag right (deltaPx > 0) reveals EARLIER time → window LEFT,
-      // hence the negation. Anchored to the START window + START pixel → no feedback.
-      const deltaMs = -pixelPanDeltaMs(deltaPx, pan.plotWidthPx, startSpan);
-      const next = panWindow(pan.fromMs, pan.toMs, deltaMs, boundsFromMs, boundsToMs);
-      applyNavWindow(next); // live domain updates immediately; reconcile is debounced
-    };
-
-    const onUp = () => endPan();
-
-    const onDown = (e: MouseEvent) => {
-      // Only a PRIMARY-button Ctrl(/Cmd)+drag starts a pan; everything else (plain
-      // drag, right-click) is left to Recharts' handlers (the zoom-SELECT band).
-      if (e.button !== 0) return;
-      if (!(e.ctrlKey || e.metaKey)) return;
-      if (!boundsValid) return;
-      ctrlDownRef.current = true; // keep Ctrl tracking fresh
-      // Plot pixel width = measured body width − the non-plot horizontal insets
-      // (YAxis width + left/right margins). Guard against a zero/negative width.
-      const rect = el.getBoundingClientRect();
-      const plotWidthPx = rect.width - PLOT_X_INSET;
-      if (!(plotWidthPx > 0)) return;
-      const w = curWindowRef.current;
-      panDragRef.current = {
-        startClientX: e.clientX,
-        fromMs: w.fromMs,
-        toMs: w.toMs,
-        plotWidthPx,
-      };
-      setCtrlDragging(true); // WS6: cursor → 'grabbing' while the pan is live
-      // Suppress text-selection / Recharts' band for this gesture; track on the
-      // DOCUMENT so a drag that leaves the chart body keeps panning until mouseup.
-      e.preventDefault();
-      document.addEventListener('mousemove', onMove);
-      document.addEventListener('mouseup', onUp);
-    };
-
-    el.addEventListener('mousedown', onDown);
-    return () => {
-      el.removeEventListener('mousedown', onDown);
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup', onUp);
-    };
-  }, [boundsValid, boundsFromMs, boundsToMs, applyNavWindow]);
-
   // Subtitle: e.g. "Electric · kWh · hourly" (the global time window is in the
   // dashboard header). The grain segment is human-formatted from the numeric
   // `grain` (WS2) and omitted when absent. When zoomed, append the local span.
@@ -1222,8 +697,8 @@ export function IntervalHistory({
       // WS9 (Fix 1): track hover so the shift+wheel PAN is discoverable on hover — the
       // modifier cursor (ew-resize / grab) shows via navCursor's `hovering` even before
       // the chart is clicked-to-focus.
-      onMouseEnter={() => setHovering(true)}
-      onMouseLeave={() => setHovering(false)}
+      onMouseEnter={onBodyMouseEnter}
+      onMouseLeave={onBodyMouseLeave}
     >
       {/* Subtle "updating" shimmer (WS2): a thin top progress bar shown whenever a
           revalidation is in flight AND there's already a chart up — so a reload
