@@ -25,21 +25,26 @@
 //
 // A) A SELF-CONTAINED widget (own data fetch + Recharts), e.g. IntervalLoadShape /
 //    IntervalHistory. This is the simplest path and does NOT touch the ChartSpec /
-//    ConfigurableChart / vizType seam.
+//    ConfigurableChart / vizType seam. It is now a REGISTRY-ONLY change (issue #155):
 //    1. Build the component in `app/src/components/widgets/<Name>.tsx` ('use client').
 //       Read account scope from `host.accountId`; handle loading / EMPTY / populated
 //       states (an empty widget reads as broken). Keep number/parse logic in a PURE,
 //       unit-tested lib (e.g. lib/intervalProfile.ts) — not in the component.
-//    2. Register it below: export a `type` const, add a `WidgetDef`
-//       ({ type, category:'chart', dataDeps:[], render: (host) => <Name … />,
-//       defaultSize:{w,h,minW,minH} }), and put it in the `WIDGETS` map. Update the
-//       registry-count assertion in `app/test/widgets.test.ts`.
-//    3. Make it default-visible + REMOVABLE in `app/src/components/Dashboard.tsx`:
-//       add its type to `availableChartsAll` AND to `intervalWidgetTypes` (the
-//       `chartIds = [...availableCharts, ...intervalWidgetTypes.filter(isPlaced)]`
-//       line), and add a `removed…` entry to the Customize palette list so it can be
-//       re-added. `isPlaced` gives you: shown by default on a fresh layout, removal
-//       that STICKS, and re-add via the clean findFreeSlot path.
+//    2. Add ONE row to `INTERVAL_WIDGET_TABLE` below ({ type, title, Component }) and
+//       export its `type` const. `intervalWidget()` builds the `WidgetDef` (category
+//       'chart', `dataDeps:[]`, the standard chart-tile `defaultSize`, and crucially
+//       `defaultVisible: true`); the `WIDGETS` map and `defaultVisibleWidgetTypes()`
+//       pick it up automatically. (A self-contained tile that is NOT interval-shaped
+//       can be any `WidgetDef` with `defaultVisible: true` — the dashboard derives off
+//       the flag, not the table.) Bump the registry-count assertion in
+//       `app/test/widgets.test.ts`.
+//    3. NOTHING in `Dashboard.tsx`. It DERIVES the interval-widget list, the
+//       `fullChartUniverse`, and the Customize add-back palette from the registry via
+//       `defaultVisibleWidgetTypes()`, and gates each on `isPlaced` — so a fresh
+//       layout shows it, removal STICKS, and re-add goes through the clean
+//       findFreeSlot path. `defaultVisible` is exactly "self-contained chart tile,
+//       default-visible, removable, re-addable"; the gating is unchanged (see the
+//       #121 caution).
 //
 // B) A declarative TIMESERIES chart over the monthly series: add a `ChartSpec` to
 //    `lib/chartSpec.ts` (`CHART_SPECS`) + its config to `lib/chartConfig.ts`
@@ -178,6 +183,24 @@ export interface WidgetDef {
   // so they declare none yet (`[]`).
   dataDeps: DatasetId[];
   defaultSize: { w: number; h: number; minW: number; minH: number };
+  // The VISIBILITY MODEL — how the dashboard tracks whether this widget shows
+  // (issue #155). A self-contained chart widget (the interval tiles) has no
+  // `widgetConfig.visible` flag and no data-driven `isVisible` predicate; instead
+  // its presence on the saved layout IS its show/hide signal. Mark such a widget
+  // `defaultVisible: true` and the dashboard DERIVES the interval-widget list, the
+  // `fullChartUniverse`, and the add-back palette from the registry by filtering on
+  // this flag — no parallel hardcoded id-lists to drift (the §5 "registry entry
+  // only" promise made true for path A). The flag means exactly: "self-contained
+  // chart tile, shown by default on a fresh layout, removable (removal sticks via
+  // the `isPlaced` gate), re-addable from the Customize palette." Every other widget
+  // owns its visibility elsewhere (charts → `widgetConfig.visible`; stats →
+  // `isVisible(statData)`; the bills panel + spacer → placement presence), so they
+  // are `defaultVisible: false` and are NOT swept into the interval-widget list.
+  // ⚠ Do NOT read this as a license to force-append a widget unconditionally — the
+  // dashboard STILL gates these on `isPlaced` (the #121 pitfall below); this flag
+  // only changes HOW the list of such widgets is built (derived from the registry,
+  // not three copy-pasted id arrays).
+  defaultVisible: boolean;
   render: (host: WidgetHost) => ReactNode;
 }
 
@@ -200,6 +223,10 @@ function chartWidget(spec: ChartSpec): WidgetDef {
     // mirrors the default generator's 2×2 two-up chart placement (issue #73
     // density iteration). minW=3 keeps an added chart at least quarter-width.
     defaultSize: { w: 6, h: 7, minW: 3, minH: 3 },
+    // A ChartSpec chart owns its visibility via `widgetConfig.visible` (Settings +
+    // the in-chart toggle), NOT placement presence — so it is not a `defaultVisible`
+    // self-contained tile (issue #155).
+    defaultVisible: false,
     render: (host) => {
       const drawn = host.specFor(spec.id);
       const rows = host.resolveDataset(drawn.dataset, spec.id);
@@ -246,6 +273,9 @@ function statWidget(spec: StatSpec): WidgetDef {
       minW: 1,
       minH: statMinH(spec.kind === 'budget' ? 'budget' : 'simple'),
     },
+    // A stat card's visibility is data-driven (`isVisible(statData)`) + placement
+    // presence — not a `defaultVisible` self-contained tile (issue #155).
+    defaultVisible: false,
     render: (host) => {
       const d = host.statData;
       if (spec.kind === 'simple') {
@@ -272,69 +302,58 @@ const BILLS_PANEL: WidgetDef = {
   title: 'Bills',
   dataDeps: ['bills'],
   defaultSize: { w: 12, h: 14, minW: 3, minH: 4 },
+  // The bills panel's visibility is placement presence (gated on `isPlaced`), not a
+  // `defaultVisible` self-contained chart tile (issue #155).
+  defaultVisible: false,
   render: (host) => <BillsPanel data={host.billsData} />,
 };
 
-// The interval LOAD-SHAPE widget (issue #76). A SELF-CONTAINED chart tile: it
-// fetches its own data from /api/interval (scoped to host.accountId) and shapes it
-// with the PURE averageDayProfile, so it does NOT declare a dataset dep or go
-// through resolveDataset — `dataDeps: []`. Categorized 'chart' so it lays out as a
-// normal half-width chart tile (the default generator's 2×2), sized like the other
-// charts. Placed on the dashboard as a default-visible tile after the existing 7.
+// ─────────────────────────────────────────────────────────────────────────────
+// The SELF-CONTAINED interval chart tiles (#76 load-shape, #121-pt2 history, #77
+// heatmap). All three are structurally identical — a half-width chart tile that
+// self-fetches /api/interval (scoped to host.accountId) and self-shapes with a PURE
+// lib, so it does NOT declare a dataset dep or go through resolveDataset
+// (`dataDeps: []`). They are NOT ChartSpecs and have no `widgetConfig.visible` flag,
+// so their show/hide signal is placement presence; `defaultVisible: true` marks them
+// for the dashboard to derive its interval-widget list / palette from the registry
+// (issue #155 — no copy-pasted id-lists). Adding a 4th = one row in this table.
+// They render in this declared order after the monthly charts (acceptance #1/#4).
+// ─────────────────────────────────────────────────────────────────────────────
 export const INTERVAL_WIDGET_TYPE = 'interval-load-shape' as const;
-const INTERVAL_WIDGET: WidgetDef = {
-  type: INTERVAL_WIDGET_TYPE,
-  category: 'chart',
-  title: 'Average daily load shape',
-  dataDeps: [],
-  // Same footprint as a chart widget (half the lg grid, tall) so it tiles in the
-  // 2×2 chart grid alongside the monthly charts.
-  defaultSize: { w: 6, h: 7, minW: 3, minH: 3 },
-  render: (host) => (
-    <IntervalLoadShape accountId={host.accountId} from={host.fromYmd} to={host.toYmd} />
-  ),
-};
-
-// The interval HISTORY widget (issue #121 part 2). A SELF-CONTAINED chart tile
-// showing the RAW historical timeline of smart-meter reads. Like the load-shape
-// widget it self-fetches /api/interval (scoped to host.accountId) and does NOT
-// go through resolveDataset — `dataDeps: []`. Categorized 'chart' so it lays
-// out as a normal half-width chart tile (the default generator's 2×2), sized
-// like the other charts. Placed on the dashboard as a default-visible tile
-// after the load-shape widget.
 export const INTERVAL_HISTORY_WIDGET_TYPE = 'interval-history' as const;
-const INTERVAL_HISTORY_WIDGET: WidgetDef = {
-  type: INTERVAL_HISTORY_WIDGET_TYPE,
-  category: 'chart',
-  title: 'Usage history',
-  dataDeps: [],
-  // Same footprint as the other chart widgets (half the lg grid, tall) so it
-  // tiles in the 2×2 chart grid alongside the monthly charts and the load-shape.
-  defaultSize: { w: 6, h: 7, minW: 3, minH: 3 },
-  render: (host) => (
-    <IntervalHistory accountId={host.accountId} from={host.fromYmd} to={host.toYmd} />
-  ),
-};
-
-// The interval HEATMAP widget (issue #77). A SELF-CONTAINED chart tile showing a
-// DAY-OF-WEEK × HOUR-OF-DAY usage intensity grid + a peak-demand readout. Like the
-// load-shape and history widgets it self-fetches /api/interval (scoped to
-// host.accountId) and does NOT go through resolveDataset — `dataDeps: []`. It REUSES
-// the existing #95 HeatmapViz renderer + dayHourHeatmap aggregator (it doesn't fork
-// a bespoke heatmap). Categorized 'chart' so it tiles in the 2×2 chart grid like the
-// other interval widgets. Placed default-visible after the history widget.
 export const INTERVAL_HEATMAP_WIDGET_TYPE = 'interval-heatmap' as const;
-const INTERVAL_HEATMAP_WIDGET: WidgetDef = {
-  type: INTERVAL_HEATMAP_WIDGET_TYPE,
-  category: 'chart',
-  title: 'Usage by day & hour',
-  dataDeps: [],
-  // Same footprint as the other chart widgets (half the lg grid, tall).
-  defaultSize: { w: 6, h: 7, minW: 3, minH: 3 },
-  render: (host) => (
-    <IntervalHeatmap accountId={host.accountId} from={host.fromYmd} to={host.toYmd} />
-  ),
-};
+
+const INTERVAL_WIDGET_TABLE: ReadonlyArray<{
+  type: string;
+  title: string;
+  Component: (p: {
+    accountId?: number | null;
+    from?: string;
+    to?: string;
+  }) => ReactNode;
+}> = [
+  { type: INTERVAL_WIDGET_TYPE, title: 'Average daily load shape', Component: IntervalLoadShape },
+  { type: INTERVAL_HISTORY_WIDGET_TYPE, title: 'Usage history', Component: IntervalHistory },
+  { type: INTERVAL_HEATMAP_WIDGET_TYPE, title: 'Usage by day & hour', Component: IntervalHeatmap },
+];
+
+// Build the WidgetDef for one interval tile from the table. Every interval tile has
+// the same chart-tile footprint (half the lg grid, tall) so it tiles in the 2×2
+// chart grid alongside the monthly charts; `defaultVisible: true` so the dashboard
+// sweeps it into the derived interval-widget list / palette (issue #155).
+function intervalWidget(entry: (typeof INTERVAL_WIDGET_TABLE)[number]): WidgetDef {
+  return {
+    type: entry.type,
+    category: 'chart',
+    title: entry.title,
+    dataDeps: [],
+    defaultSize: { w: 6, h: 7, minW: 3, minH: 3 },
+    defaultVisible: true,
+    render: (host) => (
+      <entry.Component accountId={host.accountId} from={host.fromYmd} to={host.toYmd} />
+    ),
+  };
+}
 
 // The SPACER widget (CHANGE 2, issue #73). Unlike every other widget type — which
 // is a SINGLETON keyed by a fixed id — the spacer is MULTI-INSTANCE: the user can
@@ -352,6 +371,9 @@ const SPACER_WIDGET: WidgetDef = {
   title: 'Spacer',
   dataDeps: [],
   defaultSize: { w: 2, h: 2, minW: 1, minH: 1 },
+  // The spacer is multi-instance, always-addable, and placement-tracked — not a
+  // `defaultVisible` self-contained chart tile (issue #155).
+  defaultVisible: false,
   render: (host) => <Spacer customizing={!!host.customizing} />,
 };
 
@@ -370,11 +392,21 @@ export const WIDGETS: Record<string, WidgetDef> = Object.fromEntries([
   ...CHART_SPECS.map((s) => [`chart:${s.id}`, chartWidget(s)] as const),
   ...STAT_SPECS.map((s) => [`stat:${s.id}`, statWidget(s)] as const),
   [BILLS_PANEL.type, BILLS_PANEL] as const,
-  [INTERVAL_WIDGET.type, INTERVAL_WIDGET] as const,
-  [INTERVAL_HISTORY_WIDGET.type, INTERVAL_HISTORY_WIDGET] as const,
-  [INTERVAL_HEATMAP_WIDGET.type, INTERVAL_HEATMAP_WIDGET] as const,
+  ...INTERVAL_WIDGET_TABLE.map((e) => [e.type, intervalWidget(e)] as const),
   [SPACER_PREFIX, SPACER_WIDGET] as const,
 ]);
+
+// The self-contained chart tiles that are default-visible on a fresh layout and
+// placement-tracked (issue #155). DERIVED from the registry by filtering on
+// `defaultVisible`, in registry insertion order (= the interval table's order), so
+// the dashboard's interval-widget list / `fullChartUniverse` / add-back palette come
+// from ONE source — adding a 4th such widget is a single `INTERVAL_WIDGET_TABLE` row,
+// no Dashboard.tsx edit. (The dashboard STILL gates these on `isPlaced`; this is just
+// the list, not the gating — see registry header's #121 caution.)
+export const defaultVisibleWidgetTypes = (): string[] =>
+  Object.values(WIDGETS)
+    .filter((w) => w.defaultVisible)
+    .map((w) => w.type);
 
 // Type-keyed accessors so callers don't hand-build the prefixed string. A
 // missing key throws — a chart/stat that isn't registered is a bug, not a

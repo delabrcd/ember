@@ -30,11 +30,9 @@ import { dateLabel, relativeFromNow } from '@/lib/format';
 import { STAT_SPECS, type StatData } from '@/lib/widgets/statSpec';
 import {
   BILLS_PANEL_TYPE,
-  INTERVAL_HEATMAP_WIDGET_TYPE,
-  INTERVAL_HISTORY_WIDGET_TYPE,
-  INTERVAL_WIDGET_TYPE,
   SPACER_PREFIX,
   chartWidgetType,
+  defaultVisibleWidgetTypes,
   getWidget,
   isSpacerId,
   statWidgetType,
@@ -223,19 +221,22 @@ export function Dashboard() {
     : [];
   const availableStats = visibleStats.map((s) => statWidgetType(s.id));
   const availablePanels = [BILLS_PANEL_TYPE];
-  // The interval load-shape widget (#76) and the interval history widget (#121
-  // part 2) are chart-category tiles that are NOT ChartSpecs (they self-fetch, no
-  // `widgetConfig.visible` flag), so — like the panels — placement PRESENCE is
-  // their only removed/shown signal. They lay out as normal chart tiles (2×2 grid)
-  // AFTER the 7 monthly charts, in order: load-shape then history. `isPlaced`
-  // (below) gates them so a brand-new user (no saved layout) gets both visible and
-  // a removal sticks.
-  const availableChartsAll = [
-    ...availableCharts,
-    INTERVAL_WIDGET_TYPE,
-    INTERVAL_HISTORY_WIDGET_TYPE,
-    INTERVAL_HEATMAP_WIDGET_TYPE,
-  ];
+  // The self-contained interval chart tiles (#76 load-shape, #121-pt2 history, #77
+  // heatmap) — chart-category tiles that are NOT ChartSpecs (they self-fetch, no
+  // `widgetConfig.visible` flag), so — like the panels — placement PRESENCE is their
+  // only removed/shown signal. They lay out as normal chart tiles (2×2 grid) AFTER
+  // the 7 monthly charts, in the registry's declared order. DERIVED from the registry
+  // (`defaultVisible`) so adding a 4th is a single registry-table row, not edits here
+  // (issue #155). `isPlaced` (below) gates them so a brand-new user (no saved layout)
+  // gets all of them visible and a removal sticks.
+  const intervalWidgetTypes = defaultVisibleWidgetTypes();
+  // The FULL chart-tile universe = the visible monthly charts PLUS every interval
+  // tile, MATERIALIZED for the default-layout generator (buildCurrentLgPlacements /
+  // togglePin). NOTE: this is the materialized blob input, NOT the per-render
+  // `chartIds` — the latter gates the interval tiles on `isPlaced` (see below). The
+  // name is deliberately `fullChartUniverse` (not the old `availableChartsAll`, which
+  // invited the #121 mistake of using it directly as `chartIds`).
+  const fullChartUniverse = [...availableCharts, ...intervalWidgetTypes];
 
   // SPACER instances (CHANGE 2) currently placed: read straight off the saved blob
   // (the lg page grid + the pinned strip), since spacers aren't a Phase-D-tracked
@@ -292,13 +293,9 @@ export function Dashboard() {
   //     isPlaced goes false, and it drops out of chartIds (no `mergePlacements`
   //     re-append, no overflowing 3rd row);
   //   • re-add from the Customize palette via the clean findFreeSlot path.
-  // (Earlier this list was unconditional `availableChartsAll`, which force-appended
-  // the tiles every render — breaking removal AND overflowing the fit. #121 fix.)
-  const intervalWidgetTypes = [
-    INTERVAL_WIDGET_TYPE,
-    INTERVAL_HISTORY_WIDGET_TYPE,
-    INTERVAL_HEATMAP_WIDGET_TYPE,
-  ];
+  // (Earlier this list was unconditional `availableChartsAll`/`fullChartUniverse`,
+  // which force-appended the tiles every render — breaking removal AND overflowing
+  // the fit. #121 fix.) `intervalWidgetTypes` is derived from the registry above.
   const chartIds = [...availableCharts, ...intervalWidgetTypes.filter(isPlaced)];
   const panelIds = availablePanels.filter(isPlaced);
 
@@ -374,9 +371,9 @@ export function Dashboard() {
   const buildCurrentLgPlacements = (): Placement[] =>
     generateDefaultPlacements({
       statIds: availableStats,
-      chartIds: availableChartsAll,
+      chartIds: fullChartUniverse,
       panelIds: availablePanels,
-      mins: widgetMins([...availableStats, ...availableChartsAll, ...availablePanels]),
+      mins: widgetMins([...availableStats, ...fullChartUniverse, ...availablePanels]),
     })[FIT_BREAKPOINT] ?? [];
 
   // ---- Pin / unpin a widget to the top bar (issue #73 polish #4) ----
@@ -400,9 +397,9 @@ export function Dashboard() {
     // transform when a breakpoint isn't saved yet).
     const fullDefault = generateDefaultPlacements({
       statIds: availableStats,
-      chartIds: availableChartsAll,
+      chartIds: fullChartUniverse,
       panelIds: availablePanels,
-      mins: widgetMins([...availableStats, ...availableChartsAll, ...availablePanels]),
+      mins: widgetMins([...availableStats, ...fullChartUniverse, ...availablePanels]),
     });
     const { defaultSize } = getWidget(type);
     setPlacements(
@@ -427,15 +424,14 @@ export function Dashboard() {
   const removedCharts = layout
     ? layout.order.filter((id) => SPEC_BY_ID[id] && !layout.widgetConfig[id]?.visible).map(chartWidgetType)
     : [];
-  // The interval load-shape (#76) and interval history (#121 part 2) widgets are
-  // chart tiles gated on placement presence (no widgetConfig flag), so they join
-  // the Charts palette group when they've been removed (not currently placed).
-  const removedIntervalWidget = !isPlaced(INTERVAL_WIDGET_TYPE) ? [INTERVAL_WIDGET_TYPE] : [];
-  const removedIntervalHistory = !isPlaced(INTERVAL_HISTORY_WIDGET_TYPE) ? [INTERVAL_HISTORY_WIDGET_TYPE] : [];
-  const removedIntervalHeatmap = !isPlaced(INTERVAL_HEATMAP_WIDGET_TYPE) ? [INTERVAL_HEATMAP_WIDGET_TYPE] : [];
+  // The interval tiles (#76/#121-pt2/#77) are chart tiles gated on placement presence
+  // (no widgetConfig flag), so they join the Charts palette group when removed (not
+  // currently placed). DERIVED from the registry-sourced `intervalWidgetTypes` by the
+  // same `isPlaced` filter, in registry order (issue #155 — no per-widget consts).
+  const removedIntervalWidgets = intervalWidgetTypes.filter((t) => !isPlaced(t));
   const paletteGroups: PaletteGroup[] = [
     { label: 'Stat cards', types: availableStats.filter((t) => !isPlaced(t)) },
-    { label: 'Charts', types: [...removedCharts, ...removedIntervalWidget, ...removedIntervalHistory, ...removedIntervalHeatmap] },
+    { label: 'Charts', types: [...removedCharts, ...removedIntervalWidgets] },
     { label: 'Panels', types: availablePanels.filter((t) => !isPlaced(t)) },
   ];
 
