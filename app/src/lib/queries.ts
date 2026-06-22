@@ -2,6 +2,7 @@
 // the pure, unit-tested deriveMonthlySeries (series.ts); here we just fetch and
 // hand it DB rows.
 import { prisma } from '@/lib/db';
+import { Prisma } from '@prisma/client';
 import type { MonthRow } from '@/lib/chartSpec';
 import { deriveMonthlySeries, type DegreeDayInput } from '@/lib/series';
 import { estimateEmissions, resolveEmissionFactors, trailing12Emissions } from '@/lib/emissions';
@@ -226,6 +227,191 @@ export async function getIntervalSeries(
     },
   });
   return rows;
+}
+
+// ---------------------------------------------------------------------------
+// Interval HISTORY feed — SERVER-SIDE aggregation (WS1 rework of #36 / #143 / #77)
+// ---------------------------------------------------------------------------
+// getIntervalSeries (above) hydrates EVERY matching IntervalUsage row into Node
+// (~19.5k electric + ~8k gas on the real account) on every history request, then
+// reconciles + downsamples in JS — that row-hydration is the latency. The two
+// functions below replace that for the /api/interval history line: the aggregation
+// happens in Postgres and only ≤ MAX_POINTS rows cross the wire.
+//
+// `getIntervalSeries` is deliberately LEFT INTACT — the heatmap/profile sibling
+// routes still need the raw rows (they aggregate by hour-of-day / day-of-week,
+// which the time-bucketed history aggregation can't serve; see #77).
+
+// A single aggregated history point: the SUM of (reconciled) energy in one time
+// bucket. `intervalStart` is the bucket's UTC start; `intervalSeconds` is the
+// bucket width (bucketSecs). Mirrors the IntervalUsage row shape so it slots into
+// the same /api/interval `rows` array the 15-min-grid path returns.
+export type IntervalAggregatedRow = {
+  fuelType: string;
+  intervalStart: Date;
+  intervalSeconds: number;
+  quantity: number;
+  unit: string;
+};
+
+// RECONCILE-THEN-SUM in SQL. Returns one row per `bucketSecs`-wide bucket over
+// [from, to] for one account+fuel, each quantity the SUM of the reconciled HOURLY
+// values in that bucket. `bucketSecs` MUST be ≥ 3600 (a whole number of hours) —
+// this path reconciles to the hourly grain first, so a sub-hour bucket is
+// meaningless here (the 15-min-grid path handles bucketSecs == 900).
+//
+// The query mirrors reconcileToHourly's display-only de-dup rule EXACTLY so it can
+// never double-count the coexisting 15-min + hourly grains (standards §1):
+//   1. `hourly` CTE — per (UTC hour) collapse mixed grains to ONE value:
+//        • COUNT(900s slots) = 4 → SUM those four (a complete 15-min hour wins;
+//          four real quarter-readings are more accurate than the API hourly row).
+//        • else if a 3600s row exists → its quantity.
+//        • else (1–3 partial 15-min slots, no hourly) → the hour is OMITTED
+//          (an incomplete hour would underreport — same as reconcileToHourly's skip).
+//      Grouping by floor(epoch/3600) is the UTC-hour bucket; America/New_York is
+//      always a whole-hour UTC offset, so a UTC hour == a local clock-hour (DST-safe).
+//   2. Outer query — SUM those reconciled hourly values into bucketSecs buckets via
+//      epoch-floor `to_timestamp(floor(epoch/bucketSecs)*bucketSecs)`, GROUP BY the
+//      bucket, ORDER BY bucket ASC. The number of buckets is bounded by the window
+//      (the caller picks bucketSecs via chooseBucket so it's ≤ MAX_POINTS).
+//
+// Filters on (accountId, fuelType, intervalStart range) → uses the composite
+// `@@index([accountId, fuelType, intervalStart])`. PARAMETERIZED via Prisma.sql
+// (no string interpolation of the bounds); bucketSecs is coerced to an integer and
+// embedded as a literal since it's a column-math constant, not user free-text.
+//
+// fuelType/unit are taken from the reconciled rows (a fuel has one unit), so the
+// outer SELECT carries them through via MIN()/an aggregate-friendly pick. The SQL
+// can't be hermetically unit-tested (it needs a DB); it's verified against a seeded
+// DB by the lead. The TESTABLE arithmetic lives in the pure chooseBucket / grid
+// shapers, and — for WS9's trailing-edge anchor (the bucket point lands at the
+// LATEST reading, not the bucket start) — in the pure MIRROR
+// `viz/bucketAnchor.ts::aggregateAnchoredBuckets` (hand-calc tested). Keep the SQL's
+// group/sum/max-anchor in lockstep with that reference. IMPURE (DB).
+export async function getIntervalAggregated(
+  accountId: number,
+  opts: { fuelType: string; from: Date; to: Date; bucketSecs: number }
+): Promise<IntervalAggregatedRow[]> {
+  // bucketSecs is a column-math constant (a whole number of hours ≥ 3600). Coerce
+  // to a safe positive integer so it can be embedded as a SQL literal without
+  // risking injection (it never comes from free-text — chooseBucket produces it).
+  const bucket = Math.max(3600, Math.floor(opts.bucketSecs));
+  const rows = await prisma.$queryRaw<
+    { pointStart: Date; quantity: number; fuelType: string; unit: string }[]
+  >(Prisma.sql`
+    WITH hourly AS (
+      -- Reconcile coexisting 15-min (900s) + hourly (3600s) grains to ONE value per
+      -- UTC hour (reconcileToHourly's rule, in SQL): 4 complete 15-min slots win
+      -- (their SUM), else the hourly row, else (partial 15-min, no hourly) skip.
+      -- latest_start carries the MOST RECENT raw intervalStart that fell into the
+      -- hour, so the bucket can later anchor its point at the freshest reading (WS9).
+      SELECT
+        to_timestamp(floor(extract(epoch from "intervalStart") / 3600) * 3600) AS hour_start,
+        max("intervalStart") AS latest_start,
+        MIN("unit") AS unit,
+        CASE
+          WHEN count(*) FILTER (WHERE "intervalSeconds" = 900) = 4
+            THEN sum("quantity") FILTER (WHERE "intervalSeconds" = 900)
+          WHEN count(*) FILTER (WHERE "intervalSeconds" = 3600) >= 1
+            THEN max("quantity") FILTER (WHERE "intervalSeconds" = 3600)
+          ELSE NULL
+        END AS hour_quantity
+      FROM "IntervalUsage"
+      WHERE "accountId" = ${accountId}
+        AND "fuelType" = ${opts.fuelType}
+        AND "intervalStart" >= ${opts.from}
+        AND "intervalStart" <= ${opts.to}
+      GROUP BY 1
+    )
+    SELECT
+      -- WS9 (Fix 2): anchor each bucket's point at the LATEST reading inside it
+      -- (max latest_start over the bucket's hours), NOT the bucket START. At a coarse
+      -- grain the current partial bucket spans [bucket-start, now]; timestamping it at
+      -- the start plotted the trailing point a full bucket-width in the past, so the
+      -- line appeared to end days before the most recent reading and recent data only
+      -- surfaced after zooming to a finer grain. Anchoring at the latest reading makes
+      -- the line's trailing edge reach the freshest data at EVERY grain. The value is
+      -- still the bucket SUM (unchanged); only the point's x-position moves.
+      max(latest_start) AS "pointStart",
+      sum(hour_quantity) AS quantity,
+      ${opts.fuelType} AS "fuelType",
+      MIN(unit) AS unit
+    FROM hourly
+    WHERE hour_quantity IS NOT NULL
+    -- Group by the epoch-floor BUCKET (the tiling key), but plot at the latest reading.
+    GROUP BY floor(extract(epoch from hour_start) / ${bucket})
+    ORDER BY "pointStart" ASC
+  `);
+  // $queryRaw returns the SUM as a string/Decimal-ish depending on the driver;
+  // normalize quantity to a JS number (and the point start to a Date) so the route
+  // and the chart see plain JSON. unit may be null if the (impossible) hour had no
+  // unit — coalesce to '' rather than leak null.
+  return rows.map((r) => ({
+    fuelType: r.fuelType,
+    intervalStart: r.pointStart instanceof Date ? r.pointStart : new Date(r.pointStart),
+    intervalSeconds: bucket,
+    quantity: Number(r.quantity),
+    unit: r.unit ?? '',
+  }));
+}
+
+// Raw 900s + 3600s rows for a window — the cheap hydrate the 15-min-grid path uses
+// (bucketSecs == 900). The window is small there (≤ ~6 days → ≤ ~576 slots), so
+// pulling the raw rows and shaping them in the pure toFifteenMinGrid is fine. Only
+// the two grains the grid cares about are fetched (daily 86400 rows, if any, are
+// irrelevant to a 15-min line). Uses the composite index. IMPURE (DB).
+export type IntervalRawRow = {
+  fuelType: string;
+  intervalStart: Date;
+  intervalSeconds: number;
+  quantity: number;
+  unit: string;
+};
+
+export async function getIntervalRaw(
+  accountId: number,
+  opts: { fuelType: string; from: Date; to: Date }
+): Promise<IntervalRawRow[]> {
+  return prisma.intervalUsage.findMany({
+    where: {
+      accountId,
+      fuelType: opts.fuelType,
+      intervalStart: { gte: opts.from, lte: opts.to },
+      intervalSeconds: { in: [900, 3600] },
+    },
+    orderBy: { intervalStart: 'asc' },
+    select: { fuelType: true, intervalStart: true, intervalSeconds: true, quantity: true, unit: true },
+  });
+}
+
+// The earliest intervalStart that has a 15-min (900s) reading for this
+// account+fuel, or null if the account has never recorded 15-min data. The widget
+// draws an "end of 15-min data" marker from it (so the user knows where the finest
+// grain begins). A cheap MIN() over the composite index. IMPURE (DB).
+export async function getFifteenMinFrom(accountId: number, fuelType: string): Promise<Date | null> {
+  const row = await prisma.intervalUsage.findFirst({
+    where: { accountId, fuelType, intervalSeconds: 900 },
+    orderBy: { intervalStart: 'asc' },
+    select: { intervalStart: true },
+  });
+  return row?.intervalStart ?? null;
+}
+
+// The finest grain (smallest intervalSeconds) present for this account+fuel within
+// [from, to], or null if the window has no rows. Drives /api/interval's
+// `downsampled` flag: the feed is "downsampled" when the chosen bucket is COARSER
+// than this finest in-window grain (finer detail exists than what's returned), so
+// the widget's "finest detail" badge is correct. A cheap MIN() over the composite
+// index. IMPURE (DB).
+export async function getFinestGrainInWindow(
+  accountId: number,
+  opts: { fuelType: string; from: Date; to: Date }
+): Promise<number | null> {
+  const agg = await prisma.intervalUsage.aggregate({
+    where: { accountId, fuelType: opts.fuelType, intervalStart: { gte: opts.from, lte: opts.to } },
+    _min: { intervalSeconds: true },
+  });
+  return agg._min.intervalSeconds ?? null;
 }
 
 export async function getBills(accountId: number) {

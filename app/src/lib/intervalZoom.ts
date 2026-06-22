@@ -93,6 +93,272 @@ export function classifyZoomSelection(
   return Math.abs(endMs - startMs) >= minSpanMs ? 'zoom' : 'too-small';
 }
 
+// ---- WS5: mouse-navigation window math --------------------------------------
+// On TOP of the drag-select zoom above, WS5 adds focused mouse navigation: wheel
+// to zoom on the cursor, Shift+wheel / Ctrl+drag to pan. The window MATH for those
+// gestures lives here as PURE helpers so it can be hand-calc unit-tested in
+// isolation — the widget owns only the impure shell (focus, native wheel listener,
+// debounced refetch). Both helpers operate on epoch-ms instants and are clamped to
+// the global `[boundsFromMs, boundsToMs]` window (the dashboard RangeControl span)
+// and a `minSpanMs` floor; they never widen past the bounds nor below the floor.
+
+// A window expressed as epoch-ms bounds (the in-memory representation the gestures
+// manipulate before it's mapped to /api/interval day strings via zoomSpanToRange).
+export type WindowMs = { fromMs: number; toMs: number };
+
+// Zoom the window [fromMs, toMs] around a fixed center instant `centerMs`,
+// contracting (factor < 1) or expanding (factor > 1) the span while keeping
+// centerMs at the SAME FRACTIONAL position within the window — so the time under
+// the cursor stays under the cursor as the user wheels. The result is clamped:
+//   • the span never drops below `minSpanMs` (zoom-in floor: at the floor we keep
+//     centerMs's fractional position and just stop shrinking);
+//   • neither edge ever leaves [boundsFromMs, boundsToMs]; if the new (wider) span
+//     would exceed the full bounds, it collapses to exactly the bounds.
+// When an edge clamps, the OTHER edge is NOT pushed past its bound — the span is
+// pinned to the bound rather than sliding (a zoom-out that hits the left wall stops
+// growing leftward but keeps growing rightward until it too hits the wall, at which
+// point the whole window equals the bounds). PURE — no React/DOM.
+//
+// `factor` is the multiplier applied to the CURRENT span (e.g. 0.85 = zoom in one
+// ~15% notch, 1/0.85 ≈ 1.176 = zoom out). The caller derives it from the wheel
+// delta sign; this helper is direction-agnostic.
+export function zoomWindowAroundCenter(
+  fromMs: number,
+  toMs: number,
+  centerMs: number,
+  factor: number,
+  boundsFromMs: number,
+  boundsToMs: number,
+  minSpanMs: number,
+): WindowMs {
+  // Guard: malformed inputs → return the (ordered) input window unchanged.
+  if (
+    !Number.isFinite(fromMs) ||
+    !Number.isFinite(toMs) ||
+    !Number.isFinite(centerMs) ||
+    !Number.isFinite(factor) ||
+    factor <= 0 ||
+    !Number.isFinite(boundsFromMs) ||
+    !Number.isFinite(boundsToMs)
+  ) {
+    return { fromMs: Math.min(fromMs, toMs), toMs: Math.max(fromMs, toMs) };
+  }
+  const lo = Math.min(fromMs, toMs);
+  const hi = Math.max(fromMs, toMs);
+  const bLo = Math.min(boundsFromMs, boundsToMs);
+  const bHi = Math.max(boundsFromMs, boundsToMs);
+  const boundSpan = bHi - bLo;
+
+  const curSpan = hi - lo;
+  // The new span: scaled, floored at minSpanMs, and capped at the full bounds span
+  // (can't be wider than the global window).
+  const floor = Math.min(minSpanMs, boundSpan); // a tiny global window can't demand a bigger floor
+  let newSpan = curSpan * factor;
+  if (newSpan < floor) newSpan = floor;
+  if (newSpan > boundSpan) newSpan = boundSpan;
+
+  // Keep centerMs at the same fractional position `frac` within the window. Clamp
+  // the center into the window first so a center outside [lo,hi] (cursor off the
+  // plot) degrades to the nearest edge rather than throwing the math off.
+  const clampedCenter = Math.min(Math.max(centerMs, lo), hi);
+  const frac = curSpan > 0 ? (clampedCenter - lo) / curSpan : 0.5;
+
+  // newLo so that clampedCenter sits at the same fraction of the new span.
+  let newLo = clampedCenter - frac * newSpan;
+  let newHi = newLo + newSpan;
+
+  // Clamp into bounds WITHOUT changing the span (slide the window back inside).
+  if (newLo < bLo) {
+    newLo = bLo;
+    newHi = bLo + newSpan;
+  }
+  if (newHi > bHi) {
+    newHi = bHi;
+    newLo = bHi - newSpan;
+  }
+  // After sliding, the low edge may still dip below bLo only if newSpan === boundSpan;
+  // pin it exactly to the bounds in that case.
+  if (newLo < bLo) newLo = bLo;
+  return { fromMs: newLo, toMs: newHi };
+}
+
+// Shift (pan) the window [fromMs, toMs] by `deltaMs` (positive = later/right,
+// negative = earlier/left) WITHOUT changing its span, clamped so it never leaves
+// [boundsFromMs, boundsToMs]. At an edge the SHIFT is reduced (not the span): a pan
+// that would push the window past the wall stops at the wall. If the window already
+// equals/exceeds the bounds it can't pan at all (returns it pinned to the bounds).
+// PURE — no React/DOM.
+export function panWindow(
+  fromMs: number,
+  toMs: number,
+  deltaMs: number,
+  boundsFromMs: number,
+  boundsToMs: number,
+): WindowMs {
+  if (
+    !Number.isFinite(fromMs) ||
+    !Number.isFinite(toMs) ||
+    !Number.isFinite(deltaMs) ||
+    !Number.isFinite(boundsFromMs) ||
+    !Number.isFinite(boundsToMs)
+  ) {
+    return { fromMs: Math.min(fromMs, toMs), toMs: Math.max(fromMs, toMs) };
+  }
+  const lo = Math.min(fromMs, toMs);
+  const hi = Math.max(fromMs, toMs);
+  const bLo = Math.min(boundsFromMs, boundsToMs);
+  const bHi = Math.max(boundsFromMs, boundsToMs);
+  const span = hi - lo;
+
+  // Window already spans (or exceeds) the bounds → pin to the bounds, no pan room.
+  if (span >= bHi - bLo) return { fromMs: bLo, toMs: bLo + (bHi - bLo) };
+
+  // Reduce the shift at the walls: the max we can move right is (bHi - hi), the max
+  // left is (bLo - lo) (a negative number). Clamp delta into that travel range.
+  const maxRight = bHi - hi; // ≥ 0
+  const maxLeft = bLo - lo; // ≤ 0
+  let d = deltaMs;
+  if (d > maxRight) d = maxRight;
+  if (d < maxLeft) d = maxLeft;
+  return { fromMs: lo + d, toMs: hi + d };
+}
+
+// ---- WS10: pixel-anchored Ctrl+drag pan delta -------------------------------
+// The Ctrl+drag pan (WS5) originally derived its delta from the nearest DATA
+// POINT's ts under the cursor, measured against the LIVE-MOVING numeric domain.
+// That created a feedback loop: as the pan shifts the domain, the same screen
+// pixel maps to a different ts, so each move fed the next delta → the pan
+// oscillated, quantized to data points (glitchy), and netted back toward the
+// start window ("snapped back"). Deriving a pan from the axis coordinate that the
+// pan itself is moving is the bug.
+//
+// WS10 drives the pan from a RAW PIXEL delta anchored to the drag START instead.
+// Given a horizontal pixel delta from the start of the drag, the plot's pixel
+// width, and the START window's span (ms), this returns the ms the window should
+// shift. It is anchored to fixed START values (start pixel + start window), so
+// there is NO feedback loop — the same `deltaPx` always yields the same `deltaMs`
+// regardless of how far the domain has already moved.
+//
+// SIGN: the caller negates this to "grab the plot" (drag RIGHT → reveal EARLIER
+// time → window moves LEFT). This helper itself returns the proportional ms for a
+// given pixel delta and span; it is direction-agnostic about screen vs window —
+// the caller applies the grab sign. `deltaMs = (deltaPx / plotWidthPx) * spanMs`.
+//
+// Guards: a non-finite input or a non-positive plot width yields 0 (no pan) —
+// you can't map pixels to ms without a positive plot width. PURE — no React/DOM.
+export function pixelPanDeltaMs(
+  deltaPx: number,
+  plotWidthPx: number,
+  spanMs: number,
+): number {
+  if (
+    !Number.isFinite(deltaPx) ||
+    !Number.isFinite(plotWidthPx) ||
+    !Number.isFinite(spanMs) ||
+    plotWidthPx <= 0
+  ) {
+    return 0;
+  }
+  return (deltaPx / plotWidthPx) * spanMs;
+}
+
+// ---- WS7: live view-domain resolver -----------------------------------------
+// WS7 makes pan/zoom track the gesture LIVE: the chart X axis is a NUMERIC TIME
+// axis whose `domain` is a view window in epoch-ms, DECOUPLED from the loaded data.
+// During a gesture we move the view window every wheel-notch / drag-move so the
+// *already-loaded* points re-render under the new domain (the line visibly slides /
+// scales), then a DEBOUNCED refetch swaps fresh rows in for the settled window.
+//
+// `viewDomainFor` is the tiny PURE piece of that: given the current live window
+// (the zoom span when zoomed, else null = follow the global bounds) and the global
+// `[boundsFromMs, boundsToMs]`, it returns the `[fromMs, toMs]` the numeric XAxis
+// `domain` should use. Kept pure so the (impure) widget never buries the choice in
+// JSX. Rules:
+//   • a valid zoom window (finite, fromMs < toMs) → use it verbatim (live edits to
+//     the zoom window are already clamped by panWindow/zoomWindowAroundCenter);
+//   • otherwise → fall back to the global bounds (ordered);
+//   • if the bounds themselves are non-finite (a non-dashboard caller with no range)
+//     → return null so the caller lets Recharts auto-fit the domain to the data.
+// PURE — no React/DOM.
+export function viewDomainFor(
+  zoomFromMs: number | null | undefined,
+  zoomToMs: number | null | undefined,
+  boundsFromMs: number,
+  boundsToMs: number,
+): WindowMs | null {
+  // Prefer an explicit live zoom window when it's a real, ordered span.
+  if (
+    zoomFromMs != null &&
+    zoomToMs != null &&
+    Number.isFinite(zoomFromMs) &&
+    Number.isFinite(zoomToMs) &&
+    zoomFromMs < zoomToMs
+  ) {
+    return { fromMs: zoomFromMs, toMs: zoomToMs };
+  }
+  // Else fall back to the global bounds, if they're usable.
+  if (Number.isFinite(boundsFromMs) && Number.isFinite(boundsToMs)) {
+    const lo = Math.min(boundsFromMs, boundsToMs);
+    const hi = Math.max(boundsFromMs, boundsToMs);
+    if (lo < hi) return { fromMs: lo, toMs: hi };
+  }
+  // No usable window → let Recharts auto-fit the numeric domain to the data.
+  return null;
+}
+
+// ---- WS6: modifier → cursor resolver ----------------------------------------
+// WS6 gives the focused chart MODAL cursor feedback so the held modifier signals
+// which navigation gesture is armed. The mapping is a tiny pure function so it can
+// be hand-tested in isolation (don't bury this decision table in JSX): given the
+// current focus + modifier state it returns the exact CSS `cursor` keyword to apply
+// to the chart's `style.cursor`. PURE — no React/DOM.
+//
+// The precedence is deliberate and matches the gesture-handler precedence in the
+// widget (the Ctrl branch is checked FIRST in onChartMouseDown / the wheel handler):
+//   • NOT focused, no modifier on hover → 'default'  (gestures inert; normal page)
+//   • Ctrl held + actively dragging → 'grabbing'  (the viewport is being grabbed)
+//   • Ctrl held (not yet dragging)  → 'grab'      ("you can grab to move the viewport")
+//   • Shift held                    → 'ew-resize' (shift+wheel pans left/right)
+//   • focused, no modifier          → 'crosshair' (plain drag still zoom-SELECTs)
+// Ctrl wins over Shift if (improbably) both are held, mirroring the handlers where
+// the Ctrl+drag pan is checked before anything else. `ctrlDragging` only matters
+// while Ctrl is down, so we read it under the Ctrl branch.
+//
+// WS9 (Fix 1) — HOVER-DISCOVERABILITY: the shift+wheel pan now engages on HOVER, not
+// only when the chart is clicked-to-focus (the operator naturally shift+scrolls on
+// hover). So the MODIFIER cursors (ew-resize / grab / grabbing) must also show while
+// merely HOVERING with a modifier held, even before focus — otherwise the gesture is
+// invisible until you click. The resolver gates the *modifier* cursors on
+// `focused || hovering`; the plain-no-modifier crosshair stays FOCUS-ONLY (a bare
+// hover over an unfocused chart leaves the normal 'default' cursor so the chart
+// doesn't look armed when it isn't, and plain page-scroll past it is undisturbed).
+// `hovering` is optional and defaults false → unchanged for any caller that omits it.
+export type NavCursorState = {
+  focused: boolean;
+  ctrlDown: boolean;
+  shiftDown: boolean;
+  ctrlDragging: boolean;
+  // WS9: true while the cursor is over the chart body. Lets a held modifier resolve
+  // its cursor on hover (pan is hover-capturable now), even without focus. Optional
+  // for back-compat with the WS6 callers/tests that only pass the four flags.
+  hovering?: boolean;
+};
+
+export type NavCursor = 'default' | 'crosshair' | 'grab' | 'grabbing' | 'ew-resize';
+
+export function navCursor(state: NavCursorState): NavCursor {
+  // The modifier cursors are armed when the gesture is reachable — i.e. focused OR
+  // merely hovering (WS9: shift+wheel pans on hover; ctrl+drag still needs the click,
+  // but showing 'grab' on hover with Ctrl is a harmless, consistent hint).
+  const armed = state.focused || !!state.hovering;
+  if (armed && state.ctrlDown) return state.ctrlDragging ? 'grabbing' : 'grab';
+  if (armed && state.shiftDown) return 'ew-resize';
+  // No modifier: the plain drag-to-zoom crosshair is FOCUS-ONLY (a bare hover over an
+  // unfocused chart stays 'default' so it doesn't look armed and page-scroll is free).
+  if (state.focused) return 'crosshair';
+  return 'default';
+}
+
 // Decide whether the /api/interval downsampler actually reduced a result set —
 // i.e. whether FINER detail exists than what was returned (issue #141, the
 // "finest detail / max zoom" badge). It mirrors downsampleByTime's own gate

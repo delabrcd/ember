@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { toHistoryPoints, formatHistoryLabel } from '../src/lib/intervalHistory';
+import { toHistoryPoints, formatHistoryLabel, formatGrain } from '../src/lib/intervalHistory';
 import type { IntervalProfileRow } from '../src/lib/intervalProfile';
 
 // Hand-calculated tests for the PURE intervalHistory shapers (issue #121 part 2).
@@ -128,5 +128,31 @@ describe('toHistoryPoints (hand-calculated)', () => {
     expect(pts).toHaveLength(4);
     expect(pts.map((p) => p.label)).toEqual(['Jun 8 13:00', 'Jun 8 13:15', 'Jun 8 13:30', 'Jun 8 13:45']);
     expect(pts.map((p) => p.value)).toEqual([0.1, 0.2, 0.3, 0.4]);
+  });
+});
+
+describe('formatGrain (hand-calculated)', () => {
+  it('names the exact buckets chooseBucket emits', () => {
+    // The standard ladder — each value is a width chooseBucket actually picks.
+    expect(formatGrain(900)).toBe('15-min');
+    expect(formatGrain(3600)).toBe('hourly');
+    expect(formatGrain(21600)).toBe('6-hour');
+    expect(formatGrain(86400)).toBe('daily');
+    expect(formatGrain(604800)).toBe('weekly');
+  });
+
+  it('falls back to a derived unit label for an off-ladder bucket', () => {
+    expect(formatGrain(7200)).toBe('2-hour'); // 7200 / 3600
+    expect(formatGrain(172800)).toBe('2-day'); // 172800 / 86400
+    expect(formatGrain(1800)).toBe('30-min'); // 1800 / 60
+    expect(formatGrain(45)).toBe('45s'); // sub-minute → raw seconds
+  });
+
+  it('returns "" for absent / non-finite / non-positive grain (so the caller omits it)', () => {
+    expect(formatGrain(undefined)).toBe('');
+    expect(formatGrain(null)).toBe('');
+    expect(formatGrain(Number.NaN)).toBe('');
+    expect(formatGrain(0)).toBe('');
+    expect(formatGrain(-3600)).toBe('');
   });
 });
