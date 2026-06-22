@@ -2,8 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { NextResponse } from 'next/server';
 import { prisma } from '@/lib/db';
-import { resolveRequestAccount } from '@/lib/queries';
-import { unknownAccount } from '@/lib/route';
+import { withAccount } from '@/lib/route';
 import { pdfDirForAccount } from '@/lib/ngrid/auth';
 import { formatForUserAgent, tarGz, zip, type ArchiveFile } from '@/lib/archive';
 
@@ -47,67 +46,67 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: "format must be 'zip' or 'tgz'" }, { status: 400 });
   }
 
-  const resolved = await resolveRequestAccount(req.url);
-  if (resolved === 'invalid') {
-    return unknownAccount();
-  }
-  if (!resolved) {
-    return NextResponse.json({ error: 'no account' }, { status: 404 });
-  }
+  // The shared resolveRequestAccount dance: bad ?accountId= → 400, no account →
+  // the same 404 JSON as before, otherwise build the archive for that account.
+  return withAccount(
+    req.url,
+    () => NextResponse.json({ error: 'no account' }, { status: 404 }),
+    async (acct) => {
+      const account = await prisma.account.findUnique({
+        where: { id: acct.id },
+        select: { accountNumber: true },
+      });
+      if (!account) {
+        return NextResponse.json({ error: 'no account' }, { status: 404 });
+      }
 
-  const account = await prisma.account.findUnique({
-    where: { id: resolved.id },
-    select: { accountNumber: true },
-  });
-  if (!account) {
-    return NextResponse.json({ error: 'no account' }, { status: 404 });
-  }
+      // Bills in range with a recorded PDF path, oldest first for a stable archive.
+      const bills = await prisma.bill.findMany({
+        where: {
+          accountId: acct.id,
+          statementDate: { gte: from, lte: to },
+          pdfPath: { not: null },
+        },
+        select: { statementDate: true, pdfPath: true },
+        orderBy: { statementDate: 'asc' },
+      });
 
-  // Bills in range with a recorded PDF path, oldest first for a stable archive.
-  const bills = await prisma.bill.findMany({
-    where: {
-      accountId: resolved.id,
-      statementDate: { gte: from, lte: to },
-      pdfPath: { not: null },
-    },
-    select: { statementDate: true, pdfPath: true },
-    orderBy: { statementDate: 'asc' },
-  });
+      // Path safety: only ever read from this account's own pdfs/<accountNumber>
+      // dir. Resolve each stored pdfPath and confirm it lives under that root
+      // before reading; skip anything that doesn't (or is missing on disk).
+      const accountDir = path.resolve(pdfDirForAccount(account.accountNumber));
+      const files: ArchiveFile[] = [];
+      for (const b of bills) {
+        if (!b.pdfPath) continue;
+        const resolvedPath = path.resolve(b.pdfPath);
+        if (resolvedPath !== accountDir && !resolvedPath.startsWith(accountDir + path.sep)) continue;
+        if (!fs.existsSync(resolvedPath)) continue;
+        const date = b.statementDate.toISOString().slice(0, 10);
+        files.push({ name: `${date}.pdf`, data: fs.readFileSync(resolvedPath) });
+      }
 
-  // Path safety: only ever read from this account's own pdfs/<accountNumber> dir.
-  // Resolve each stored pdfPath and confirm it lives under that root before
-  // reading; skip anything that doesn't (or is missing on disk).
-  const accountDir = path.resolve(pdfDirForAccount(account.accountNumber));
-  const files: ArchiveFile[] = [];
-  for (const b of bills) {
-    if (!b.pdfPath) continue;
-    const resolvedPath = path.resolve(b.pdfPath);
-    if (resolvedPath !== accountDir && !resolvedPath.startsWith(accountDir + path.sep)) continue;
-    if (!fs.existsSync(resolvedPath)) continue;
-    const date = b.statementDate.toISOString().slice(0, 10);
-    files.push({ name: `${date}.pdf`, data: fs.readFileSync(resolvedPath) });
-  }
+      if (files.length === 0) {
+        return NextResponse.json(
+          { error: 'no bill PDFs found in that date range' },
+          { status: 404 },
+        );
+      }
 
-  if (files.length === 0) {
-    return NextResponse.json(
-      { error: 'no bill PDFs found in that date range' },
-      { status: 404 },
-    );
-  }
+      const format = formatParam === 'zip' || formatParam === 'tgz'
+        ? formatParam
+        : formatForUserAgent(req.headers.get('user-agent'));
 
-  const format = formatParam === 'zip' || formatParam === 'tgz'
-    ? formatParam
-    : formatForUserAgent(req.headers.get('user-agent'));
+      const ext = format === 'tgz' ? 'tgz' : 'zip';
+      const contentType = format === 'tgz' ? 'application/gzip' : 'application/zip';
+      const body = format === 'tgz' ? tarGz(files) : zip(files);
 
-  const ext = format === 'tgz' ? 'tgz' : 'zip';
-  const contentType = format === 'tgz' ? 'application/gzip' : 'application/zip';
-  const body = format === 'tgz' ? tarGz(files) : zip(files);
-
-  return new NextResponse(body, {
-    headers: {
-      'Content-Type': contentType,
-      'Content-Disposition': `attachment; filename="ngrid-bills-${fromStr}_${toStr}.${ext}"`,
-      'Content-Length': String(body.length),
-    },
-  });
+      return new NextResponse(body, {
+        headers: {
+          'Content-Type': contentType,
+          'Content-Disposition': `attachment; filename="ngrid-bills-${fromStr}_${toStr}.${ext}"`,
+          'Content-Length': String(body.length),
+        },
+      });
+    }
+  );
 }

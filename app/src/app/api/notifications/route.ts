@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { listNotifications, markRead, syncNotifications } from '@/lib/notificationStore';
-import { withAccount, errorResponse } from '@/lib/route';
+import { withAccount } from '@/lib/route';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -35,17 +35,15 @@ export async function POST(req: Request) {
     req.url,
     () => NextResponse.json({ unreadCount: 0 }),
     async (acct) => {
-      try {
-        if (body?.all === true) {
-          return NextResponse.json(await markRead(acct.id, { all: true }));
-        }
-        if (typeof body?.key === 'string' && body.key) {
-          return NextResponse.json(await markRead(acct.id, { key: body.key }));
-        }
-        return NextResponse.json({ error: 'expected { key } or { all: true }' }, { status: 400 });
-      } catch (e) {
-        return errorResponse(e);
+      // withAccount wraps this in errorResponse, so a markRead throw yields the
+      // uniform 500; the explicit 400 below stays its own status.
+      if (body?.all === true) {
+        return NextResponse.json(await markRead(acct.id, { all: true }));
       }
+      if (typeof body?.key === 'string' && body.key) {
+        return NextResponse.json(await markRead(acct.id, { key: body.key }));
+      }
+      return NextResponse.json({ error: 'expected { key } or { all: true }' }, { status: 400 });
     }
   );
 }
