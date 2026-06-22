@@ -10,6 +10,8 @@
 // upsert (persist.ts) call into these helpers. Per AGENTS.md rule #1, interval
 // usage NEVER feeds billed-cost numbers — this is observational AMI data only.
 
+import { DAY_MS, fmtYmd, fmtPortal } from './dates';
+
 // One parsed interval read, ready for the IntervalUsage upsert.
 export type IntervalReadRow = {
   fuelType: string; // ELECTRIC | GAS (normalized)
@@ -147,18 +149,10 @@ export function amiIntervalUrl(
   return `${base.replace(/\/$/, '')}${path}?${q}`;
 }
 
-// Format a Date as the portal's `YYYY-MM-DD HH:MM:SS` (UTC fields). The endpoint
-// is lenient about the exact wall-clock; we only need a floor far enough back to
-// cover the requested window, and the upsert makes any overlap idempotent.
-function fmtPortal(d: Date): string {
-  const p = (n: number) => String(n).padStart(2, '0');
-  return (
-    `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ` +
-    `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`
-  );
-}
-
-const DAY_MS = 24 * 60 * 60 * 1000;
+// `fmtPortal` (portal `YYYY-MM-DD HH:MM:SS`, UTC fields) and `DAY_MS` now live in
+// the shared pure `./dates` module (imported above). The endpoint is lenient about
+// the exact wall-clock; we only need a floor far enough back to cover the requested
+// window, and the upsert makes any overlap idempotent.
 
 // Decide the `startDateTime` to request for a meter:
 //   1. explicit backfillFromIso (operator override) → use that date,
@@ -221,11 +215,8 @@ export function amiEnergyUsagesBody(
   };
 }
 
-// Format a Date as the gql `YYYY-MM-DD` (UTC fields). PURE.
-function fmtDate(d: Date): string {
-  const p = (n: number) => String(n).padStart(2, '0');
-  return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}`;
-}
+// The gql `YYYY-MM-DD` (UTC fields) formatter is the shared `fmtYmd` from `./dates`
+// (imported above); the window/chunk helpers below use it.
 
 // Decide the [dateFrom, dateTo] window (YYYY-MM-DD) for a gas gql pull:
 //   dateTo   = now,
@@ -237,12 +228,12 @@ export function intervalDateWindow(
   backfillFromIso: string | undefined,
   windowDays: number
 ): { dateFrom: string; dateTo: string } {
-  const dateTo = fmtDate(now);
+  const dateTo = fmtYmd(now);
   if (backfillFromIso) {
     const t = Date.parse(backfillFromIso);
-    if (Number.isFinite(t)) return { dateFrom: fmtDate(new Date(t)), dateTo };
+    if (Number.isFinite(t)) return { dateFrom: fmtYmd(new Date(t)), dateTo };
   }
-  return { dateFrom: fmtDate(new Date(now.getTime() - windowDays * DAY_MS)), dateTo };
+  return { dateFrom: fmtYmd(new Date(now.getTime() - windowDays * DAY_MS)), dateTo };
 }
 
 // Build the ordered (newest→oldest) sequence of [from, to] `YYYY-MM-DD` chunk
@@ -256,7 +247,7 @@ export function intervalDateWindow(
 // final chunk (when maxDays isn't a multiple of chunkDays) is clamped to maxDays.
 // The caller stops EARLY on 2 consecutive empty chunks (that needs live responses,
 // so it lives in fetchAmiIntervals); this just enumerates the candidate windows.
-// PURE. Mirrors fmtDate's UTC YYYY-MM-DD formatting.
+// PURE. Mirrors fmtYmd's UTC YYYY-MM-DD formatting.
 export function backwardChunks(
   now: Date,
   chunkDays: number,
@@ -270,7 +261,7 @@ export function backwardChunks(
     const toMs = nowMs - offsetDays * DAY_MS;
     const fromDays = Math.min(offsetDays + chunkDays, maxDays);
     const fromMs = nowMs - fromDays * DAY_MS;
-    chunks.push({ from: fmtDate(new Date(fromMs)), to: fmtDate(new Date(toMs)) });
+    chunks.push({ from: fmtYmd(new Date(fromMs)), to: fmtYmd(new Date(toMs)) });
     offsetDays = fromDays;
   }
   return chunks;

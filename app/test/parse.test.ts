@@ -113,3 +113,46 @@ Total Current Charges                       $ 90.00    $ 60.00                  
     expect(d.otherCharges).toBe(0); // 150 - 90 - 60
   });
 });
+
+describe('parseBillDetail (no "Amount Due" line + a Balance Forward -> computed fallback)', () => {
+  // No explicit "Amount Due" line at all, so amountDue falls through to the
+  // computed branch: currentCharges + (balanceForward ?? 0).
+  //   currentCharges = 100.00 (last token of the Total Current Charges row)
+  //   balanceForward = 25.50  → amountDue = round((100.00 + 25.50)*100)/100 = 125.50
+  const BILL_FALLBACK = `
+Balance Forward                                                                       25.50
+Electric Service                              50.00      30.00                       80.00
+Total Current Charges                       $ 50.00    $ 30.00     $ 20.00          $ 100.00
+                                            Total Electricity Delivery             $ 50.00
+                                            Total Electricity Supply               $ 30.00
+`;
+  const d = parseBillDetail(BILL_FALLBACK);
+  it('computes amountDue = currentCharges + balanceForward when no Amount Due line exists', () => {
+    expect(d.currentCharges).toBe(100.0);
+    expect(d.balanceForward).toBe(25.5);
+    expect(d.amountDue).toBe(125.5); // 100.00 + 25.50, via the computed fallback
+  });
+  it('still derives otherCharges from the summary row', () => {
+    expect(d.otherCharges).toBe(20.0); // 100.00 - 50.00 - 30.00
+  });
+});
+
+describe('parseBillDetail (negative otherCharges needing rounding)', () => {
+  // delivery 90.00, supply 0.10, currentCharges 89.97.
+  // otherCharges = currentCharges - delivery - supply = 89.97 - 90.00 - 0.10.
+  // In IEEE-754 that is -0.13000000000000114, so the Math.round(...*100)/100
+  // guard is load-bearing here: it yields a clean -0.13.
+  const BILL_NEG = `
+Electric Service                              90.00       0.10                       90.10
+Total Current Charges                       $ 90.00    $ 0.10     -$ 0.13           $ 89.97
+                                            Total Electricity Delivery             $ 90.00
+                                            Total Electricity Supply               $ 0.10
+`;
+  const d = parseBillDetail(BILL_NEG);
+  it('rounds a tiny-float negative to a clean -0.13', () => {
+    expect(d.summaryDelivery).toBe(90.0);
+    expect(d.summarySupply).toBe(0.1);
+    expect(d.currentCharges).toBe(89.97);
+    expect(d.otherCharges).toBe(-0.13);
+  });
+});

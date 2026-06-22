@@ -4,6 +4,7 @@
 
 import type { MonthRow } from './chartSpec';
 import { trailing12AllIn } from './series';
+import { median, sampleStdev } from './stats';
 import { ymAddMonths, ymLabel } from './ym';
 
 const DAY = 24 * 60 * 60 * 1000;
@@ -14,9 +15,7 @@ export function medianIntervalDays(sortedAsc: Date[]): number {
   for (let i = 1; i < sortedAsc.length; i++) {
     gaps.push((sortedAsc[i].getTime() - sortedAsc[i - 1].getTime()) / DAY);
   }
-  gaps.sort((a, b) => a - b);
-  const mid = Math.floor(gaps.length / 2);
-  return gaps.length % 2 ? gaps[mid] : (gaps[mid - 1] + gaps[mid]) / 2;
+  return median(gaps);
 }
 
 export function predictNextBill(statementDates: Date[]): { predicted: Date | null; medianDays: number } {
@@ -66,11 +65,6 @@ export function intervalSpreadDays(sortedAsc: Date[]): number {
   for (let i = 1; i < sortedAsc.length; i++) {
     gaps.push((sortedAsc[i].getTime() - sortedAsc[i - 1].getTime()) / DAY);
   }
-  const median = (xs: number[]): number => {
-    const s = [...xs].sort((a, b) => a - b);
-    const mid = Math.floor(s.length / 2);
-    return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
-  };
   const m = median(gaps);
   const absdev = gaps.map((g) => Math.abs(g - m));
   return median(absdev);
@@ -167,14 +161,6 @@ const DEFAULT_BAND_PCT = 0.15; // ±15% fallback when stdev isn't computable
 
 // Calendar month after `ym` (yyyymm), rolling Dec -> Jan of the next year.
 const nextYm = (ym: number): number => ymAddMonths(ym, 1);
-
-// Sample standard deviation (n-1). Returns null for fewer than two values.
-function sampleStdev(xs: number[]): number | null {
-  if (xs.length < 2) return null;
-  const mean = xs.reduce((a, b) => a + b, 0) / xs.length;
-  const variance = xs.reduce((a, b) => a + (b - mean) ** 2, 0) / (xs.length - 1);
-  return Math.sqrt(variance);
-}
 
 // Project one fuel's next-period usage: same calendar month last year if we
 // have it, else the trailing-N average. Returns the value and which basis won.
@@ -532,11 +518,6 @@ export function projectSeason(
 
   // Period length for the fixed term: median of the historical non-null days
   // (fallback 30), computed once before the loop.
-  const median = (xs: number[]): number => {
-    const s = [...xs].sort((a, b) => a - b);
-    const mid = Math.floor(s.length / 2);
-    return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
-  };
   const dayVals = rows.map((r) => r.days).filter((d): d is number => d != null);
   const days = dayVals.length ? median(dayVals) : 30;
 

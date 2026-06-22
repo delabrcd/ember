@@ -296,6 +296,44 @@ describe('parseAmiEnergyUsages (gas gql, hand-calculated)', () => {
     expect(rows[0].intervalSeconds).toBe(3600);
   });
 
+  // ── grain-inference edge branches (issue #151) ────────────────────────────
+  it('trailing node REUSES the previous gap, not the 3600 default (15-min pair)', () => {
+    // Two nodes 15 min apart → gap node0→node1 = 900s. The LAST node has no
+    // next, so it reuses prevGap = 900 (NOT the 3600 lone-node default). Both
+    // rows are 900s, proving reuse picks up a non-default prior gap.
+    const rows = parseAmiEnergyUsages(
+      [
+        { date: '2026-06-01T00:00:00.000-04:00', fuelType: 'ELECTRIC', quantity: 0.1 },
+        { date: '2026-06-01T00:15:00.000-04:00', fuelType: 'ELECTRIC', quantity: 0.2 },
+      ],
+      'ELECTRIC'
+    );
+    expect(rows.map((r) => r.intervalSeconds)).toEqual([900, 900]);
+  });
+
+  it('a non-positive (zero) gap falls back to 3600 for that node', () => {
+    // Sorted ascending, a "next" at the SAME instant gives gap = 0 → the ≤0
+    // branch falls back to 3600. Inputs (00:00 dup, then 00:15):
+    //   i=0: next is the 00:00 dup → gap 0 → seconds 3600 (key t0:3600)
+    //   i=1: next is 00:15        → gap 900 → seconds 900  (key t0:900)
+    //   i=2: last (00:15)         → reuses prevGap 900     (key t0+900:900)
+    // All three storage keys differ → 3 rows; the gap-0 fallback row is the
+    // observable 3600s row at 00:00 UTC (04:00Z).
+    const rows = parseAmiEnergyUsages(
+      [
+        { date: '2026-06-01T00:00:00.000-04:00', fuelType: 'GAS', quantity: 1 },
+        { date: '2026-06-01T00:00:00.000-04:00', fuelType: 'GAS', quantity: 5 },
+        { date: '2026-06-01T00:15:00.000-04:00', fuelType: 'GAS', quantity: 2 },
+      ],
+      'GAS'
+    );
+    expect(rows).toHaveLength(3);
+    const at0400 = rows.filter((r) => r.intervalStart.toISOString() === '2026-06-01T04:00:00.000Z');
+    expect(at0400.map((r) => r.intervalSeconds).sort((a, b) => a - b)).toEqual([900, 3600]);
+    expect(rows[2].intervalStart.toISOString()).toBe('2026-06-01T04:15:00.000Z');
+    expect(rows[2].intervalSeconds).toBe(900);
+  });
+
   it('tolerates a non-array input', () => {
     expect(parseAmiEnergyUsages(undefined as never, 'GAS')).toEqual([]);
   });

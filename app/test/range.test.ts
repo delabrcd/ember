@@ -4,6 +4,7 @@ import {
   ymMinusMonths,
   ymdToYm,
   ymToYmd,
+  ymToLastYmd,
   filterByYm,
   filterBillsByYm,
   migrateRangeMonths,
@@ -38,6 +39,35 @@ describe('ym arithmetic (hand-calculated)', () => {
     expect(ymToYmd(202405)).toBe('2024-05-01');
     expect(ymToYmd(202412)).toBe('2024-12-01');
     expect(ymToYmd(null)).toBe('');
+  });
+});
+
+describe('ymToLastYmd — month-end date math (hand-calculated)', () => {
+  // last = UTC day 0 of the FOLLOWING month = the last calendar day of `ym`.
+  it('December → 31 (and no month-rollover bug)', () => {
+    // Date.UTC(2024, 12, 0) is the last day of month index 12 == December → 31.
+    expect(ymToLastYmd(202412)).toBe('2024-12-31');
+  });
+
+  it('January → 31', () => {
+    expect(ymToLastYmd(202401)).toBe('2024-01-31');
+  });
+
+  it('a 30-day month (April) → 30', () => {
+    expect(ymToLastYmd(202404)).toBe('2024-04-30');
+  });
+
+  it('February in a LEAP year (2024) → 29', () => {
+    expect(ymToLastYmd(202402)).toBe('2024-02-29');
+  });
+
+  it('February in a NON-leap year (2026) → 28', () => {
+    expect(ymToLastYmd(202602)).toBe('2026-02-28');
+  });
+
+  it('null/undefined → empty string', () => {
+    expect(ymToLastYmd(null)).toBe('');
+    expect(ymToLastYmd(undefined)).toBe('');
   });
 });
 

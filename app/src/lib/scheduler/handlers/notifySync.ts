@@ -9,6 +9,7 @@ import { notifyNewBills, notifyAnomaly } from '@/lib/notify';
 import { detectAnomalies } from '@/lib/anomaly';
 import { getMonthlySeries } from '@/lib/queries';
 import { syncNotifications } from '@/lib/notificationStore';
+import { errMessage } from '@/lib/ngrid/errMessage';
 import type { TaskContext, TaskHandler, TaskResult } from '@/lib/scheduler/types';
 
 async function run(ctx: TaskContext): Promise<TaskResult> {
@@ -28,8 +29,8 @@ async function run(ctx: TaskContext): Promise<TaskResult> {
       select: { statementDate: true, periodFrom: true, periodTo: true, currentCharges: true },
     });
     await notifyNewBills(bills, (m) => log(m));
-  } catch (nerr: any) {
-    log(`notify skipped: ${String(nerr?.message || nerr).slice(0, 200)}`);
+  } catch (nerr: unknown) {
+    log(`notify skipped: ${errMessage(nerr)}`);
   }
 
   // Usage/cost anomaly alert (issue #45). OFF by default and dedup-safe. Fully
@@ -38,8 +39,8 @@ async function run(ctx: TaskContext): Promise<TaskResult> {
     const series = await getMonthlySeries(accountId);
     const { flags, ym } = detectAnomalies(series);
     await notifyAnomaly(flags, ym, (m) => log(m));
-  } catch (aerr: any) {
-    log(`anomaly notify skipped: ${String(aerr?.message || aerr).slice(0, 200)}`);
+  } catch (aerr: unknown) {
+    log(`anomaly notify skipped: ${errMessage(aerr)}`);
   }
 
   // Server-side notification log (notification-log feature). Idempotent INSERTs.
@@ -47,8 +48,8 @@ async function run(ctx: TaskContext): Promise<TaskResult> {
   try {
     const inserted = await syncNotifications(accountId);
     if (inserted) log(`notification log: ${inserted} new`);
-  } catch (lerr: any) {
-    log(`notification log skipped: ${String(lerr?.message || lerr).slice(0, 200)}`);
+  } catch (lerr: unknown) {
+    log(`notification log skipped: ${errMessage(lerr)}`);
   }
 
   return { nextRunAt: null, status: 'SUCCESS' };

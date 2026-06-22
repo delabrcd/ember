@@ -193,18 +193,16 @@ import {
   type OverscanWindow,
 } from '@/lib/intervalOverscan';
 import { MAX_POINTS } from '@/lib/viz/downsampleInterval';
+import { TOOLTIP_STYLE, AXIS_STYLE, FUEL_COLORS } from '@/lib/chartTheme';
+import { useDismissable } from '@/lib/hooks/useDismissable';
+import { Segmented } from './Segmented';
 import { ChartShell } from '../ChartShell';
 
-// ---- Theme constants (mirrors IntervalLoadShape) ----------------------------
-const ELEC = '#f59e0b';
-const GAS = '#38bdf8';
-const tooltipStyle = {
-  backgroundColor: '#0f172a',
-  border: '1px solid #1e293b',
-  borderRadius: 12,
-  fontSize: 12,
-} as const;
-const axisStyle = { stroke: '#475569', fontSize: 11 } as const;
+// ---- Theme constants (shared via lib/chartTheme) ----------------------------
+const ELEC = FUEL_COLORS.ELECTRIC;
+const GAS = FUEL_COLORS.GAS;
+const tooltipStyle = TOOLTIP_STYLE;
+const axisStyle = AXIS_STYLE;
 
 // ---- WS10: plot pixel geometry ----------------------------------------------
 // The Ctrl+drag pan (WS10) converts a raw pixel delta into a window shift, so it
@@ -322,36 +320,6 @@ function toLoaded(resp: IntervalResponse): Loaded {
     // a missing `downsampled` means nothing was reported reduced.
     downsampled: resp.downsampled === true,
   };
-}
-
-// ---- Segmented toggle -------------------------------------------------------
-// A reusable generic segmented control (mirrors the toggle in IntervalLoadShape).
-function Segmented<T extends string>({
-  options,
-  value,
-  onChange,
-}: {
-  options: { label: string; value: T }[];
-  value: T;
-  onChange: (v: T) => void;
-}) {
-  return (
-    <div className="inline-flex overflow-hidden rounded-lg border border-slate-700">
-      {options.map((opt) => (
-        <button
-          key={opt.value}
-          onClick={() => onChange(opt.value)}
-          className={`px-2.5 py-1 text-xs transition ${
-            value === opt.value
-              ? 'bg-amber-500 text-slate-950'
-              : 'bg-slate-800/50 text-slate-300 hover:bg-slate-700'
-          }`}
-        >
-          {opt.label}
-        </button>
-      ))}
-    </div>
-  );
 }
 
 // ---- Settings panel ---------------------------------------------------------
@@ -529,24 +497,13 @@ export function IntervalHistory({
   // OUTSIDE the chart body → blur (click-away). Listening on the document (not the
   // wrapper's onBlur) is robust: the SVG/Recharts internals steal focus and a real
   // <div> blur never fires reliably here, so we drive focus explicitly. Only wired
-  // up while focused, so it adds no global listeners at rest.
-  useEffect(() => {
-    if (!focused) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setFocused(false);
-    };
-    const onDocPointer = (e: PointerEvent) => {
-      const el = bodyRef.current;
-      if (el && e.target instanceof Node && !el.contains(e.target)) setFocused(false);
-    };
-    document.addEventListener('keydown', onKey);
-    // Capture phase so we see the click-away before any stopPropagation inside it.
-    document.addEventListener('pointerdown', onDocPointer, true);
-    return () => {
-      document.removeEventListener('keydown', onKey);
-      document.removeEventListener('pointerdown', onDocPointer, true);
-    };
-  }, [focused]);
+  // up while focused, so it adds no global listeners at rest. (#150: the shared
+  // useDismissable hook, with the DELIBERATE capture-phase + pointerdown options so
+  // we see the click-away before any stopPropagation inside the chart.)
+  useDismissable(bodyRef, focused, () => setFocused(false), {
+    event: 'pointerdown',
+    capture: true,
+  });
 
   // Track Ctrl globally so the Ctrl+drag pan can detect the modifier even though the
   // Recharts synthetic mouse-state object doesn't expose it. Cheap, always-on (a

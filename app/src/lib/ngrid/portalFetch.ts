@@ -9,6 +9,7 @@ import fs from 'fs';
 import path from 'path';
 import type { BrowserContext, Page } from 'playwright';
 import { dataDir } from './auth';
+import { DAY_MS, fmtYmd, yyyymm } from './dates';
 import { parseBillPdf } from './parsePdf';
 import {
   amiEnergyUsagesBody,
@@ -37,18 +38,9 @@ const BASE = 'https://myaccount.nationalgrid.com';
 // misbehaving endpoint can never loop forever. If we ever hit it we log it.
 const MAX_BACKFILL_DAYS = 20 * 365;
 
-// Format a Date as the energy-usage gql `YYYY-MM-DD` (UTC fields), matching
-// interval.ts's window formatting — used to page a wide gas backfill in chunks.
-const fmtGqlDate = (d: Date): string => {
-  const p = (n: number) => String(n).padStart(2, '0');
-  return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}`;
-};
-
-const yyyymm = (d?: string): number => {
-  if (!d) return 0;
-  const m = d.match(/^(\d{4})-(\d{2})/);
-  return m ? parseInt(m[1], 10) * 100 + parseInt(m[2], 10) : 0;
-};
+// The energy-usage gql `YYYY-MM-DD` (UTC fields) formatter and the `YYYY-MM-DD →
+// YYYYMM` key now come from the shared pure `./dates` module (imported above):
+// `fmtYmd` (was the local `fmtGqlDate`) and `yyyymm`.
 
 // ---- download new PDFs --------------------------------------------------
 // Download any not-yet-stored bill PDFs for `accountNumber` using the captured
@@ -150,7 +142,7 @@ export async function fetchAmiIntervals(
   page: Page,
   args: {
     acct: AccountInfo;
-    rawAccount: any;
+    rawAccount: unknown;
     authHeaders: Record<string, string>;
     haveAuth: boolean;
     accountNumber: string;
@@ -206,7 +198,6 @@ export async function fetchAmiIntervals(
       // a wider backfill is paged in ≤ MAX_GQL_SPAN_DAYS chunks. The default tail
       // window is a single chunk.
       const MAX_GQL_SPAN_DAYS = 31;
-      const DAY_MS = 24 * 60 * 60 * 1000;
       for (const meter of meters) {
         let gqlRows = 0;
         let restRows = 0;
@@ -287,8 +278,8 @@ export async function fetchAmiIntervals(
             const endMs = Number.isFinite(toMs) ? toMs : chunkStart;
             while (chunkStart <= endMs) {
               const chunkEnd = Math.min(chunkStart + MAX_GQL_SPAN_DAYS * DAY_MS, endMs);
-              const chunkFrom = fmtGqlDate(new Date(chunkStart));
-              const chunkTo = fmtGqlDate(new Date(chunkEnd));
+              const chunkFrom = fmtYmd(new Date(chunkStart));
+              const chunkTo = fmtYmd(new Date(chunkEnd));
               await fetchChunk(chunkFrom, chunkTo);
               chunks++;
               if (chunkEnd >= endMs) break;

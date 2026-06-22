@@ -156,7 +156,22 @@ export async function looksLikeMfa(page: Page): Promise<boolean> {
   return /one[\s-]?time|verification code|enter the code|passcode|authenticator/i.test(txt);
 }
 
-async function login(page: Page, user: string, pass: string, log: (m: string) => void): Promise<string> {
+// Open the login page, fill the email + password fields (handling the
+// email-then-next-then-password B2C variant), and locate the submit control —
+// WITHOUT clicking it. Returns the submit selector (or null) so each caller does
+// its own click in the exact order it needs (the unattended `login()` arms a
+// nav-wait between finding and clicking; `fillCredentials()` clicks straight
+// through). This is the single source of the email/password fill sequence — the
+// selectors, timeout values, and order are the canonical copy both login paths
+// share, so the interactive and unattended flows can never drift. BYTE-FOR-BYTE
+// the sequence both paths previously duplicated; do not alter the selectors or
+// the timeouts — this is the live National Grid login.
+async function fillEmailAndPassword(
+  page: Page,
+  user: string,
+  pass: string,
+  log: (m: string) => void
+): Promise<string | null> {
   log('opening myaccount.nationalgrid.com');
   await page.goto('https://myaccount.nationalgrid.com/', { waitUntil: 'domcontentloaded', timeout: 60000 });
   await page.waitForURL(/login\.nationalgrid\.com|b2clogin\.com/, { timeout: 60000 }).catch(() => {});
@@ -178,7 +193,11 @@ async function login(page: Page, user: string, pass: string, log: (m: string) =>
   if (!passSel) throw new Error('Could not find the password field');
   await page.fill(passSel, pass);
 
-  const submitSel = await firstVisible(page, ['#interceptButton', '#next', 'button.sign-in', 'input[type="submit"]'], 8000);
+  return firstVisible(page, ['#interceptButton', '#next', 'button.sign-in', 'input[type="submit"]'], 8000);
+}
+
+async function login(page: Page, user: string, pass: string, log: (m: string) => void): Promise<string> {
+  const submitSel = await fillEmailAndPassword(page, user, pass, log);
   const navP = page.waitForURL(/myaccount\.nationalgrid\.com/, { timeout: 60000 }).catch(() => {});
   if (submitSel) await page.click(submitSel);
   await page.waitForTimeout(2500);
@@ -238,32 +257,12 @@ export interface InteractiveLoginHooks {
   onOtpNeeded: () => Promise<string>;
 }
 
-// Fill email + password and submit, exactly as `login()` does. Shared so the
-// interactive path can't drift from the unattended one. Returns once the submit
-// click has fired and the page has had a moment to settle.
+// Fill email + password and submit, exactly as `login()` does. Delegates the
+// fill sequence to the shared `fillEmailAndPassword` so the interactive path can't
+// drift from the unattended one. Returns once the submit click has fired and the
+// page has had a moment to settle.
 async function fillCredentials(page: Page, user: string, pass: string, log: (m: string) => void): Promise<void> {
-  log('opening myaccount.nationalgrid.com');
-  await page.goto('https://myaccount.nationalgrid.com/', { waitUntil: 'domcontentloaded', timeout: 60000 });
-  await page.waitForURL(/login\.nationalgrid\.com|b2clogin\.com/, { timeout: 60000 }).catch(() => {});
-  await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
-
-  const emailSel = await firstVisible(page, ['#signInName', '#email', 'input[type="email"]', 'input[name="email"]']);
-  if (!emailSel) throw new Error('Could not find the email field on the login page');
-  await page.fill(emailSel, user);
-
-  let passSel = await firstVisible(page, ['#password', 'input[type="password"]'], 3000);
-  if (!passSel) {
-    const nextSel = await firstVisible(page, ['#interceptButton', '#next', '#continue', 'button[type="submit"]'], 3000);
-    if (nextSel) {
-      await page.click(nextSel);
-      await page.waitForTimeout(2000);
-    }
-    passSel = await firstVisible(page, ['#password', 'input[type="password"]'], 10000);
-  }
-  if (!passSel) throw new Error('Could not find the password field');
-  await page.fill(passSel, pass);
-
-  const submitSel = await firstVisible(page, ['#interceptButton', '#next', 'button.sign-in', 'input[type="submit"]'], 8000);
+  const submitSel = await fillEmailAndPassword(page, user, pass, log);
   if (submitSel) await page.click(submitSel);
   await page.waitForTimeout(2500);
 }

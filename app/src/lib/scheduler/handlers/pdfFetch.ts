@@ -11,6 +11,7 @@ import { prisma } from '@/lib/db';
 import { downloadBillPdfs } from '@/lib/ngrid/portalFetch';
 import { persist } from '@/lib/ngrid/persist';
 import { computePdfFetchNextRun, PDF_PENDING_RECENT_DAYS } from '@/lib/scheduler/cadence';
+import { errMessage } from '@/lib/ngrid/errMessage';
 import type { AccountInfo, BillRow, CollectResult } from '@/lib/ngrid/types';
 import type { TaskContext, TaskHandler, TaskResult } from '@/lib/scheduler/types';
 
@@ -75,12 +76,12 @@ async function run(ctx: TaskContext): Promise<TaskResult> {
       loginId: account.loginId ?? undefined,
     };
     await persist(result);
-  } catch (err: any) {
+  } catch (err: unknown) {
     // Never throw — re-check on the next short cadence (still pending).
     return {
       nextRunAt: computePdfFetchNextRun(now, { hasRecentPendingPdf: true }),
       status: 'ERROR',
-      reason: String(err?.message || err).slice(0, 200),
+      reason: errMessage(err),
     };
   }
 

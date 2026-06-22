@@ -37,16 +37,12 @@ import {
   scatterPoints,
   type HeatmapGrid,
 } from '@/lib/viz/aggregate';
+import { TOOLTIP_STYLE, AXIS_STYLE, FUEL_COLORS } from '@/lib/chartTheme';
 
-const tooltipStyle = {
-  backgroundColor: '#0f172a',
-  border: '1px solid #1e293b',
-  borderRadius: 12,
-  fontSize: 12,
-} as const;
-const axisStyle = { stroke: '#475569', fontSize: 11 } as const;
+const tooltipStyle = TOOLTIP_STYLE;
+const axisStyle = AXIS_STYLE;
 
-const AMBER = '#f59e0b';
+const AMBER = FUEL_COLORS.ELECTRIC;
 
 // A wrapper giving each viz a definite-height box so Recharts'
 // ResponsiveContainer always measures a non-zero plot (the same reason

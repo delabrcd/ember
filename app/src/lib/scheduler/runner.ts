@@ -27,6 +27,7 @@ import {
   portalDeferUntil,
   splitDue,
 } from '@/lib/scheduler/runnerHelpers';
+import { errMessage } from '@/lib/ngrid/errMessage';
 import type { ProgressFn } from '@/lib/ngrid/types';
 import type { ScheduledTaskRow, TaskKind, TaskResult, TaskContext, ArmSpec } from '@/lib/scheduler/types';
 
@@ -113,12 +114,12 @@ async function runPortalTask(
     await writeBack(task.id, now, result);
     await applyArm(result.arm);
     acc.note(task.kind, result.status, result.metrics);
-  } catch (err: any) {
-    log(`task ${task.kind}#${task.accountId ?? '-'} failed: ${String(err?.message || err).slice(0, 200)}`);
+  } catch (err: unknown) {
+    log(`task ${task.kind}#${task.accountId ?? '-'} failed: ${errMessage(err)}`);
     await writeBack(task.id, now, {
       nextRunAt: new Date(now.getTime() + ERROR_BACKOFF_MS),
       status: 'ERROR',
-      reason: String(err?.message || err).slice(0, 200),
+      reason: errMessage(err),
     });
     acc.note(task.kind, 'ERROR');
   }
@@ -227,8 +228,8 @@ async function dispatch(
     let session: PortalSession | null = null;
     try {
       session = await acquirePortalSession(loginId, log);
-    } catch (err: any) {
-      log(`login ${loginId ?? '(env)'} session failed: ${String(err?.message || err).slice(0, 200)}`);
+    } catch (err: unknown) {
+      log(`login ${loginId ?? '(env)'} session failed: ${errMessage(err)}`);
       for (const t of tasks) {
         await writeBack(t.id, now, {
           nextRunAt: new Date(now.getTime() + ERROR_BACKOFF_MS),
@@ -258,9 +259,9 @@ async function dispatch(
       await writeBack(task.id, now, result);
       await applyArm(result.arm);
       acc.note(task.kind, result.status, result.metrics);
-    } catch (err: any) {
-      log(`task ${task.kind}#${task.accountId ?? '-'} failed: ${String(err?.message || err).slice(0, 200)}`);
-      await writeBack(task.id, now, { nextRunAt: null, status: 'ERROR', reason: String(err?.message || err).slice(0, 200) });
+    } catch (err: unknown) {
+      log(`task ${task.kind}#${task.accountId ?? '-'} failed: ${errMessage(err)}`);
+      await writeBack(task.id, now, { nextRunAt: null, status: 'ERROR', reason: errMessage(err) });
       acc.note(task.kind, 'ERROR');
     }
   }
