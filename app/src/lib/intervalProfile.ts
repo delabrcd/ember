@@ -34,18 +34,14 @@ export type ProfileBucket = {
 // are tolerated. `intervalSeconds` is carried for completeness/symmetry with the
 // DB row; the hourly-bucket shaping keys off the local clock time, not the read
 // length, so the shaper does not currently weight by duration.
-// `fuelType` is optional here so the base type stays lean; reconcileToHourly
-// accepts a superset that carries it (ReconcileRow) and groups by (fuelType, hour).
+// `fuelType` is optional here so the base type stays lean; reconcileToHourly reads
+// it (when present) to group by (fuelType, hour).
 export type IntervalProfileRow = {
   intervalStart: Date | string;
   intervalSeconds: number;
   quantity: number;
   fuelType?: string;
 };
-
-// Extended row type accepted by reconcileToHourly — a strict superset of
-// IntervalProfileRow so averageDayProfile's signature is unchanged.
-type ReconcileRow = IntervalProfileRow & { fuelType?: string };
 
 export type AverageDayProfileOpts = {
   // The IANA timezone the time-of-day buckets are computed in. Defaults to the
@@ -233,13 +229,13 @@ export function averageDayProfile(
 // by `Math.floor(utcMs / 3_600_000)` is therefore equivalent to grouping by the
 // local clock-hour and is DST-safe.
 //
-// Input type is the same superset (ReconcileRow ⊇ IntervalProfileRow) so callers
-// can pass widget rows (which carry fuelType) without a cast. Tolerates
-// string/Date intervalStart and drops rows with non-finite quantity. Returns rows
-// sorted ascending by intervalStart. PURE — no React/DOM/DB.
-export function reconcileToHourly(rows: ReconcileRow[]): IntervalProfileRow[] {
+// Input rows carry an optional fuelType so callers can pass widget rows (which
+// carry it) without a cast. Tolerates string/Date intervalStart and drops rows
+// with non-finite quantity. Returns rows sorted ascending by intervalStart. PURE —
+// no React/DOM/DB.
+export function reconcileToHourly(rows: IntervalProfileRow[]): IntervalProfileRow[] {
   // Group by (fuelType, UTC-hour-epoch). The key is `"${fuelType}|${hourEpoch}"`.
-  type Slot = { slot900: number[]; row3600: ReconcileRow | null; hourEpoch: number; fuelType: string };
+  type Slot = { slot900: number[]; row3600: IntervalProfileRow | null; hourEpoch: number; fuelType: string };
   const groups = new Map<string, Slot>();
 
   for (const row of rows) {

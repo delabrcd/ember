@@ -463,7 +463,6 @@ export interface SeasonProjection {
 
 export interface SeasonOpts {
   bandStdevs?: number; // k: base half-width in stdevs (default 1)
-  horizonK?: number; // unused scalar hook; kept for symmetry, default 1
 }
 
 // Same calendar month one year before `ym` (subtract 12 months).

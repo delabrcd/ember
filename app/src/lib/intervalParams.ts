@@ -14,35 +14,6 @@ export function parseFuel(raw: string | null): 'ELECTRIC' | 'GAS' {
   return raw === 'GAS' ? 'GAS' : 'ELECTRIC';
 }
 
-// The number of seconds in the 15-minute grain — the only non-hourly grain the
-// AMI feed produces (15-min electric NRT). Used both to query the DB filtered to
-// 15-min rows and as the `?grain=15m` request value.
-export const FIFTEEN_MIN_SECONDS = 900;
-
-// The interval HISTORY widget's resolution grain. `'all'` (the default) returns
-// every grain, downsampled to ≤ MAX_POINTS for the smooth multi-year line — the
-// long-standing behaviour, kept for back-compat / non-dashboard callers. `'15m'`
-// (issue: the 15m view was eating the downsampled feed and collapsing the recent
-// 15-min sliver to a handful of points) returns ONLY the raw 900s rows for the
-// window, UN-decimated — 15-min data is inherently recent/bounded (NRT, ~days), so
-// serving it raw is cheap and avoids the spurious sparsity the time-bucket
-// downsampler caused over a wide range. `'1h'` is the symmetric hourly path: it
-// RECONCILES the raw rows to one value per hour (4 complete 15-min slots win, else
-// the API hourly row) and THEN downsamples — the order matters, because doing it
-// the other way (downsample the mixed feed, then reconcile on the client) silently
-// drops every downsampled lone-15-min slot via reconcile's "partial 15-min, no
-// hourly → skip" rule, capping the 1h line at the moment 15-min data begins.
-export type IntervalGrain = 'all' | '15m' | '1h';
-
-// Parse the `?grain=` param. An exact `'15m'` selects the raw-15-min path; `'1h'`
-// selects the reconcile-then-downsample hourly path; anything else (absent,
-// garbage) falls back to the default 'all' (all grains, downsampled). PURE.
-export function parseGrain(raw: string | null): IntervalGrain {
-  if (raw === '15m') return '15m';
-  if (raw === '1h') return '1h';
-  return 'all';
-}
-
 // WS8 OVERSCAN: an EXPLICIT bucket width (seconds) the caller can request so an
 // OVERSCAN fetch is aggregated at the VIEW's grain, not the (wider) overscan
 // span's grain. Background: WS8 preloads a superset wider than the visible window
@@ -134,7 +105,6 @@ export type IntervalWindow =
 export function parseIntervalQuery(params: URLSearchParams): {
   fuelType: 'ELECTRIC' | 'GAS';
   window: IntervalWindow;
-  grain: IntervalGrain;
   // WS8: an EXPLICIT, ladder-validated bucket width (seconds), or null when the
   // caller didn't request one (server picks the bucket — the pre-WS8 default). The
   // overscan client passes the VIEW-span bucket so the wider superset is aggregated
@@ -142,7 +112,6 @@ export function parseIntervalQuery(params: URLSearchParams): {
   bucket: number | null;
 } {
   const fuelType = parseFuel(params.get('fuel'));
-  const grain = parseGrain(params.get('grain'));
   const bucket = parseBucket(params.get('bucket'));
   let from = parseDate(params.get('from'), false);
   let to = parseDate(params.get('to'), true);
@@ -154,7 +123,7 @@ export function parseIntervalQuery(params: URLSearchParams): {
   const window: IntervalWindow = hasWindow
     ? { from: from ?? undefined, to: to ?? undefined }
     : { sinceDays: parseSinceDays(params.get('sinceDays')) };
-  return { fuelType, window, grain, bucket };
+  return { fuelType, window, bucket };
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;

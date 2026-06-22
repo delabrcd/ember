@@ -10,9 +10,7 @@
     "scrape": "tsx src/lib/ngrid/cli.ts",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prisma:generate": "prisma generate",
-    "prisma:migrate": "prisma migrate deploy",
-    "prisma:dev": "prisma migrate dev"
+    "prisma:generate": "prisma generate"
   },
   "dependencies": {
     "@prisma/client": "5.22.0",

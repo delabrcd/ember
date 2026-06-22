@@ -15,4 +15,3 @@ npm-debug.log*
 
 # agent worktrees / local tooling
 .claude/
-app/package-lock.json

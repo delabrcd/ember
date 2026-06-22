@@ -17,9 +17,9 @@
 //   • `mergePlacements(...)` — the migration safety net: a saved blob is repaired
 //     against a freshly generated default (unknown widgets dropped, newly-added
 //     widgets appended) so a round-trip never loses or corrupts placements.
-//   • `computeFitRowHeight(...)` — the runtime no-scroll fit math (RFC §3.3): it
-//     derives the grid rowHeight from the measured chrome so the page fills the
-//     viewport without scrolling.
+//   • `computePageFit(...)` — the runtime no-scroll fit math (RFC §3.3): it derives
+//     the grid rowHeight (clamped to MIN_ROW_HEIGHT) from the measured band so a
+//     page fills the viewport without scrolling.
 
 // The responsive breakpoints, widest → narrowest, mirroring RGL's keys. We use
 // four (RFC §3.3: "lg ≥1280 / md / sm / xs"):
@@ -192,7 +192,7 @@ function withMins(p: Placement, mins: WidgetMins | undefined): Placement {
 //   • xs (2 col): stat cards 2-up (w=1 each), charts + panels full-width (w=2),
 //     order stats → charts → panels, mobile scrolls (issue #110).
 //
-// Heights are in grid rows; the component's runtime rowHeight (computeFitRowHeight
+// Heights are in grid rows; the component's runtime rowHeight (computePageFit
 // at lg, a fixed rowHeight below) turns rows into pixels. Stat cards are short
 // (1 row); charts are tall (CHART_ROWS); the bills rail spans the chart block.
 
@@ -725,29 +725,6 @@ export function placementsEqual(a: Placements, b: Placements): boolean {
 // just scroll a little instead, which is acceptable degradation). PURE —
 // unit-tested.
 export const MIN_ROW_HEIGHT = 24;
-
-export function computeFitRowHeight(opts: {
-  viewportHeight: number;
-  measuredChrome: number;
-  rows: number;
-  marginY: number;
-}): number {
-  const { viewportHeight, measuredChrome, marginY } = opts;
-  const rows = Math.max(1, Math.floor(opts.rows));
-  const available = viewportHeight - measuredChrome;
-  const usable = available - marginY * (rows + 1);
-  const rh = usable / rows;
-  return Math.max(MIN_ROW_HEIGHT, rh);
-}
-
-// The maximum `y + h` across a breakpoint's placements = the row count the grid
-// actually occupies. The fit math uses this (not the default constant) once a
-// user has customized, so the no-scroll target tracks the real layout. Returns
-// at least 1 so a degenerate/empty layout still divides safely. PURE.
-export function placementRows(placements: Placement[] | undefined): number {
-  if (!placements || placements.length === 0) return 1;
-  return Math.max(1, ...placements.map((p) => p.y + p.h));
-}
 
 // Do two boxes (x/y/w/h cells) overlap on the grid? Used to find a collision-free
 // drop slot for a newly-added widget. Half-open intervals — tiles that merely

@@ -35,8 +35,9 @@ export const runtime = 'nodejs';
 //                          that don't pass from/to.
 //   ?accountId=<id>      — scopes to that account (the shared resolveRequestAccount
 //                          dance); omitted = the default account, bad id = 400.
-//   ?grain=…             — IGNORED (back-compat: older widget builds sent it; the
-//                          server now picks the bucket itself). Harmless if present.
+//   ?grain=…             — IGNORED and no longer parsed (back-compat: older widget
+//                          builds sent it; the server now picks the bucket itself).
+//                          Harmless if present.
 //   ?bucket=<secs>       — WS8 OVERSCAN (optional): an EXPLICIT bucket width (one of
 //                          the chooseBucket ladder widths) to aggregate this [from,to]
 //                          at, SKIPPING the span→bucket choice. The overscan client
