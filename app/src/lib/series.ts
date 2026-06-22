@@ -7,7 +7,11 @@ import { ymAddMonths, ymLabel } from './ym';
 export interface UsageInput { periodYearMonth: number; usageType: string; quantity: number }
 export interface CostInput { periodYearMonth: number; fuelType: string; kind: string; amount: number }
 export interface WeatherInput { ym: number; avgTemperature: number }
-export interface BillInput { ym: number; totalDueAmount: number | null; days?: number | null }
+// `currentCharges` is the period's energy cost parsed from the bill PDF — the
+// canonical analysis figure (standards §1). It is NEVER the API `totalDueAmount`
+// (the statement Amount Due, which can fold in a carried-over balance); the
+// caller (queries.ts) is responsible for sourcing it from `currentCharges`.
+export interface BillInput { ym: number; currentCharges: number | null; days?: number | null }
 // Degree-days already summed (per bill period) by the caller, keyed to the same
 // `ym` the rest of the pipeline uses (ymOf(statementDate)).
 export interface DegreeDayInput { ym: number; hdd: number; cdd: number }
@@ -58,7 +62,7 @@ export function deriveMonthlySeries(input: SeriesInput): MonthRow[] {
   for (const w of input.weather) get(w.ym).avgTemp = w.avgTemperature;
   for (const b of input.bills) {
     const r = get(b.ym);
-    if (b.totalDueAmount != null) r.billTotal = b.totalDueAmount;
+    if (b.currentCharges != null) r.billTotal = b.currentCharges;
     if (b.days != null) r.days = b.days;
   }
   for (const d of input.degreeDays ?? []) {

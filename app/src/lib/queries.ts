@@ -29,7 +29,7 @@ import { ymAddMonths } from '@/lib/ym';
 import { seasonNormalsByMonth, nextBillWindowDegreeDays } from '@/lib/weather/expectedDegreeDaysSync';
 import { shapeAccount, type AccountSummary } from '@/lib/accountSwitcher';
 import { ymFromDate as ymOf, isoDate as ymd } from '@/lib/ym';
-import type { Bill } from '@prisma/client';
+import type { Account, Bill } from '@prisma/client';
 
 // First/last day of the calendar month a statement falls in (UTC), used as the
 // degree-day window fallback when a bill is missing periodFrom/periodTo.
@@ -54,7 +54,12 @@ function shapeBill(b: Bill) {
     statementDate: ymd(b.statementDate),
     periodFrom: b.periodFrom ? ymd(b.periodFrom) : null,
     periodTo: b.periodTo ? ymd(b.periodTo) : null,
-    totalDueAmount: b.currentCharges ?? b.totalDueAmount, // period energy charges
+    // Period energy charges = the PDF's currentCharges (standards §1, the
+    // canonical analysis figure). The `?? b.totalDueAmount` fallback only covers a
+    // bill whose PDF hasn't been parsed yet (NG lags the PDF a few days). Value
+    // preserved AS-IS for byte-identical output; whether to keep that fallback at
+    // all is a separate semantic decision (see issue #153) — flagged, not changed.
+    currentCharges: b.currentCharges ?? b.totalDueAmount,
     amountDue: b.totalDueAmount, // statement amount due (with any carryover)
     hasPdf: !!b.pdfPath,
   };
@@ -103,13 +108,27 @@ export async function resolveRequestAccount(
   return (await accountExists(id)) ? { id } : 'invalid';
 }
 
-export async function getMonthlySeries(accountId: number): Promise<MonthRow[]> {
-  const account = await prisma.account.findUnique({ where: { id: accountId } });
+// Optional pre-fetched rows so a caller that already loaded the account and its
+// bills (getOverview) can hand them in and avoid re-querying them (issue #154 —
+// otherwise one /api/overview hit runs account.findUnique + bill.findMany twice).
+// The series is order-independent of the bills (deriveMonthlySeries aggregates by
+// ym into a Map and sorts at the end; the per-bill maps are pure), so a caller may
+// pass bills in any order (e.g. statementDate desc) and get a byte-identical series.
+export interface SeriesPrefetch {
+  account: Account | null;
+  bills: Bill[];
+}
+
+export async function getMonthlySeries(
+  accountId: number,
+  prefetched?: SeriesPrefetch
+): Promise<MonthRow[]> {
+  const account = prefetched ? prefetched.account : await prisma.account.findUnique({ where: { id: accountId } });
   const [usages, costs, weather, bills, daily, baseSetting, gridFactorSetting] = await Promise.all([
     prisma.usage.findMany({ where: { accountId } }),
     prisma.cost.findMany({ where: { accountId } }),
     account?.region ? prisma.weather.findMany({ where: { region: account.region } }) : Promise.resolve([]),
-    prisma.bill.findMany({ where: { accountId } }),
+    prefetched ? Promise.resolve(prefetched.bills) : prisma.bill.findMany({ where: { accountId } }),
     prisma.weatherDaily.findMany({ where: { accountId }, orderBy: { date: 'asc' } }),
     getSetting('degreeDayBaseF'),
     getSetting('gridEmissionFactor'),
@@ -156,7 +175,16 @@ export async function getMonthlySeries(accountId: number): Promise<MonthRow[]> {
     // falling back to the API amount due only if a PDF wasn't parsed.
     bills: bills.map((b) => ({
       ym: ymOf(b.statementDate),
-      totalDueAmount: b.currentCharges ?? b.totalDueAmount,
+      // Canonical period energy charge = the PDF's currentCharges (standards §1).
+      // The `?? b.totalDueAmount` fallback only applies to a bill whose PDF hasn't
+      // been parsed yet (currentCharges still null); NG lags the PDF a few days, so
+      // a just-arrived bill briefly has no parsed value. It is preserved AS-IS to
+      // keep the produced number (and /api/verify) byte-identical with prior
+      // releases. NOTE TO LEAD: whether to keep falling back to the (forbidden for
+      // analysis) API totalDueAmount at all is a separate semantic decision — see
+      // issue #153 ("Decide explicitly what the null-currentCharges fallback should
+      // be"); that is intentionally NOT changed here.
+      currentCharges: b.currentCharges ?? b.totalDueAmount,
       // Bill period length in days (inclusive); null when a period bound is
       // missing. Feeds the per-component fixed-$/day rate model (issue #67).
       days: billDays(b.periodFrom, b.periodTo),
@@ -450,17 +478,77 @@ async function computeSeasonProjection(
   });
 }
 
+// Lightweight account metadata for the Settings page (issue #154). /api/settings
+// needs only these ~5 scalars (account, billCount, firstStatement, latestBill,
+// schedule) but used to call getOverview — paying for the full Kalman next-bill
+// estimate, 12-month seasonal projection, emissions, anomaly detection, budget
+// projection, and the whole monthly-series build. This fetches ONLY what Settings
+// renders, with a handful of cheap indexed queries (no series/prediction). The
+// returned shapes are byte-identical to the same-named getOverview fields, so the
+// /api/settings JSON is unchanged.
+export async function getAccountMeta(accountId: number) {
+  const [account, schedule, billCount, latestRow, firstRow] = await Promise.all([
+    prisma.account.findUnique({ where: { id: accountId } }),
+    prisma.scheduleState.findUnique({ where: { accountId } }),
+    prisma.bill.count({ where: { accountId } }),
+    prisma.bill.findFirst({ where: { accountId }, orderBy: { statementDate: 'desc' } }),
+    // Only the oldest statement date is needed for `firstStatement`.
+    prisma.bill.findFirst({
+      where: { accountId },
+      orderBy: { statementDate: 'asc' },
+      select: { statementDate: true },
+    }),
+  ]);
+  // Shape the latest bill the same way getOverview does (shapeBill → the 4-field
+  // subset), so the value (currentCharges-sourced) and JSON keys are identical.
+  const latest = latestRow ? shapeBill(latestRow) : null;
+  return {
+    account: account
+      ? {
+          accountNumber: account.accountNumber,
+          serviceAddress: account.serviceAddress,
+          region: account.region,
+          companyCode: account.companyCode,
+          fuelTypes: account.fuelTypes,
+        }
+      : null,
+    billCount,
+    latestBill: latest
+      ? {
+          statementDate: latest.statementDate,
+          currentCharges: latest.currentCharges,
+          periodFrom: latest.periodFrom,
+          periodTo: latest.periodTo,
+        }
+      : null,
+    firstStatement: firstRow ? ymd(firstRow.statementDate) : null,
+    schedule: schedule
+      ? {
+          predictedNextBillDate: schedule.predictedNextBillDate ? ymd(schedule.predictedNextBillDate) : null,
+          nextCheckAt: schedule.nextCheckAt?.toISOString() ?? null,
+          lastCheckedAt: schedule.lastCheckedAt?.toISOString() ?? null,
+        }
+      : null,
+  };
+}
+
 export async function getOverview(accountId: number) {
-  const [account, bills, schedule, lastRun, series] = await Promise.all([
+  // Fetch the account + bills ONCE here and hand them to getMonthlySeries
+  // (issue #154): getMonthlySeries used to re-run the same account.findUnique +
+  // bill.findMany, so a single /api/overview hit fired each query twice. The
+  // series is order-independent of the bills (see getMonthlySeries), so reusing the
+  // statementDate-desc list we already need for lifetimeSpend/latestBill yields a
+  // byte-identical series.
+  const [account, bills, schedule, lastRun] = await Promise.all([
     prisma.account.findUnique({ where: { id: accountId } }),
     prisma.bill.findMany({ where: { accountId }, orderBy: { statementDate: 'desc' } }),
     prisma.scheduleState.findUnique({ where: { accountId } }),
     prisma.scrapeRun.findFirst({ orderBy: { startedAt: 'desc' } }),
-    getMonthlySeries(accountId),
   ]);
+  const series = await getMonthlySeries(accountId, { account, bills });
   // Lifetime energy spend = sum of each period's actual charges (not statement
   // amounts due, which would double-count any carried-over balances).
-  const lifetimeSpend = bills.reduce((s, b) => s + (shapeBill(b).totalDueAmount ?? 0), 0);
+  const lifetimeSpend = bills.reduce((s, b) => s + (shapeBill(b).currentCharges ?? 0), 0);
   // Estimated cost of the next bill. Prefer the seasonal Kalman-filter model
   // (issue #67): weather-normal usage × per-component Kalman-filtered
   // fixed+variable rates, which roughly halves the calendar method's error on
@@ -559,7 +647,7 @@ export async function getOverview(accountId: number) {
     latestBill: latest
       ? {
           statementDate: latest.statementDate,
-          totalDueAmount: latest.totalDueAmount,
+          currentCharges: latest.currentCharges,
           periodFrom: latest.periodFrom,
           periodTo: latest.periodTo,
         }

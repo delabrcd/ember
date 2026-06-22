@@ -63,27 +63,28 @@ export function seriesToCsv(rows: MonthRow[]): string {
   return toCsv(headers, body);
 }
 
-// Shape of the bill rows getBills() hands back. `currentCharges` is already the
-// period energy charges (currentCharges ?? totalDueAmount); `amountDue` is the
-// statement amount due (with any carryover).
+// Shape of the bill rows getBills() hands back. `currentCharges` is the period
+// energy charges (the PDF's currentCharges, with the API amount-due fallback
+// applied upstream in shapeBill); `amountDue` is the statement amount due (with
+// any carryover).
 export interface BillCsvRow {
   statementDate: string;
   periodFrom: string | null;
   periodTo: string | null;
-  totalDueAmount: number | null; // labelled currentCharges in the CSV
+  currentCharges: number | null; // emitted under the `currentCharges` CSV header
   amountDue: number | null;
   hasPdf: boolean;
 }
 
 // Bills list → CSV. currentCharges is the bills' period energy cost (the
-// totalDueAmount field getBills maps to currentCharges ?? totalDueAmount).
+// currentCharges field getBills maps from the PDF's current charges).
 export function billsToCsv(bills: BillCsvRow[]): string {
   const headers = ['statementDate', 'periodFrom', 'periodTo', 'currentCharges', 'amountDue', 'hasPdf'];
   const body: Cell[][] = bills.map((b) => [
     b.statementDate,
     b.periodFrom,
     b.periodTo,
-    b.totalDueAmount,
+    b.currentCharges,
     b.amountDue,
     String(b.hasPdf),
   ]);

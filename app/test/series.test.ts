@@ -15,7 +15,7 @@ describe('deriveMonthlySeries (hand-calculated)', () => {
       { periodYearMonth: 202601, fuelType: 'GAS', kind: 'DELIVERY', amount: 30 },
     ],
     weather: [{ ym: 202601, avgTemperature: 25 }],
-    bills: [{ ym: 202601, totalDueAmount: 147.5 }],
+    bills: [{ ym: 202601, currentCharges: 147.5 }],
     // A 31-day Jan period worth of degree-days, summed by the caller.
     degreeDays: [{ ym: 202601, hdd: 1000, cdd: 250 }],
   });

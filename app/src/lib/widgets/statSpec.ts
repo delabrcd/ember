@@ -197,7 +197,7 @@ export const STAT_SPECS: StatSpec[] = [
     // Compact card: title + the amount only; the statement date moved to the ⓘ.
     select: ({ ov, currencyDecimals: dp }) => ({
       title: 'Latest bill',
-      value: usd(ov?.latestBill?.totalDueAmount, dp),
+      value: usd(ov?.latestBill?.currentCharges, dp),
       tooltip: { text: `Amount due on your latest statement, dated ${dateLabel(ov?.latestBill?.statementDate)}.`, accent: 'amber' },
     }),
   },
