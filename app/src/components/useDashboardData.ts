@@ -70,7 +70,7 @@ export interface Overview {
   // robust trailing baseline. `flags` is empty when nothing is anomalous (the
   // callout then renders nothing). Computed purely server-side (detectAnomalies).
   anomalies?: AnomalyResult | null;
-  latestBill?: { statementDate: string; totalDueAmount: number | null } | null;
+  latestBill?: { statementDate: string; currentCharges: number | null } | null;
   firstStatement?: string | null;
   schedule?: { predictedNextBillDate: string | null; nextCheckAt: string | null; lastCheckedAt: string | null } | null;
   lastRun?: { id: number; status: RunStatus; trigger: string; startedAt: string; finishedAt: string | null; message: string | null } | null;
@@ -80,7 +80,7 @@ export interface Bill {
   statementDate: string;
   periodFrom: string | null;
   periodTo: string | null;
-  totalDueAmount: number | null;
+  currentCharges: number | null;
   hasPdf: boolean;
 }
 

@@ -52,7 +52,7 @@ export function BillsPanel({ data }: { data: BillsPanelData }) {
                 <td className="py-1.5 pr-2 text-xs text-slate-400">
                   {b.periodFrom ? `${dateLabel(b.periodFrom)} – ${dateLabel(b.periodTo)}` : '—'}
                 </td>
-                <td className="py-1.5 pl-2 text-right text-slate-200">{usd(b.totalDueAmount, dp)}</td>
+                <td className="py-1.5 pl-2 text-right text-slate-200">{usd(b.currentCharges, dp)}</td>
                 <td className="py-1.5 pl-2 text-right">
                   {b.hasPdf ? (
                     <a className="text-amber-400 hover:text-amber-300" href={`/api/bills/${b.statementDate}/pdf`} target="_blank" rel="noreferrer">

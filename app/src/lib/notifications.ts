@@ -23,7 +23,7 @@ import { rate, num } from './format';
 // the full fetch shape and trivially testable.
 export interface NotificationsOverview {
   anomalies?: AnomalyResult | null;
-  latestBill?: { statementDate: string; totalDueAmount: number | null } | null;
+  latestBill?: { statementDate: string; currentCharges: number | null } | null;
 }
 
 export type NotificationKind = 'anomaly' | 'bill';
@@ -35,7 +35,7 @@ export type NotificationTone = 'warning' | 'info';
 // view has everything it needs straight off the notification.
 export interface NotificationBill {
   statementDate: string;
-  totalDueAmount: number | null;
+  currentCharges: number | null;
 }
 
 export interface Notification {
@@ -97,9 +97,9 @@ export function buildNotifications(
         key,
         kind: 'bill',
         tone: 'info',
-        message: `New bill: ${dollars(bill.totalDueAmount)}${mon ? ` (${mon})` : ''}`,
+        message: `New bill: ${dollars(bill.currentCharges)}${mon ? ` (${mon})` : ''}`,
         sortAt: Number(bill.statementDate.replace(/-/g, '')) || 0,
-        bill: { statementDate: bill.statementDate, totalDueAmount: bill.totalDueAmount },
+        bill: { statementDate: bill.statementDate, currentCharges: bill.currentCharges },
       });
     }
   }
@@ -145,7 +145,22 @@ export function buildNotifications(
 // account number). Structurally a subset of queries.ts' shapeBill output.
 export interface NotificationBillInput {
   statementDate: string;
-  totalDueAmount: number | null;
+  currentCharges: number | null; // period energy charge (getBills' shapeBill field)
+  periodFrom?: string | null;
+  periodTo?: string | null;
+  hasPdf?: boolean;
+}
+
+// The PERSISTED bill payload, as stored in the Notification.payload JSON column
+// and read back by NotificationsBell. Its dollar field is INTENTIONALLY still
+// keyed `totalDueAmount` (the value is currentCharges) — see deriveNotifications
+// for why renaming this persisted key would NOT be byte-identical on existing prod
+// rows (a separate migration decision, flagged to the lead in #153). Kept distinct
+// from the in-memory NotificationBillInput (which carries `currentCharges`) so the
+// divergence between the input shape and the persisted shape is explicit + typed.
+export interface NotificationBillPayload {
+  statementDate: string;
+  totalDueAmount: number | null; // persisted key; value = currentCharges
   periodFrom?: string | null;
   periodTo?: string | null;
   hasPdf?: boolean;
@@ -161,7 +176,7 @@ export interface NotificationRow {
   key: string;
   title: string;
   message: string;
-  payload: NotificationBillInput | AnomalyFlag;
+  payload: NotificationBillPayload | AnomalyFlag;
 }
 
 // Build the notification ROWS for an account from its full bill history and its
@@ -184,10 +199,17 @@ export function deriveNotifications(
       kind: 'bill',
       key: `bill:${b.statementDate}`,
       title: 'New bill',
-      message: `New bill: ${dollars(b.totalDueAmount)}${mon ? ` (${mon})` : ''}`,
+      message: `New bill: ${dollars(b.currentCharges)}${mon ? ` (${mon})` : ''}`,
+      // PERSISTED PAYLOAD KEY: this goes into the Notification.payload JSON column
+      // and is read back by NotificationsBell's BillPayload. It is INTENTIONALLY
+      // still keyed `totalDueAmount` (the value is currentCharges) — renaming the
+      // key would NOT be byte-identical for existing prod rows: syncNotifications
+      // upserts with skipDuplicates so old `bill:{date}` rows are never rewritten,
+      // and the bell reads the persisted key. Renaming this persisted key is a
+      // separate migration decision — flagged to the lead, not done here (#153).
       payload: {
         statementDate: b.statementDate,
-        totalDueAmount: b.totalDueAmount,
+        totalDueAmount: b.currentCharges,
         periodFrom: b.periodFrom ?? null,
         periodTo: b.periodTo ?? null,
         hasPdf: b.hasPdf ?? false,

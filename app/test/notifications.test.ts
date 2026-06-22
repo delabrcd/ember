@@ -28,7 +28,7 @@ const fullOverview: NotificationsOverview = {
     mkFlag({ ym: 202406, fuel: 'elec', metric: 'usage', message: 'electric usage ~30% above weather-normalized expectation' }),
     mkFlag({ ym: 202406, fuel: 'gas', metric: 'rate', direction: 'above', message: 'gas rate ~12% above recent rate band' }),
   ]),
-  latestBill: { statementDate: '2026-06-03', totalDueAmount: 192.24 },
+  latestBill: { statementDate: '2026-06-03', currentCharges: 192.24 },
 };
 
 describe('buildNotifications', () => {
@@ -80,7 +80,7 @@ describe('buildNotifications', () => {
   // one (new-bill) item, so the bell still shows a badge of 1.
   it('shows just the new-bill item when there are no anomalies', () => {
     const items = buildNotifications(
-      { anomalies: mkAnomalies([]), latestBill: { statementDate: '2026-06-03', totalDueAmount: 88.5 } },
+      { anomalies: mkAnomalies([]), latestBill: { statementDate: '2026-06-03', currentCharges: 88.5 } },
       []
     );
     expect(items).toHaveLength(1);
@@ -96,7 +96,7 @@ describe('buildNotifications', () => {
 
   // A null amount still renders a (dash) bill item rather than crashing.
   it('handles a null bill amount', () => {
-    const items = buildNotifications({ latestBill: { statementDate: '2026-01-15', totalDueAmount: null } }, []);
+    const items = buildNotifications({ latestBill: { statementDate: '2026-01-15', currentCharges: null } }, []);
     expect(items).toHaveLength(1);
     expect(items[0].message).toBe('New bill: — (Jan)');
   });
@@ -106,7 +106,7 @@ describe('buildNotifications', () => {
   it('attaches source data for the detail view', () => {
     const items = buildNotifications(fullOverview, []);
     const bill = items.find((n) => n.kind === 'bill')!;
-    expect(bill.bill).toEqual({ statementDate: '2026-06-03', totalDueAmount: 192.24 });
+    expect(bill.bill).toEqual({ statementDate: '2026-06-03', currentCharges: 192.24 });
     expect(bill.flag).toBeUndefined();
     const anomaly = items.find((n) => n.key === 'anomaly:202406:elec:usage')!;
     expect(anomaly.flag?.fuel).toBe('elec');
@@ -119,8 +119,8 @@ describe('deriveNotifications', () => {
   // N bills + M flags => N+M rows, bills first, with the stable keys + payloads.
   it('produces one row per bill plus one per flag with stable keys', () => {
     const bills = [
-      { statementDate: '2026-06-03', totalDueAmount: 192.24, periodFrom: '2026-05-01', periodTo: '2026-05-31', hasPdf: true },
-      { statementDate: '2026-05-04', totalDueAmount: 88.5, periodFrom: '2026-04-01', periodTo: '2026-04-30', hasPdf: false },
+      { statementDate: '2026-06-03', currentCharges: 192.24, periodFrom: '2026-05-01', periodTo: '2026-05-31', hasPdf: true },
+      { statementDate: '2026-05-04', currentCharges: 88.5, periodFrom: '2026-04-01', periodTo: '2026-04-30', hasPdf: false },
     ];
     const flags = [
       mkFlag({ ym: 202406, fuel: 'elec', metric: 'usage', message: 'electric usage ~30% above weather-normalized expectation' }),
@@ -144,7 +144,7 @@ describe('deriveNotifications', () => {
   // hasPdf) and a humanized title.
   it('carries the bill summary in the payload', () => {
     const rows = deriveNotifications(
-      [{ statementDate: '2026-06-03', totalDueAmount: 192.24, periodFrom: '2026-05-01', periodTo: '2026-05-31', hasPdf: true }],
+      [{ statementDate: '2026-06-03', currentCharges: 192.24, periodFrom: '2026-05-01', periodTo: '2026-05-31', hasPdf: true }],
       [],
       1
     );
@@ -179,7 +179,7 @@ describe('deriveNotifications', () => {
 
   // Defaults: missing period/hasPdf become null/false; a null amount renders a dash.
   it('defaults missing bill fields and handles a null amount', () => {
-    const rows = deriveNotifications([{ statementDate: '2026-01-15', totalDueAmount: null }], [], null);
+    const rows = deriveNotifications([{ statementDate: '2026-01-15', currentCharges: null }], [], null);
     expect(rows).toHaveLength(1);
     expect(rows[0].accountId).toBeNull();
     expect(rows[0].message).toBe('New bill: — (Jan)');

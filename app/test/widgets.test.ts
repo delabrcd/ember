@@ -238,7 +238,7 @@ describe('StatSpec selectors — simple cards', () => {
   it('latest bill: amount only, statement date in the tooltip', () => {
     const spec = STAT_SPEC_BY_ID.latestBill;
     if (spec.kind !== 'simple') throw new Error('expected simple');
-    const m = spec.select(mkData({ latestBill: { statementDate: '2026-05-01', totalDueAmount: 192.5 } }));
+    const m = spec.select(mkData({ latestBill: { statementDate: '2026-05-01', currentCharges: 192.5 } }));
     expect(m.title).toBe('Latest bill');
     expect(m.value).toBe('$192.50');
     expect(m.tooltip.accent).toBe('amber');

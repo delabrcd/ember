@@ -108,7 +108,7 @@ describe('billsToCsv (hand-calculated)', () => {
       statementDate: '2026-01-15',
       periodFrom: '2025-12-14',
       periodTo: '2026-01-13',
-      totalDueAmount: 205.37, // currentCharges (period energy cost)
+      currentCharges: 205.37, // currentCharges (period energy cost)
       amountDue: 207.46, // statement amount due, with carryover
       hasPdf: true,
     },
@@ -116,7 +116,7 @@ describe('billsToCsv (hand-calculated)', () => {
       statementDate: '2025-12-15',
       periodFrom: null,
       periodTo: null,
-      totalDueAmount: null,
+      currentCharges: null,
       amountDue: null,
       hasPdf: false,
     },

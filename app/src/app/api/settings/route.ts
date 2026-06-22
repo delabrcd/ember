@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getDefaultAccount, getOverview } from '@/lib/queries';
+import { getDefaultAccount, getAccountMeta } from '@/lib/queries';
 import { getNotifyStatus, getSetting, isSchedulerEnabled, setSetting } from '@/lib/settings';
 import { resolveGridFactor } from '@/lib/emissions';
 
@@ -8,7 +8,10 @@ export const runtime = 'nodejs';
 
 export async function GET() {
   const acct = await getDefaultAccount();
-  const overview = acct ? await getOverview(acct.id) : null;
+  // Settings needs only ~5 scalars (schedule/account/billCount/firstStatement/
+  // latestBill) — getAccountMeta fetches exactly those (issue #154), avoiding the
+  // full series/Kalman/projection/anomaly/budget pipeline getOverview would run.
+  const overview = acct ? await getAccountMeta(acct.id) : null;
   // Carbon estimate grid factor (issue #49): the raw override the user has set
   // (empty when unset) plus the effective factor actually in use, so the Settings
   // UI can show what the estimate currently runs on (region default vs override).

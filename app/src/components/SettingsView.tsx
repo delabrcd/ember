@@ -18,7 +18,7 @@ interface ServerSettings {
   account: { accountNumber: string; serviceAddress?: string | null; region?: string | null; companyCode?: string | null; fuelTypes?: string[] } | null;
   billCount: number;
   firstStatement: string | null;
-  latestBill: { statementDate: string; totalDueAmount: number | null } | null;
+  latestBill: { statementDate: string; currentCharges: number | null } | null;
   // Carbon-footprint estimate (issue #49). The raw grid-factor override (empty
   // when unset) and the effective factor actually used (region default or override).
   gridEmissionFactor?: string;
