@@ -64,13 +64,27 @@ export async function acquirePortalSession(
   log: ProgressFn
 ): Promise<PortalSession> {
   const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
-  const ctx = await browser.newContext(contextOptions(loginId));
-  const page = await ctx.newPage();
-  await ensureLoggedIn(page, log, loginId);
-  // The link the portal landed on after login is our default/first account —
-  // used as the ?accountLink= on the recapture nav so the SPA loads a real
-  // account and fires its gql requests.
-  const defaultLink = new URL(page.url()).searchParams.get('accountLink') || undefined;
+  // Guard every step after launch. If newContext/newPage/ensureLoggedIn throws
+  // (a flaky login, an MFA wall, a nav timeout), the session object that owns
+  // close() is never returned, so this just-launched browser would be orphaned —
+  // one leaked headless Chrome per failed acquire. The scheduled path acquires
+  // every tick, so a persistently failing login slowly piles up zombie chrome
+  // processes (it's how a multi-GiB leak accumulated in prod).
+  let ctx: BrowserContext;
+  let page: Page;
+  let defaultLink: string | undefined;
+  try {
+    ctx = await browser.newContext(contextOptions(loginId));
+    page = await ctx.newPage();
+    await ensureLoggedIn(page, log, loginId);
+    // The link the portal landed on after login is our default/first account —
+    // used as the ?accountLink= on the recapture nav so the SPA loads a real
+    // account and fires its gql requests.
+    defaultLink = new URL(page.url()).searchParams.get('accountLink') || undefined;
+  } catch (err) {
+    await browser.close().catch(() => {});
+    throw err;
+  }
 
   const session: PortalSession = {
     loginId,
