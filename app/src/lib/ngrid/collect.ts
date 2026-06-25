@@ -14,7 +14,7 @@
 import fs from 'fs';
 import path from 'path';
 import { chromium } from 'playwright';
-import type { Page, Route } from 'playwright';
+import type { BrowserContext, Page, Route } from 'playwright';
 import { contextOptions, ensureLoggedIn, dataDir, saveState } from './auth';
 import { extractAccountLinks, buildNavUrl } from './accounts';
 import { summarizeGqlRequest, summarizeGqlResponse } from './intervalDebug';
@@ -85,10 +85,15 @@ export async function collect(
   const ownBrowser = opts.session
     ? null
     : await chromium.launch({ headless: true, args: ['--no-sandbox'] });
-  const ctx = opts.session ? opts.session.ctx : await ownBrowser!.newContext(contextOptions(opts.loginId));
-  const page = opts.session ? opts.session.page : await ctx.newPage();
+  // Create the context/page INSIDE the try so a throw here still reaches the
+  // finally that closes ownBrowser — otherwise a launched-but-unused browser
+  // leaks (same bug class as acquirePortalSession's guard).
+  let ctx: BrowserContext;
+  let page: Page;
 
   try {
+    ctx = opts.session ? opts.session.ctx : await ownBrowser!.newContext(contextOptions(opts.loginId));
+    page = opts.session ? opts.session.page : await ctx.newPage();
     if (!opts.session) await ensureLoggedIn(page, log, opts.loginId);
     // The link the portal landed on after login is our default/first account and
     // the fallback if discovery turns up nothing.
